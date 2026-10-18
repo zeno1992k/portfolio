@@ -1,0 +1,76 @@
+---
+title: '17. UI 컴포넌트 라이브러리 패키지 추출'
+description: 'BookCard 등 재사용 컴포넌트를 packages/ui 패키지로 분리하고 apps/web이 이를 참조하도록 바꿉니다'
+---
+
+루트 `tsc -b`를 실행하면 `shared-types`가 먼저 빌드되고 그다음 `web`이 빌드되는 순서가 project references로 관리되고 있습니다.
+
+## 개념 정리
+
+### 무엇을 패키지로 뽑을 것인가
+
+`packages/shared-types`는 "타입만" 담아 기준이 단순했습니다. `BookCard`, `StatusBadge`, `Modal`, `DataTable`은 모두 **props로 받은 데이터만 그리는 프레젠테이션 컴포넌트**입니다.
+
+| 컴포넌트 | 데이터 소스 | 분리 대상 |
+|---|---|---|
+| `BookCard` | props로 받은 `Book` 하나 | 예 |
+| `StatusBadge` | props로 받은 상태 값 | 예 |
+| `Modal` | props로 받은 열림 여부와 자식 요소 | 예 |
+| `DataTable` | props로 받은 배열과 컬럼 정의(제네릭) | 예 |
+| `BookListPage` | `useBooks` 훅으로 서버에서 직접 조회 | 아니오 |
+
+### package.json의 main·types 필드
+
+패키지를 다른 패키지에서 `import`할 때, Node.js와 TypeScript는 각각 `main`과 `types`(또는 `typings`) 필드를 보고 실제 진입 파일을 찾습니다. 아직 tsdown을 붙이기 전인 이번 편에서는 `tsc -b`가 `src`를 컴파일해 만든 `dist/index.js`, `dist/index.d.ts`를 그대로 가리킵니다.
+
+```json
+{
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts"
+}
+```
+
+이 방식의 한계는 `packages/ui`의 코드를 고칠 때마다 `dist`를 다시 빌드해야 `apps/web`에 반영된다는 점입니다. 18편에서 tsdown의 개발용 참조 기능으로 이 부분을 개선합니다.
+
+### project references에 패키지 추가하기
+
+16편에서 만든 루트 `tsconfig.json`의 `references` 배열에 `packages/ui`를 추가하고, `packages/ui`는 타입만 참조하는 `shared-types`를 다시 참조합니다. `apps/web`은 `shared-types`와 `ui`를 모두 참조합니다.
+
+## 자주 하는 실수
+
+| 증상 | 원인 | 고치는 법 |
+|---|---|---|
+| import 에러(@bookshelf/ui를 찾을 수 없음) | `pnpm install`을 다시 안 돌려 워크스페이스 링크가 안 생김 | 새 패키지를 추가한 뒤에는 항상 `pnpm install` 재실행 |
+| 화면은 그대로인데 타입만 오류남 | `packages/ui`를 고치고 `dist`를 다시 빌드하지 않음 | `pnpm --filter @bookshelf/ui build`로 dist 갱신 |
+| 훅 관련 런타임 오류(Invalid hook call) | `react`를 `peerDependencies`가 아닌 `dependencies`에 둠 | React는 항상 `peerDependencies`로 선언 |
+
+## 확인 문제
+
+<Quiz
+  questionNumber={1}
+  question={"BookListPage 같은 컨테이너 컴포넌트를 packages/ui로 옮기지 않는 이유는"}
+  options={["코드가 너무 길어서","TanStack Query 훅과 Zustand 스토어 등 앱의 데이터 흐름에 묶여 있어서","JSX 문법을 쓰지 않아서","테스트 코드가 없어서"]}
+  correctAnswer={2}
+  explanation={"프레젠테이션 컴포넌트는 props만으로 그려져 재사용이 쉽지만, 컨테이너 컴포넌트는 앱의 데이터 소스에 직접 의존해 라이브러리로 분리할 이유가 적습니다."}
+/>
+
+<Quiz
+  questionNumber={2}
+  question={"packages/ui의 package.json에서 react를 peerDependencies에 두는 이유는"}
+  options={["설치 속도를 높이기 위해서","라이브러리가 자기만의 React 사본을 번들에 포함해 앱과 충돌하는 것을 막기 위해서","react-dom을 자동으로 삭제하기 위해서","devDependencies보다 우선순위가 높아서"]}
+  correctAnswer={2}
+  explanation={"컴포넌트 라이브러리는 이를 사용하는 앱이 이미 설치한 React 인스턴스를 빌려 써야 훅 관련 오류 없이 동작합니다."}
+/>
+
+<Quiz
+  questionNumber={3}
+  question={"루트 tsconfig의 references 배열에 packages/ui 경로를 추가하는 이유는"}
+  options={["런타임 성능을 높이기 위해서","tsc -b가 shared-types, ui, web의 빌드 순서를 의존 관계에 맞게 관리하도록 하기 위해서","ESLint 설정을 공유하기 위해서","vite dev 서버 포트를 지정하기 위해서"]}
+  correctAnswer={2}
+  explanation={"project references에 새 패키지를 등록해야 tsc -b가 그 패키지를 빌드 그래프에 포함시켜 의존 순서대로 빌드합니다."}
+/>
+
+## 참고 자료
+
+- [TypeScript Handbook — Project References](https://www.typescriptlang.org/docs/handbook/project-references.html)
+- [pnpm — Workspace](https://pnpm.io/workspaces)

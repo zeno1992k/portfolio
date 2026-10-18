@@ -1,0 +1,373 @@
+---
+title: '05. 프로파일링과 메모리 누수'
+description: '부하 테스트와 백분위 지연 읽기, 이벤트 루프 지연 측정, CPU 프로파일과 플레임그래프, V8 GC와 힙 한도, 힙 스냅샷 비교와 누수 패턴을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 느려진 서비스를 부하 테스트와 지연 백분위로 확인하고, CPU 프로파일과 힙 스냅샷으로 원인 코드와 누수 지점을 찾는 순서를 설명할 수 있습니다.
+</Callout>
+
+## autocannon 부하 테스트
+
+autocannon은 HTTP 서버에 동시 연결로 요청을 쏟아 처리량과 지연을 재는 Node.js 기반 부하 도구입니다. 성능 작업은 먼저 재고(04편), 고친 뒤 같은 조건으로 다시 재서 비교합니다.
+
+```bash
+npx autocannon -c 50 -d 20 http://localhost:3000/users
+```
+
+| 옵션 | 뜻 | 기본값 |
+|------|----|--------|
+| `-c` | 동시 연결 수 | 10 |
+| `-d` | 테스트 시간(초) | 10 |
+| `-p` | 연결당 파이프라인 요청 수 | 1 |
+| `-m` | HTTP 메서드 | GET |
+| `-b` | 요청 본문 | 없음 |
+| `-H` | 요청 헤더(`키=값`) | 없음 |
+| `-R` | 전체 초당 요청 수 상한 | 제한 없음 |
+| `-w` | 부하를 만드는 워커 스레드 수 | 사용 안 함 |
+
+- 결과는 표 세 개로 나옵니다. Latency 표는 2.5%, 50%, 97.5%, 99% 지점과 평균(Avg), 표준편차(Stdev), 최대(Max)를 보여 줍니다. 요청 수 표는 초당 요청 수(Req/Sec)와 초당 바이트(Bytes/Sec)를 보여 줍니다.
+- 기본 표에는 95% 열이 없고 97.5%와 99%가 있습니다. p95를 기준으로 삼는 팀은 이 점을 알고 비교해야 합니다.
+- 서버와 같은 컴퓨터에서 돌리면 도구가 CPU를 나눠 쓰므로 결과가 낮게 나옵니다. 운영과 같은 사양의 별도 머신에서 재야 비교에 쓸 수 있습니다.
+
+**흔한 실수:**
+
+- 연결 수를 하나로 두고 재는 것입니다. 동시 요청이 없으면 대기열이 생기지 않아 운영에서 나타나는 지연을 볼 수 없습니다.
+- 한 번만 재고 판단하는 것입니다. 첫 몇 초는 JIT 최적화 전이라 느리므로 같은 조건으로 여러 번 재서 흐름을 봅니다.
+
+## p95·p99 읽는 법
+
+p99는 응답을 빠른 순으로 줄 세웠을 때 99번째 위치의 지연입니다. 요청 100개 중 99개가 이 값 이하로 끝났고 1개는 더 느렸다는 뜻입니다. p50은 중앙값, p95는 95번째 위치입니다.
+
+| 지표 | 보는 것 |
+|------|---------|
+| 평균 | 전체 합. 느린 요청 몇 개가 묻힌다 |
+| p50 | 일반적인 사용자가 겪는 지연 |
+| p95·p99 | 느린 쪽 꼬리. 타임아웃과 불만이 생기는 구간 |
+| 최대 | 단일 최악. 한 번의 GC나 블로킹도 반영된다 |
+
+- 평균 20ms, p99 900ms인 서비스는 평균만 보면 건강해 보입니다. 지연 목표(SLO)는 평균이 아니라 p95나 p99로 잡습니다.
+- 요청 하나가 내부에서 호출을 100번 하면, 호출마다 p99가 1초라고 할 때 하나라도 느린 요청의 비율은 약 63퍼센트입니다. 계산은 `1 - 0.99^100`입니다. 호출이 많을수록 꼬리가 평균 경험이 됩니다.
+- 백분위는 평균낼 수 없습니다. 서버 두 대의 p99를 평균해도 전체 p99가 아닙니다. 요청 원본이나 히스토그램을 합쳐서 계산합니다.
+- p99 급등의 흔한 원인은 이벤트 루프 블로킹, GC 정지, 커넥션 풀 대기입니다. 어느 쪽인지는 다음 절들의 도구로 가릅니다.
+
+**흔한 실수:** 평균 지연만 대시보드에 올리는 것입니다. 부하가 늘면 평균은 완만하게 오르지만 p99는 먼저 무너집니다.
+
+## monitorEventLoopDelay
+
+`perf_hooks.monitorEventLoopDelay()`는 이벤트 루프가 얼마나 늦게 돌아오는지를 히스토그램으로 기록합니다. 이벤트 루프가 JavaScript 코드 하나에 막히면 이 값이 커집니다(자세히는 04편).
+
+```js
+import { monitorEventLoopDelay } from 'node:perf_hooks'
+
+const h = monitorEventLoopDelay({ resolution: 10 })
+h.enable()
+setInterval(() => {
+  const ms = (ns) => Math.round(ns / 1e6)
+  console.log(ms(h.percentile(99)), ms(h.max)) // 예: 12 14
+  h.reset()
+}, 10_000).unref()
+```
+
+- 값의 단위는 나노초입니다. `min`, `max`, `mean`, `stddev`, `percentile(p)`, `percentiles`를 읽을 수 있습니다.
+- `resolution`은 표본을 채취하는 간격(밀리초)으로 기본값은 10입니다. 한가한 프로세스에서도 값이 0이 아니라 이 간격 근처로 나옵니다. 직접 실험(Node.js 24, Windows)에서 막힘이 없을 때 p50이 16ms였습니다. 의미 있는 신호는 이 기준선보다 훨씬 큰 값입니다.
+- 막힘이 한 번 있었다면 평균은 낮아도 `max`에 그대로 남습니다. 직접 실험에서 200ms 동안 동기 루프를 돌게 한 뒤 `max`가 200ms대로 기록됐습니다.
+- `samplePerIteration: true`는 이벤트 루프 반복마다 한 번씩 표본을 잡는 방식입니다. Node.js 24는 v24.19.0, 26은 v26.5.0에서 추가됐고, 간격 방식과 결과를 직접 비교하면 안 된다고 문서에 적혀 있습니다.
+- 주기적으로 `reset()`해서 구간별 값을 보고, 값을 메트릭으로 내보내 알림 기준에 씁니다(자세히는 11편).
+
+`monitorEventLoopDelay`는 어떤 코드가 막았는지는 알려 주지 않습니다. 원인 코드는 CPU 프로파일로 찾습니다.
+
+## --cpu-prof와 플레임그래프
+
+`--cpu-prof`는 시작할 때 V8 CPU 프로파일러를 켜고, 프로세스가 끝나기 전에 프로파일을 파일로 씁니다. Node.js 22.4.0과 20.16.0에서 stable이 됐으므로 24와 26에서 그대로 씁니다.
+
+```bash
+node --cpu-prof --cpu-prof-dir=prof app.js
+# prof/CPU.20261006.095826.45696.0.001.cpuprofile
+```
+
+| 옵션 | 뜻 |
+|------|----|
+| `--cpu-prof-dir` | 파일을 쓸 폴더. 기본은 현재 폴더(`--diagnostic-dir`로 바꿈) |
+| `--cpu-prof-name` | 파일 이름. `${pid}` 치환을 지원 |
+| `--cpu-prof-interval` | 표본 채취 간격(마이크로초). 기본 1000 |
+
+- 파일 이름의 기본형은 `CPU.${yyyymmdd}.${hhmmss}.${pid}.${tid}.${seq}.cpuprofile`입니다.
+- `.cpuprofile`은 JSON입니다. 직접 열어 보면 `nodes`(호출 트리), `samples`, `timeDeltas`가 들어 있습니다.
+- 프로파일은 프로세스가 끝나기 전에 기록됩니다. 서버는 종료 시점까지 돌려 둔 뒤 정상 종료시켜서 파일을 받습니다.
+- 부하를 건 상태로 수집해야 의미 있습니다. 한가한 서버의 프로파일에는 대기 시간만 남습니다.
+
+플레임그래프는 이 파일을 시각화한 것입니다. Node.js 문서의 설명은 다음과 같습니다.
+
+- 너비는 그 함수에 쓴 CPU 시간입니다. 넓을수록 오래 걸립니다.
+- 높이는 호출 스택 깊이입니다. 높다고 느린 것이 아닙니다.
+- 가장 짙은 주황색 막대부터 봅니다. CPU를 많이 쓰는 함수일 가능성이 큽니다.
+- 읽는 요령은 아래쪽(호출자)에서 위쪽(피호출자)으로 올라가며, 위쪽이 넓고 평평한 칸이 실제로 시간을 쓰는 지점입니다. 이 칸이 JSON 파싱, 정규식, 암호화 같은 동기 작업이면 원인입니다.
+
+메모리 할당 프로파일을 `Heap.${yyyymmdd}.${hhmmss}.${pid}.${tid}.${seq}.heapprofile`로 쓰는 `--heap-prof`도 있고, 옵션 구성은 `--cpu-prof`와 같습니다(`--heap-prof-dir`, `--heap-prof-name`, `--heap-prof-interval`).
+
+예전부터 있던 `--prof`는 `isolate-0x...-v8.log`를 만들고 `node --prof-process`로 텍스트 요약을 얻는 별도 도구입니다. 지금은 `--cpu-prof`가 더 쉽습니다.
+
+**흔한 실수:**
+
+- 프로파일을 `node_modules` 코드가 아니라 내 코드부터 읽는 것입니다. 넓은 칸이 라이브러리 안에 있어도 그 라이브러리를 호출한 내 코드가 원인일 수 있으니 호출자를 따라 올라갑니다.
+- 개발 모드 빌드나 디버거를 켠 상태로 측정하는 것입니다. 운영과 같은 `NODE_ENV`와 옵션으로 잽니다.
+
+## clinic.js
+
+clinic.js는 NearForm이 만든 Node.js 성능 진단 도구 모음입니다. 한 번 설치하면 증상에 맞는 도구를 이름으로 고릅니다.
+
+```bash
+npm install -g clinic
+clinic doctor -- node server.js
+```
+
+| 도구 | 용도 |
+|------|------|
+| `clinic doctor` | 수집한 데이터로 어떤 유형의 문제인지 진단하고 권고를 제시 |
+| `clinic flame` | CPU 플레임그래프 |
+| `clinic bubbleprof` | I/O 문제를 디버깅할 때 사용 |
+
+- 서버를 clinic으로 띄우고 그 서버에 부하를 건 뒤 종료(Ctrl+C)하면 데이터를 분석해 리포트를 만듭니다.
+- 서버가 포트를 열자마자 autocannon을 자동으로 돌릴 수 있습니다.
+
+```bash
+clinic doctor --autocannon [ / --method POST ] \
+  -- node server.js
+```
+
+- Doctor 리포트의 CPU 그래프는 0–100이 아닐 수 있습니다. 퍼센트가 모든 코어의 합이라서, GC와 최적화가 백그라운드 스레드에서 돌고 워커 스레드를 쓰면 100을 넘습니다.
+- 직접 `--cpu-prof`로 충분하면 따로 설치하지 않아도 됩니다. clinic은 진단 방향을 모를 때 먼저 `doctor`를 돌려 보는 용도입니다.
+- 이 편은 clinic 저장소의 README로 확인한 내용만 적었습니다. 지원하는 Node.js 버전은 저장소 문서를 확인합니다.
+
+## V8 GC 세대(Scavenge·Mark-Compact)
+
+V8은 힙을 새 객체를 두는 새 세대(young generation)와 오래 산 객체를 두는 오래된 세대(old generation)로 나눕니다. 대부분의 객체가 금방 죽는다는 관찰에 기반한 설계입니다.
+
+| 구분 | 새 세대 | 오래된 세대 |
+|------|---------|-------------|
+| 수집기 | Scavenge(Minor GC) | Mark-Compact(Major GC) |
+| 방식 | 살아 있는 객체만 빈 반공간으로 복사 | 도달 가능한 객체를 표시하고 빈 곳을 해제, 필요하면 압축 |
+| 빈도와 비용 | 자주, 짧게 | 드물게, 힙이 클수록 오래 |
+| 대상 | 방금 만든 객체 | 두 번 살아남아 승격된 객체 |
+
+- 새 세대는 반공간(semi-space) 둘로 나뉘고 한쪽은 항상 비어 있습니다. Scavenge는 살아 있는 객체를 비어 있던 쪽(To-Space)으로 옮기고 이전 쪽(From-Space)은 통째로 비웁니다. 두 번째 Scavenge까지 살아남은 객체는 오래된 세대로 승격됩니다.
+- Scavenge는 여러 스레드가 병렬로 처리합니다.
+- Mark-Compact는 루트에서 도달 가능한 객체를 표시(marking)하고, 도달하지 못한 공간을 해제(sweeping)하고, 파편화를 줄이기 위해 일부를 복사(compaction)합니다. 표시는 JavaScript 실행과 동시에 백그라운드 스레드가 하고 압축은 메인 스레드가 정지한 동안 병렬로 합니다.
+- GC가 도는 동안 메인 스레드가 멈추는 구간이 p99 지연으로 나타납니다. 오래된 세대가 커질수록 Mark-Compact가 길어집니다.
+- 새 세대의 크기는 `--max-semi-space-size`(MiB)로 바꿀 수 있습니다. 키우면 처리량이 좋아질 수 있지만 반공간 하나를 1MiB 늘릴 때 힙이 3MiB 늘어납니다. 효과는 워크로드에 따라 다르므로 측정한 뒤에만 바꿉니다.
+
+`--trace-gc`로 GC가 일어날 때마다 한 줄씩 볼 수 있습니다.
+
+```bash
+node --trace-gc app.js
+# Scavenge 4.8 (6.2) -> 3.9 (7.2) MB, 0.17 / 0.00 ms ...
+# Mark-Compact 55.0 (88.2) -> 54.3 (119.9) MB, ...
+```
+
+- 화살표 앞뒤는 GC 전후의 힙 사용량이고, 괄호는 확보한 전체 크기입니다.
+- Mark-Compact가 끝난 뒤에도 사용량이 거의 줄지 않고 계속 올라가면 누수를 의심합니다. 위 예의 55.0에서 54.3은 해제할 것이 없었다는 뜻입니다.
+- 이 출력의 서식은 V8 버전에 따라 달라질 수 있습니다.
+
+**흔한 실수:** GC 옵션부터 만지는 것입니다. 지연의 원인은 대개 할당이 많은 코드 쪽에 있으므로 먼저 프로파일로 확인합니다(자세히는 04편).
+
+## --max-old-space-size
+
+`--max-old-space-size=SIZE`는 V8 오래된 세대의 최대 크기를 MiB 단위로 정합니다. 사용량이 한도에 다가가면 V8은 메모리를 확보하려고 GC에 더 많은 시간을 씁니다.
+
+```bash
+node --max-old-space-size=1536 server.js
+```
+
+Node.js 문서는 메모리 2GiB인 머신에서 1536(1.5GiB)으로 두라고 예를 듭니다. 다른 용도와 스왑을 위해 여유를 남기려는 것입니다.
+
+- 한도를 넘기면 프로세스는 다음 메시지를 남기고 종료합니다.
+
+```text
+FATAL ERROR: Reached heap limit Allocation failed
+ - JavaScript heap out of memory
+```
+
+- 현재 한도는 `v8.getHeapStatistics().heap_size_limit`(바이트)로 읽습니다. 값은 새 세대 크기까지 포함해서 옵션으로 준 값보다 약간 큽니다. 직접 실험에서 `1536`을 줬을 때 약 1728MiB가 나왔습니다.
+- `--max-old-space-size-percentage`는 시스템 메모리의 비율로 정합니다. 둘을 같이 쓰면 비율 쪽이 우선합니다.
+- 컨테이너에서는 컨테이너 메모리 한도보다 낮게 줍니다. V8 힙 말고도 Buffer, 네이티브 메모리, 스레드 스택이 들어가서 힙이 한도에 닿기 전에 컨테이너가 먼저 OOM으로 죽을 수 있습니다.
+- Buffer와 ArrayBuffer는 V8 힙 밖에 있어서 이 옵션으로 제한되지 않습니다. `--max-old-space-size=50`로 실행해도 Buffer 300MiB를 쥘 수 있었고, `process.memoryUsage()`에서 `heapUsed`는 3MiB, `arrayBuffers`는 300MiB로 나왔습니다.
+
+| 필드 | 뜻 |
+|------|----|
+| `heapUsed` | V8 힙에서 실제 사용 중인 양 |
+| `heapTotal` | V8이 확보한 힙 크기 |
+| `external` | V8 밖의 C++ 객체 메모리 |
+| `arrayBuffers` | ArrayBuffer와 Buffer. `external`에 포함됨 |
+| `rss` | 프로세스가 차지한 전체 물리 메모리 |
+
+**흔한 실수:** 한도를 키워서 OOM을 넘기는 것입니다. 누수가 있으면 한도를 키워도 종료 시점이 늦어질 뿐입니다. 정상 상태에서 힙이 한도 근처에서 오르내리는 서비스에만 한도 조정이 해법입니다.
+
+## 힙 스냅샷 비교
+
+힙 스냅샷은 특정 시점의 V8 힙 객체와 참조 관계를 JSON 파일(`.heapsnapshot`)로 기록한 것입니다. 스냅샷 하나로는 무엇이 많은지만 알고, 두 개를 비교해야 무엇이 늘었는지 압니다.
+
+스냅샷을 만드는 방법은 넷입니다.
+
+```js
+import { writeHeapSnapshot } from 'node:v8'
+
+const file = writeHeapSnapshot() // v11.13.0부터
+// Heap-20261006-120000-4242-0.heapsnapshot
+```
+
+- `node --inspect`로 띄우고 Chrome DevTools의 Memory 탭에서 찍습니다.
+- `node --heapsnapshot-signal=SIGUSR2 app.js`로 띄운 뒤 `kill -USR2 <pid>`를 보냅니다(Linux·macOS 계열).
+- 코드에서 `v8.writeHeapSnapshot()`을 호출합니다. 파일명을 안 주면 `Heap-${yyyymmdd}-${hhmmss}-${pid}-${thread_id}.heapsnapshot` 형식으로 만들어집니다.
+- `--heapsnapshot-near-heap-limit=3`은 힙이 한도에 다가가면 최대 3개까지 스냅샷을 씁니다. 이 플래그는 v24.13.1부터 더는 experimental이 아닙니다.
+
+비교 절차(Node.js 문서의 세 스냅샷 기법)는 다음과 같습니다.
+
+1. 프로세스가 시작되고 초기 할당이 끝나도록 둡니다.
+2. 누수가 의심되는 기능을 사용합니다. 이 상태에서 첫 번째 스냅샷을 찍습니다.
+3. 같은 기능을 계속 사용한 뒤 두 번째 스냅샷을 찍습니다. 두 스냅샷의 차이가 누수된 것입니다.
+4. Chrome DevTools Memory 탭에 오래된 것을 먼저, 새것을 나중에 불러옵니다.
+5. 새 스냅샷을 고르고 보기를 Summary에서 Comparison으로 바꿉니다.
+6. 큰 양의 델타(Delta)가 있는 생성자를 찾고 아래 창에서 참조 경로를 따라갑니다.
+
+| 용어 | 뜻 |
+|------|----|
+| Shallow size | 객체 자체가 차지하는 메모리 |
+| Retained size | 그 객체가 해제되면 함께 풀려나는 메모리 전체 |
+| Delta | 두 스냅샷 사이의 증감. 양수가 증가 |
+| Retainers | 객체를 GC되지 않게 붙잡고 있는 참조 |
+
+- 큰 델타를 가진 생성자를 고른 뒤 Retainers를 따라 올라가면 객체를 붙잡은 전역 변수나 캐시에 닿는 경로가 나옵니다.
+- 스냅샷을 찍는 동안 메인 스레드가 멈추고 힙이 두 배까지 커질 수 있어서 메모리가 부족하면 앱이 죽습니다. 운영에서는 트래픽을 뺀 인스턴스 하나에서 찍습니다.
+
+**흔한 실수:**
+
+- 시작 직후 한 번만 찍고 보는 것입니다. 늘어나는 것을 보려면 반드시 두 시점이 필요합니다.
+- 스냅샷을 오래된 것부터 불러오지 않는 것입니다. 순서가 바뀌면 델타의 부호가 뒤집혀 증가분을 못 찾습니다.
+
+## 누수 패턴
+
+메모리 누수는 쓰지 않는 객체가 어딘가에서 계속 참조되어 GC가 회수하지 못하는 상태입니다. GC가 못 지우는 이유는 참조가 남아 있기 때문이고, 스냅샷에서 Retainers로 보이는 것이 그 참조입니다. 서버에서 자주 만나는 네 가지는 다음과 같습니다.
+
+### 전역 캐시
+
+모듈 수준 `Map`·객체·배열에 항목을 넣기만 하고 빼지 않는 경우입니다. 프로세스가 사는 동안 모듈 변수는 해제되지 않습니다.
+
+```js
+const cache = new Map()
+export function getUser(id) {
+  if (!cache.has(id)) cache.set(id, loadUser(id)) // ❌ 무한 증가
+  return cache.get(id)
+}
+```
+
+- 요청마다 달라지는 값(사용자 ID, URL, 쿼리 문자열)이 키가 되면 키 종류만큼 계속 늘어납니다.
+- 해법은 크기 상한과 만료입니다. LRU 캐시나 TTL을 주거나 Redis 같은 외부 캐시로 옮깁니다. 키가 객체 참조이고 그 객체가 사라질 때 같이 지워져야 하면 `WeakMap`을 씁니다.
+
+### 해제되지 않는 리스너
+
+`on()`으로 등록하고 `off()`하지 않는 경우입니다. 요청이나 연결마다 공유 객체에 리스너를 다는 코드가 대표적입니다.
+
+```js
+import { EventEmitter } from 'node:events'
+
+const bus = new EventEmitter()
+export function handle(req) {
+  bus.on('config', () => req.reload()) // ❌ 요청마다 쌓임
+}
+```
+
+- 같은 이벤트에 리스너가 11개 이상 붙으면 Node.js가 경고를 냅니다.
+
+```text
+MaxListenersExceededWarning: Possible EventEmitter memory
+leak detected. 11 x listeners added to [EventEmitter].
+MaxListeners is 10.
+```
+
+- 이 경고는 기본 한도(10)를 넘었을 때만 나옵니다. 경고가 보이면 `setMaxListeners()`로 입을 막지 말고 리스너가 왜 쌓이는지 찾습니다.
+- 한 번만 필요하면 `once()`를 쓰고, 끝나는 지점에서 `off()`를 호출합니다. `AbortSignal`을 쓰면 신호 하나로 해제합니다.
+
+### 클로저가 붙잡은 값
+
+함수가 자신이 만들어진 스코프의 변수를 참조하면 함수가 살아 있는 동안 그 변수도 삽니다. 함수를 어딘가에 오래 저장하면 큰 값이 같이 남습니다.
+
+```js
+const handlers = []
+function register() {
+  const big = new Array(1e6).fill(0) // 약 8MB
+  handlers.push(() => big.length)    // ❌ big을 붙잡음
+}
+for (let i = 0; i < 5; i++) register()
+// heapUsed 약 42MB
+```
+
+- 필요한 값(`big.length`)만 꺼내 변수에 담고 큰 객체는 클로저가 볼 수 없게 하면 풀립니다.
+- 함수를 저장하는 곳이 배열, 맵, 이벤트 리스너, 큐일 때 특히 위험합니다. 저장소가 오래 살수록 함수와 그것이 붙잡은 값도 오래 삽니다.
+
+### 정리되지 않는 타이머
+
+`setInterval`은 `clearInterval`을 부르기 전까지 콜백과 그 콜백이 붙잡은 모든 것을 유지합니다. 요청 단위 코드에서 타이머를 만들고 지우지 않으면 요청 수만큼 쌓입니다.
+
+```js
+export function watch(conn) {
+  const id = setInterval(() => conn.ping(), 1000)
+  conn.on('close', () => clearInterval(id)) // ✅ 해제
+}
+```
+
+- 연결이 끊겨도 타이머가 `conn`을 참조하므로 `clearInterval`을 빼면 연결 객체가 영영 안 지워집니다.
+- 프로세스 종료를 막지 않아야 하는 타이머는 `unref()`를 붙입니다. 이것은 종료만 허용할 뿐 누수를 막지는 않습니다.
+
+네 패턴 모두 증상은 같습니다. 트래픽이 일정한데 `heapUsed`가 Mark-Compact 후에도 계단식으로 오르고, 결국 힙 한도에서 종료됩니다. `rss`만 오르고 `heapUsed`는 안정적이면 Buffer 같은 V8 힙 밖 메모리나 glibc 메모리 단편화를 의심합니다.
+
+**흔한 실수:** 누수를 재현하지 않고 코드만 읽는 것입니다. 부하를 걸어 힙 스냅샷 두 개를 비교하면 읽는 시간보다 빨리 후보가 줄어듭니다.
+
+## 핵심 정리
+
+- 성능 작업은 부하 테스트(autocannon)로 재고 p95·p99로 판단합니다. 평균은 느린 꼬리를 숨깁니다.
+- `monitorEventLoopDelay`는 막힘이 있었는지를, `--cpu-prof`와 플레임그래프는 어떤 함수가 CPU를 썼는지를 알려 줍니다. clinic doctor는 증상별로 도구를 고르는 출발점입니다.
+- V8은 새 세대를 Scavenge로, 오래된 세대를 Mark-Compact로 수집합니다. 힙 한도(`--max-old-space-size`)는 V8 힙만 제한하고 Buffer는 포함하지 않습니다.
+- 누수는 힙 스냅샷 두 개를 비교해 델타와 Retainers로 찾습니다. 한도를 키우는 것은 해법이 아닙니다.
+- 흔한 누수 원인은 무한 증가하는 전역 캐시, 해제 안 한 리스너, 큰 값을 붙잡은 클로저, 지우지 않은 타이머입니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="서버의 평균 지연은 20ms로 안정적인데 일부 사용자가 타임아웃을 호소합니다. 가장 먼저 확인할 지표는?"
+  options={['평균 지연을 더 정밀하게 측정한다', 'p99 같은 꼬리 백분위를 확인한다', '동시 연결 수를 1로 줄여 다시 잰다', '힙 한도를 늘린다']}
+  correctAnswer={2}
+  explanation="평균은 느린 요청 몇 개를 가려서 타임아웃 같은 꼬리 문제를 보여 주지 못합니다. p95와 p99를 보면 느린 구간의 크기를 알 수 있습니다. 동시 연결을 줄이면 대기열이 사라져 문제를 가리고, 힙 한도는 지연과 직접 관련이 없습니다."
+  optionExplanations={['평균은 정밀하게 재도 꼬리를 보여 주지 못합니다.', '정답입니다. 소수의 느린 요청은 평균이 아니라 p99 같은 상위 백분위에서 드러납니다.', '동시 요청이 없으면 운영에서 생기는 대기가 재현되지 않습니다.', '지연 문제와 직접 관계가 없고 누수의 해법도 아닙니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="--max-old-space-size=50으로 실행한 프로세스가 Buffer를 300MiB 쥐고 있어도 힙 OOM으로 종료되지 않는 이유는?"
+  options={['Buffer는 새 세대에 저장되기 때문이다', 'Buffer는 V8 힙 밖에 할당되어 이 한도에 포함되지 않기 때문이다', 'Buffer는 GC가 자동으로 압축하기 때문이다', '이 옵션은 Linux에서만 동작하기 때문이다']}
+  correctAnswer={2}
+  explanation="이 옵션은 V8 오래된 세대의 크기를 제한합니다. Buffer와 ArrayBuffer는 V8 힙 밖에 할당되어 process.memoryUsage()의 external과 arrayBuffers로 집계되고 한도에 포함되지 않습니다. 이런 누수는 heapUsed가 아니라 rss와 arrayBuffers로 확인합니다."
+  optionExplanations={['Buffer는 새 세대나 오래된 세대 어디에도 저장되지 않고 힙 밖에 있습니다.', '정답입니다. Buffer는 V8 힙 밖 메모리라서 힙 한도에 포함되지 않습니다.', 'GC가 압축해서가 아니라 애초에 힙 밖이라서 한도 대상이 아닙니다.', '플랫폼과 무관하게 모든 운영체제에서 동작하는 옵션입니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="메모리 누수 원인을 힙 스냅샷으로 찾는 올바른 절차는?"
+  options={['시작 직후 스냅샷 하나를 찍고 가장 큰 객체를 찾는다', '누수가 의심되는 기능을 사용한 뒤 스냅샷 두 개를 찍어 Comparison으로 큰 양의 델타를 찾는다', 'GC가 끝날 때까지 기다린 뒤 rss만 비교한다', '--max-old-space-size를 키워 스냅샷이 안 생기게 한다']}
+  correctAnswer={2}
+  explanation="스냅샷 하나로는 무엇이 많은지만 알 수 있고, 같은 기능을 쓰는 동안 찍은 두 개를 비교해야 무엇이 늘었는지 압니다. DevTools Memory 탭에서 Comparison을 고르고 양수 델타가 큰 생성자의 Retainers를 따라가면 객체를 붙잡은 참조가 나옵니다."
+  optionExplanations={['하나만으로는 증가량을 알 수 없어 정상적으로 큰 객체와 누수를 구별하지 못합니다.', '정답입니다. 두 시점의 차이가 누수입니다. 델타와 Retainers로 원인 참조를 찾습니다.', 'rss는 힙 밖 메모리까지 포함해서 어떤 객체가 누수인지 알려 주지 못합니다.', '한도를 키우면 종료만 늦어지고 누수 지점은 찾지 못합니다.']}
+/>
+
+## 참고 자료
+
+- [Node.js — CLI options: --cpu-prof, --heap-prof, --heapsnapshot-near-heap-limit, --max-old-space-size](https://nodejs.org/api/cli.html)
+- [Node.js — perf_hooks.monitorEventLoopDelay](https://nodejs.org/api/perf_hooks.html#perf_hooksmonitoreventloopdelayoptions)
+- [Node.js — v8.writeHeapSnapshot, process.memoryUsage](https://nodejs.org/api/v8.html)
+- [Node.js Learn — How to take and compare heap snapshots](https://nodejs.org/en/learn/diagnostics/memory/using-heap-snapshot)
+- [Node.js Learn — Flame graphs](https://nodejs.org/en/learn/diagnostics/flame-graphs)
+- [Chrome DevTools — Heap snapshots](https://developer.chrome.com/docs/devtools/memory-problems/heap-snapshots)
+- [V8 Blog — Trash talk: the Orinoco garbage collector](https://v8.dev/blog/trash-talk)
+- [Clinic.js (node-clinic README)](https://github.com/clinicjs/node-clinic)
+- [autocannon](https://github.com/mcollina/autocannon)

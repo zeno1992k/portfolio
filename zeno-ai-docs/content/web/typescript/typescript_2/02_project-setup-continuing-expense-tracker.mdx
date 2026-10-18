@@ -1,0 +1,40 @@
+---
+title: '02. 버전 고정과 MSW의 역할'
+description: '도구 버전을 고정하는 이유와 MSW가 네트워크 요청을 가로채는 방식을 정리합니다.'
+---
+
+## 개념 정리
+
+### 버전을 고정하는 이유
+
+Node.js, TypeScript, Vite처럼 서로 연결된 도구는 버전에 따라 지원 문법과 빌드 결과가 달라질 수 있습니다. 프로젝트에서는 `package.json`과 잠금 파일로 버전을 고정해 같은 소스가 같은 조건에서 검사되고 빌드되도록 합니다.
+
+### MSW(Mock Service Worker)가 하는 일
+
+대신 MSW가 브라우저의 서비스 워커로 네트워크 요청을 가로채, 미리 정해둔 목업 응답을 대신 돌려줍니다. 앱 코드 입장에서는 진짜 서버에 `fetch`를 보내는 것과 동일하게 동작하므로, 15편에서 API 클라이언트를 완성할 때까지 백엔드 없이도 실제 네트워크 흐름을 그대로 연습할 수 있습니다.
+
+MSW는 브라우저용 설정(`setupWorker`)과 Node.js 테스트용 설정(`setupServer`)을 따로 제공합니다.
+
+## 확인 문제
+
+<Quiz
+  questionNumber={1}
+  question={"if (import.meta.env.DEV) 조건 안에서 워커를 시작하는 이유는"}
+  options={["개발 서버에서만 목업이 필요하고 프로덕션 빌드에는 포함되지 않게 하기 위해서","항상 참이 되는 조건이라 실질적인 의미가 없어서","TypeScript 문법상 반드시 필요해서","Vite가 이 조건 없이는 빌드를 거부해서"]}
+  correctAnswer={1}
+  explanation={"import.meta.env.DEV는 개발 서버에서만 참이 되므로, 이 조건으로 감싸면 목업 코드가 프로덕션 빌드에는 실행되지 않습니다."}
+/>
+
+<Quiz
+  questionNumber={2}
+  question={"lib/types, lib/api, schemas 폴더를 이 편에서 먼저 만들어두는 이유는"}
+  options={["빈 폴더도 git에 즉시 기록되기 때문에","앞으로 채울 결과물의 뼈대를 먼저 잡아 각 편에서 어디에 파일을 둘지 헷갈리지 않게 하기 위해서","Vite가 빌드 전에 특정 폴더 구조를 강제하기 때문에","TypeScript 컴파일러가 빈 폴더를 요구하기 때문에"]}
+  correctAnswer={2}
+  explanation={"폴더 구조를 미리 정해두면 이후 편에서 새 파일을 어디에 추가할지 헷갈리지 않습니다. 빈 폴더 자체는 git에 기록되지 않습니다."}
+/>
+
+## 참고 자료
+
+- [TypeScript — Announcing TypeScript 7.0](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/)
+- [Node.js — 최신 v22.x 릴리스 목록](https://nodejs.org/download/release/latest-v22.x/)
+- [MSW(Mock Service Worker) — Docs](https://mswjs.io/docs/)

@@ -1,0 +1,569 @@
+---
+title: '10. 원시 값과 객체의 비교'
+description: '원시 값의 불변성과 객체의 변경 가능성, 값·참조·공유에 의한 전달, 일치 비교, 얕은 복사와 깊은 복사, structuredClone, 방어적 복사를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 값이 원시 값인지 객체인지에 따라 대입, 인수 전달, 비교, 복사가 어떻게 달라지는지 규칙으로 설명하고, 상황에 맞는 복사 방식을 고를 수 있습니다.
+</Callout>
+
+## 변경 불가능한 값
+
+원시 값(primitive value)은 한번 만들어지면 그 값 자체를 바꿀 수 없는 값입니다. 이 성질을 불변(immutable)이라고 합니다. 원시 값은 `string`, `number`, `bigint`, `boolean`, `undefined`, `null`, `symbol` 7종이고, 그 외의 값은 모두 객체입니다(자세히는 05편).
+
+```js
+let n = 10
+n.foo = 1   // 무시된다 (strict mode에서는 TypeError)
+n.foo       // undefined
+```
+
+값을 바꾸는 것과 변수에 다른 값을 다시 넣는 것은 다릅니다.
+
+```js
+let a = 1
+a = 2   // 변수가 다른 값을 가리키게 했을 뿐, 1이 2로 바뀐 것이 아니다
+```
+
+- `n++`, `str += 'x'`도 새 값을 계산해 변수에 다시 넣는 재할당입니다.
+- 원시 값의 프로퍼티에 접근하면 엔진이 그 순간에만 래퍼 객체(wrapper object)를 만들어 처리하고 버립니다. `n.foo = 1`은 그 임시 객체에 쓰고 끝나므로 흔적이 남지 않습니다(자세히는 20편).
+- `new String('ab')`처럼 래퍼를 직접 만들면 객체이므로 변경할 수 있지만, `new String('ab') === 'ab'`가 `false`가 되는 등 혼란만 생기므로 쓰지 않습니다.
+- 무시할지 TypeError를 던질지는 strict mode 여부로 갈립니다. 모듈과 class 본문은 항상 strict mode이고, 일반 스크립트는 `'use strict'`를 선언해야 strict mode가 됩니다(자세히는 19편).
+
+### 원시 값과 객체의 차이
+
+| 구분 | 원시 값 | 객체 |
+|------|---------|------|
+| 값 변경 | 불가능 | 가능 |
+| 변수에 담기는 것 | 값 자체 | 객체를 가리키는 참조 |
+| 대입·인수 전달 | 값이 복사된다 | 참조가 복사된다 |
+| `===` 비교 | 값이 같으면 true | 같은 객체일 때만 true |
+
+## 상수와 불변성의 차이
+
+상수(constant)는 이름에 묶인 값을 다시 할당할 수 없는 상태이고, 불변성은 값 자체의 내용을 바꿀 수 없는 상태입니다. `const`는 앞의 것만 보장합니다(자세히는 03편).
+
+```js
+const user = { name: 'Kim' }
+user.name = 'Lee'   // ✅ 객체 내용은 바뀐다
+user = {}           // ❌ TypeError (const 재할당)
+```
+
+| 선언 | 재할당 | 내용 변경 | 이유 |
+|------|--------|-----------|------|
+| `const n = 1` | 불가 | 불가 | 원시 값이라 값 자체가 불변 |
+| `let n = 1` | 가능 | 불가 | 변수만 교체되고 값은 불변 |
+| `const o = {}` | 불가 | 가능 | const는 바인딩만 고정 |
+| `const o = Object.freeze({})` | 불가 | 불가(얕게) | freeze가 프로퍼티를 잠금 |
+
+객체의 내용을 막는 내장 메서드는 세 단계가 있습니다(자세히는 14편).
+
+| 메서드 | 프로퍼티 추가 | 삭제 | 기존 값 변경 |
+|--------|---------------|------|--------------|
+| `Object.preventExtensions(o)` | 불가 | 가능 | 가능 |
+| `Object.seal(o)` | 불가 | 불가 | 가능 |
+| `Object.freeze(o)` | 불가 | 불가 | 불가 |
+
+- 막힌 동작은 sloppy mode에서 조용히 무시되고 strict mode에서 TypeError가 납니다. 동결된 배열의 `push` 같은 메서드는 모드와 관계없이 TypeError입니다.
+- `Object.freeze(o)`는 복사본이 아니라 `o` 자체를 동결하고 같은 객체를 반환합니다.
+- freeze는 얕습니다. 객체의 프로퍼티만 잠그고 그 값이 가리키는 객체는 잠그지 않습니다.
+
+```js
+const user = Object.freeze({ tags: ['a'] })
+user.tags.push('b')   // 가능
+user.tags             // ['a', 'b']
+```
+
+중첩 구조까지 잠그려면 재귀로 동결합니다. 먼저 동결하고 나서 내려가야 순환 참조에서 무한 재귀가 생기지 않습니다.
+
+```js
+function deepFreeze(obj) {
+  Object.freeze(obj)
+  for (const v of Object.values(obj)) {
+    if (typeof v === 'object' && v !== null &&
+        !Object.isFrozen(v)) deepFreeze(v)
+  }
+  return obj
+}
+```
+
+- `Map`, `Set`, `Date`는 동결해도 `set`, `add`, `setTime`이 계속 동작합니다. 내용이 프로퍼티가 아니라 내부 슬롯에 있기 때문입니다.
+- 원소가 있는 타입 배열은 `Object.freeze`가 TypeError를 던집니다(자세히는 48편).
+- 동결된 객체를 스프레드나 `Object.assign`으로 복사하면 복사본은 동결되지 않습니다.
+
+흔한 실수는 두 가지입니다. `const` 배열·객체를 불변으로 착각하는 것, 그리고 `Object.freeze`가 중첩 객체까지 막는다고 착각하는 것입니다.
+
+## 문자열의 불변성
+
+문자열은 원시 값이므로 만들어진 뒤 문자를 바꿀 수 없습니다. 인덱스로 읽을 수는 있지만 쓸 수는 없습니다.
+
+```js
+let str = 'cat'
+str[0] = 'b'         // 무시된다 (strict mode에서는 TypeError)
+str                  // 'cat'
+str.toUpperCase()    // 'CAT' (새 문자열)
+str                  // 'cat'
+```
+
+- 각 문자 프로퍼티는 읽기 전용입니다. `Object.getOwnPropertyDescriptor('cat', 0)`은 `{ value: 'c', writable: false, enumerable: true, configurable: false }`를 돌려줍니다. `length`도 쓰기 불가이고, `delete str[0]`은 strict mode에서 TypeError입니다.
+- `slice`, `replace`, `toUpperCase`, `trim` 같은 문자열 메서드는 모두 원본을 두고 새 문자열을 반환합니다.
+- 변수에 다른 문자열을 다시 넣는 것은 가능합니다. 문자를 바꾼 결과가 필요하면 새 문자열을 만듭니다.
+
+```js
+let word = 'cat'
+word = 'b' + word.slice(1)   // 'bat'
+word += 's'                  // 'bats' (새 문자열을 만들어 재할당)
+```
+
+- 문자열 비교는 내용 기준입니다. `'a' + 'b' === 'ab'`는 `true`입니다.
+- 문자 단위로 고치려면 배열로 바꿔 수정한 뒤 다시 합칩니다. `[...'cat']`은 `['c', 'a', 't']`입니다(자세히는 33편).
+
+흔한 실수는 `str.replace('a', 'b')`의 반환값을 받지 않고 `str`이 바뀌었으리라 기대하는 것입니다.
+
+## 값에 의한 전달
+
+원시 값을 변수에 대입하거나 함수의 인수로 넘기면 값의 복사본이 전달됩니다. 이것이 값에 의한 전달(pass by value)입니다. 복사본을 바꿔도 원본은 그대로입니다.
+
+```js
+let a = 1
+let b = a   // 1이 복사된다
+b = 2
+a           // 1
+```
+
+```js
+function inc(x) { x++; return x }
+let c = 5
+inc(c)   // 6
+c        // 5
+```
+
+- 매개변수는 함수 안에서 새로 만들어지는 지역 변수이고 호출 시 인수의 값으로 초기화됩니다. 그래서 `x`를 바꿔도 `c`는 영향을 받지 않습니다.
+- 객체의 프로퍼티에서 꺼낸 원시 값도 복사본입니다. `const v = obj.n` 뒤에 `obj.n = 2`로 바꿔도 `v`는 그대로입니다.
+- 긴 문자열도 값에 의한 전달입니다. 엔진이 내부적으로 같은 메모리를 공유하더라도 문자열이 불변이므로 동작은 복사한 것과 구별되지 않습니다.
+
+흔한 실수는 함수 안에서 원시 값 매개변수를 바꾸고 호출한 쪽의 변수가 바뀌기를 기대하는 것입니다. 결과는 반환값으로 돌려줍니다.
+
+## 변경 가능한 객체
+
+객체는 프로퍼티를 추가, 수정, 삭제할 수 있는 변경 가능한 값입니다. 배열, 함수, `Date`, `Map`, `Set` 등 원시 값이 아닌 모든 값이 객체입니다.
+
+```js
+const user = { name: 'Kim' }
+user.age = 30        // 추가
+user.name = 'Lee'    // 수정
+delete user.age      // 삭제
+user                 // { name: 'Lee' }
+```
+
+내용이 바뀌어도 같은 객체입니다.
+
+- 배열의 변경 메서드: `push`, `pop`, `shift`, `unshift`, `splice`, `sort`, `reverse`, `fill`, `copyWithin`은 원본 배열을 직접 바꿉니다. `sort`와 `reverse`는 새 배열이 아니라 같은 배열을 반환합니다.
+- ES2023의 `toSorted`, `toReversed`, `toSpliced`, `with`는 원본을 두고 새 배열을 반환합니다(자세히는 28편).
+- `Map.prototype.set`, `Set.prototype.add`, `Date.prototype.setTime`도 원본을 바꿉니다(자세히는 38편, 31편).
+
+```js
+const arr = [3, 1, 2]
+arr.sort() === arr   // true (같은 배열)
+arr                  // [1, 2, 3] (원본이 바뀌었다)
+const t = [3, 1, 2]
+t.toSorted()         // [1, 2, 3]
+t                    // [3, 1, 2]
+```
+
+흔한 실수는 `sort()`가 원본을 바꾼다는 것을 잊고, 다른 곳에서도 쓰는 배열에 호출하는 것입니다.
+
+## 참조에 의한 전달
+
+객체를 변수에 대입하거나 함수에 인수로 넘기면 객체 자체가 아니라 객체를 가리키는 참조(reference)가 복사됩니다. 복사된 참조는 원래 것과 같은 객체를 가리키므로, 한쪽에서 객체를 바꾸면 다른 쪽에서도 보입니다.
+
+```js
+const p = { n: 1 }
+const q = p    // 참조가 복사된다. 객체는 하나뿐
+q.n = 2
+p.n            // 2
+```
+
+```js
+function add(list) { list.push(3) }
+const arr = [1, 2]
+add(arr)
+arr   // [1, 2, 3]
+```
+
+- 객체를 담은 변수가 가진 것은 객체가 아니라 참조입니다. 프로퍼티 값도 마찬가지여서, 객체 안에 객체가 있으면 바깥 객체가 안쪽 객체의 참조를 가집니다.
+- 스택·힙 같은 메모리 배치는 명세가 정하지 않습니다. 참조는 "같은 객체를 가리킨다"는 동작 모델이고, 엔진이 실제로 어떻게 저장하는지와는 별개입니다.
+- 어떤 변수도 가리키지 않게 된 객체는 가비지 컬렉션의 회수 대상이 됩니다(자세히는 49편).
+
+흔한 실수는 객체 대입을 복사로 착각하는 것입니다.
+
+```js
+const a = { n: 1 }
+const b = a   // ❌ 복사가 아니다
+b.n = 9
+a.n           // 9
+```
+
+같은 원리로 `Array(2).fill([0, 0])`은 같은 배열 하나를 두 칸에 채웁니다.
+
+```js
+const grid = Array(2).fill([0, 0])
+grid[0][0] = 1
+grid   // [[1, 0], [1, 0]] (두 행이 같은 배열)
+```
+
+## 공유에 의한 전달
+
+JavaScript는 모든 인수를 값으로 전달합니다. 객체의 "값"이 참조이므로 참조의 복사본이 넘어가고, 이 방식을 공유에 의한 전달(call by sharing)이라고 합니다. 매개변수는 호출한 쪽 변수와 별개의 변수이면서 같은 객체를 가리킵니다.
+
+```js
+function reassign(list) { list = [9] }
+function mutate(list) { list.push(3) }
+const arr = [1, 2]
+reassign(arr)
+arr   // [1, 2] (매개변수만 새 배열로 바뀐다)
+mutate(arr)
+arr   // [1, 2, 3] (같은 객체를 변경했다)
+```
+
+| 함수 안의 동작 | 호출한 쪽에서 보이는가 |
+|----------------|------------------------|
+| 매개변수에 새 값 대입 | 보이지 않는다 |
+| 매개변수가 가리키는 객체의 프로퍼티 변경 | 보인다 |
+| 원시 값 매개변수 변경 | 보이지 않는다 |
+
+- 참조에 의한 전달(pass by reference)은 매개변수가 호출한 쪽 변수의 별칭이 되어, 매개변수에 대입하면 호출한 쪽 변수가 바뀌는 방식입니다. JavaScript에는 없습니다. 그래서 변수를 맞바꾸는 함수를 만들 수 없습니다.
+
+```js
+function swap(x, y) { [x, y] = [y, x] }
+let m = 1, k = 2
+swap(m, k)
+m   // 1
+k   // 2
+```
+
+- "객체는 참조에 의한 전달"이라는 말은 객체가 공유된다는 뜻으로 관행처럼 쓰입니다. 규칙은 위 표처럼 "참조의 값을 복사한다"입니다.
+
+인수 객체를 직접 바꾸는 함수는 호출한 쪽에 보이는 부작용(side effect)을 만듭니다. 새 값을 반환하는 방식이 추적하기 쉽습니다(자세히는 50편).
+
+```js
+// ❌ 인수를 직접 변경
+function rename(user) { user.name = 'X' }
+// ✅ 새 객체를 반환
+function renamed(u) { return { ...u, name: 'X' } }
+```
+
+## 일치 비교
+
+`===`는 원시 값끼리는 값이 같은지, 객체끼리는 같은 객체인지를 비교합니다. 객체의 내용은 비교하지 않습니다.
+
+```js
+const x = { n: 1 }
+const y = { n: 1 }
+const z = x
+x === y   // false (내용이 같아도 다른 객체)
+x === z   // true  (같은 객체)
+1 === 1   // true
+'a' === 'a'   // true
+```
+
+- `==`도 객체끼리는 참조를 비교합니다. `[] == []`는 `false`입니다. 객체와 원시 값을 `==`로 비교하면 객체가 원시 값으로 변환됩니다(자세히는 08편).
+- 서로 다른 타입은 `===`에서 항상 `false`입니다. `1n === 1`, `new String('a') === 'a'`는 모두 `false`입니다.
+- `Symbol('a') === Symbol('a')`는 `false`입니다. 심볼은 만들 때마다 고유합니다(자세히는 34편). `10n === 10n`은 `true`입니다.
+- 내용이 같은지 보려면 프로퍼티를 직접 순회해 비교하거나 라이브러리를 씁니다. Node.js에는 `util.isDeepStrictEqual(a, b)`가 있습니다.
+- `JSON.stringify(a) === JSON.stringify(b)`로 내용을 비교하면 키 순서만 다른 같은 객체를 다르다고 판정하고, `undefined`나 함수 프로퍼티의 차이는 무시하므로 부적합합니다.
+
+`===` 외에 `Object.is`와 `includes`, `Map`, `Set`이 쓰는 비교가 있습니다. 세 방식 모두 객체는 참조로 비교하고, 달라지는 것은 `NaN`과 `0`뿐입니다.
+
+| 알고리즘 | `NaN`과 `NaN` | `0`과 `-0` | 쓰이는 곳 |
+|----------|---------------|-----------|-----------|
+| IsStrictlyEqual | 다르다 | 같다 | `===`, `indexOf`, `switch` |
+| SameValue | 같다 | 다르다 | `Object.is` |
+| SameValueZero | 같다 | 같다 | `includes`, `Map` 키, `Set` 원소 |
+
+```js
+const list = [NaN]
+list.indexOf(NaN)     // -1
+list.includes(NaN)    // true
+Object.is(0, -0)      // false
+new Set([0, -0]).size // 1
+```
+
+객체를 찾을 때는 같은 참조여야 합니다.
+
+```js
+[{ a: 1 }].includes({ a: 1 })   // false
+new Set([{}, {}]).size          // 2
+new Map([[{}, 'v']]).get({})    // undefined
+```
+
+## 얕은 복사와 깊은 복사
+
+얕은 복사(shallow copy)는 객체의 최상위 프로퍼티만 새 객체에 복사합니다. 프로퍼티 값이 객체면 참조만 복사되므로 원본과 복사본이 그 하위 객체를 공유합니다. 깊은 복사(deep copy)는 중첩된 객체까지 재귀적으로 새로 만들어 원본과 완전히 분리합니다.
+
+```js
+const src = { n: 1, inner: { v: 1 } }
+const copy = { ...src }
+copy.n = 2
+src.n                     // 1 (최상위는 분리)
+copy.inner.v = 2
+src.inner.v               // 2 (하위 객체는 공유)
+copy.inner === src.inner  // true
+```
+
+값이 모두 원시 값인 평면 객체와 배열은 얕은 복사로 충분합니다.
+
+### 얕은 복사 방법
+
+| 대상 | 방법 |
+|------|------|
+| 객체 | `{ ...obj }`(ES2018), `Object.assign({}, obj)`(ES2015) |
+| 배열 | `[...arr]`, `arr.slice()`, `arr.concat()`, `Array.from(arr)` |
+
+스프레드와 `Object.assign`이 복사하는 범위는 같습니다(자세히는 36편).
+
+- 자신의 열거 가능한 프로퍼티만 복사합니다. 문자열 키와 심볼 키가 모두 포함되고, 열거 불가 프로퍼티와 상속받은 프로퍼티는 빠집니다.
+- 프로토타입은 복사되지 않습니다. 클래스 인스턴스를 복사하면 일반 객체가 되어 메서드와 `instanceof`를 잃습니다(자세히는 17편).
+- getter는 호출되어 그 결과가 일반 데이터 프로퍼티로 복사됩니다.
+- `writable: false` 같은 프로퍼티 어트리뷰트와 동결 상태는 복사되지 않습니다.
+- 대상 객체에 setter가 있으면 `Object.assign`은 그 setter를 호출하고, 스프레드는 호출하지 않고 프로퍼티를 새로 정의합니다.
+- 빈 칸이 있는 배열 `[1, , 3]`을 `[...arr]`나 `Array.from`으로 복사하면 빈 칸이 `undefined`가 되고, `slice`는 빈 칸을 유지합니다.
+
+```js
+class Pt { constructor() { this.x = 1 } m() {} }
+const c = { ...new Pt() }
+c            // { x: 1 }
+c instanceof Pt   // false
+c.m          // undefined
+```
+
+프로토타입과 어트리뷰트까지 유지하는 얕은 복사가 필요하면 다음 방식을 씁니다.
+
+```js
+const clone = Object.create(
+  Object.getPrototypeOf(obj),
+  Object.getOwnPropertyDescriptors(obj)
+)
+```
+
+### JSON을 이용한 깊은 복사
+
+`JSON.parse(JSON.stringify(value))`는 값을 문자열로 바꿨다가 되돌려 새 객체를 만듭니다. JSON으로 표현할 수 없는 값은 사라지거나 바뀝니다(자세히는 39편).
+
+```js
+const src = { a: undefined, d: new Date(0), m: new Map() }
+JSON.parse(JSON.stringify(src))
+// { d: '1970-01-01T00:00:00.000Z', m: {} }
+```
+
+| 값 | 왕복 결과 |
+|----|-----------|
+| 객체 프로퍼티의 `undefined`, 함수, 심볼 값 | 프로퍼티 제거 |
+| 배열 원소의 `undefined`, 함수 | `null` |
+| `NaN`, `Infinity`, `-Infinity` | `null` |
+| `-0` | `0` |
+| `Date` | ISO 문자열(Date가 아니게 됨) |
+| `Map`, `Set`, `RegExp` | 빈 객체 `{}` |
+| 심볼 키 | 제거 |
+| `BigInt`, 순환 참조 | TypeError |
+| 클래스 인스턴스 | 일반 객체. `toJSON`이 있으면 그 반환값 |
+
+같은 객체를 두 곳에서 가리키던 공유 구조도 두 개의 별개 객체가 됩니다.
+
+### 직접 구현하는 재귀 복사
+
+배열과 일반 객체만 다룬다면 재귀 함수로 충분합니다. `WeakMap`에 이미 복사한 객체를 기록해 순환 참조와 공유 참조를 처리합니다(자세히는 38편).
+
+```js
+function deepClone(v, seen = new WeakMap()) {
+  if (typeof v !== 'object' || v === null) return v
+  if (seen.has(v)) return seen.get(v)
+  const copy = Array.isArray(v) ? [] : {}
+  seen.set(v, copy)
+  for (const key of Object.keys(v)) {
+    copy[key] = deepClone(v[key], seen)
+  }
+  return copy
+}
+```
+
+`Date`, `Map`, `Set`, `RegExp`, 클래스 인스턴스는 처리하지 않습니다. `Date`를 넣으면 빈 객체 `{}`가 됩니다. 이런 타입까지 다루려면 타입별 분기를 추가하거나 `structuredClone`을 씁니다.
+
+흔한 실수는 중첩 구조에 얕은 복사를 하고 복사본의 하위 객체를 수정해 원본까지 바꾸는 것입니다. 2차원 배열 `[...matrix]`도 행 배열은 공유됩니다.
+
+## structuredClone과 한계
+
+`structuredClone(value)`는 값의 깊은 복사본을 반환하는 전역 함수입니다. HTML 표준이 정의하는 호스트 API이고 ECMAScript에는 속하지 않습니다(자세히는 01편). 브라우저에서는 2022년 3월부터 주요 브라우저 전반에서 지원되고, Node.js에서는 17.0.0부터 쓸 수 있습니다.
+
+```js
+const src = { when: new Date(0), tags: new Set(['a']) }
+src.self = src
+const copy = structuredClone(src)
+copy.when instanceof Date   // true
+copy.tags !== src.tags      // true
+copy.self === copy          // true (순환 참조 유지)
+```
+
+복제할 수 있는 값은 다음과 같습니다.
+
+- `Symbol`을 제외한 원시 값(BigInt 포함)
+- `Boolean`, `Number`, `String` 래퍼 객체
+- `Date`, `RegExp`, `Map`, `Set`, `Array`, 일반 객체
+- `ArrayBuffer`, 타입 배열, `DataView`
+- `Error`, `TypeError` 등 표준 오류 종류
+- `Blob`, `File` 같은 Web API 타입
+
+순환 참조와 공유 참조가 유지됩니다. `{ a: shared, b: shared }`를 복제하면 복사본의 `a`와 `b`도 같은 객체입니다. JSON 왕복과 다른 점입니다.
+
+복제할 수 없는 값이 하나라도 포함되면 `DataCloneError`(DOMException)를 던집니다. 한계는 다음과 같습니다.
+
+| 대상 | 결과 |
+|------|------|
+| 함수(값이나 프로퍼티) | `DataCloneError` |
+| `Symbol` 값 | `DataCloneError` |
+| DOM 노드 | `DataCloneError` |
+| `Proxy`, `WeakMap`, `Promise` | `DataCloneError` |
+| 클래스 인스턴스 | 프로토타입이 사라져 일반 객체가 된다. 비공개 필드 `#x`도 복사되지 않는다 |
+| getter, setter | getter가 호출되고 값만 일반 프로퍼티로 복사된다 |
+| 프로퍼티 어트리뷰트, 동결 상태 | 유실된다. 모두 기본값(쓰기 가능)으로 복사된다 |
+| 열거 불가 프로퍼티, 심볼 키, 상속 프로퍼티 | 복사되지 않는다 |
+| `RegExp`의 `lastIndex` | 복사되지 않는다 |
+| 표준 오류가 아닌 `Error` 서브클래스 | `name`이 `Error`가 된다 |
+
+```js
+class User { constructor() { this.id = 1 } hi() {} }
+const u = structuredClone(new User())
+u instanceof User   // false
+u                   // { id: 1 }
+structuredClone({ f() {} })   // DataCloneError
+```
+
+- 클래스 인스턴스를 복제하려면 인스턴스에 복사 메서드를 만들거나 직접 구현한 복사를 씁니다.
+- `structuredClone(value, { transfer: [buffer] })`처럼 `transfer` 옵션에 `ArrayBuffer` 등을 넘기면 복사하지 않고 소유권을 옮깁니다. 이동한 뒤 원본 버퍼의 `byteLength`는 `0`이 됩니다(자세히는 48편).
+
+흔한 실수는 함수나 클래스 인스턴스가 섞인 객체에 `structuredClone`을 쓰는 것입니다. 에러가 나거나 메서드가 없는 일반 객체가 나옵니다.
+
+## 복사 방법 비교표
+
+| 방법 | 깊이 | 프로토타입 | 한계 |
+|------|------|-----------|------|
+| `{ ...obj }`, `Object.assign` | 얕음 | 유실 | 하위 객체 공유, 열거 가능 프로퍼티만 복사 |
+| `[...arr]`, `slice`, `concat`, `Array.from` | 얕음 | 배열 유지 | 원소 객체 공유 |
+| `Object.create(proto, descriptors)` | 얕음 | 유지 | 하위 객체 공유, 동결 상태는 복사되지 않음 |
+| `JSON.parse(JSON.stringify(v))` | 깊음 | 유실 | `undefined`·함수 제거, `Date`는 문자열, 순환은 TypeError |
+| `structuredClone(v)` | 깊음 | 유실 | 함수·Symbol은 에러, 클래스 인스턴스는 일반 객체 |
+| 직접 구현한 재귀 | 깊음 | 구현에 따름 | 구현한 타입만 처리 |
+
+| 상황 | 선택 |
+|------|------|
+| 원시 값만 담긴 평면 객체·배열 | 스프레드 |
+| 중첩 구조의 일부 경로만 수정 | 바뀌는 경로만 복사(불변 업데이트) |
+| 데이터만 담긴 중첩 구조를 완전히 분리 | `structuredClone` |
+| 클래스 인스턴스·함수가 섞인 구조 | 직접 구현한 복사 |
+| 복사 없이 변경만 막고 싶다 | `Object.freeze` |
+
+## 방어적 복사
+
+방어적 복사(defensive copy)는 바깥에서 받은 객체를 그대로 저장하지 않고 복사해 저장하며, 안쪽 객체를 내보낼 때도 복사본을 내보내 바깥의 변경이 안쪽을 오염시키지 못하게 하는 기법입니다. 객체가 공유된다는 규칙에서 생기는 문제를 설계로 막는 방법입니다.
+
+```js
+class Cart {
+  #items
+  constructor(items) {
+    this.#items = [...items]   // 입력 복사
+  }
+  get items() {
+    return [...this.#items]    // 출력 복사
+  }
+}
+```
+
+```js
+const src = ['a']
+const cart = new Cart(src)
+src.push('x')
+cart.items.length   // 1 (바깥 변경이 들어오지 않는다)
+cart.items.push('y')
+cart.items.length   // 1 (반환된 복사본을 바꿔도 안은 그대로)
+```
+
+`#items`는 클래스 바깥에서 접근할 수 없는 비공개 필드입니다(자세히는 24편).
+
+- 복사는 입력과 출력 양쪽에서 합니다. 한쪽만 하면 그쪽으로 변경이 새어 들어갑니다.
+- 얕은 복사로는 원소가 객체일 때 원소가 공유됩니다. 원소 객체까지 보호해야 하면 깊은 복사를 합니다.
+
+```js
+const objs = [{ n: 1 }]
+const cart = new Cart(objs)   // 스프레드로 복사
+objs[0].n = 99
+cart.items[0].n   // 99 (원소 객체는 공유된다)
+```
+
+- 복사 대신 `Object.freeze`로 변경을 막을 수도 있습니다. 복사 비용이 없지만 freeze는 호출한 쪽이 넘긴 원본을 직접 동결하므로, 받은 객체에는 복사한 뒤 동결합니다.
+- 복사 비용은 데이터 크기에 비례합니다. 큰 구조를 호출마다 깊게 복사하지 말고, 경계(생성자, 공개 메서드)에서만 합니다.
+
+상태를 바꿀 때는 복사본을 만들고 바뀌는 경로만 새로 만드는 불변 업데이트 패턴을 씁니다. 바뀌지 않는 부분은 원본과 공유됩니다.
+
+```js
+const state = { user: { name: 'Kim', tags: ['a'] }, n: 0 }
+const next = {
+  ...state,
+  user: { ...state.user, name: 'Lee' },
+}
+state.user.name   // 'Kim' (원본 유지)
+next.user.name    // 'Lee'
+next.user.tags === state.user.tags   // true (안 바뀐 부분은 공유)
+```
+
+흔한 실수는 getter가 내부 배열을 그대로 반환하는 것입니다.
+
+```js
+get items() { return this.#items }   // ❌ 내부 배열이 노출된다
+cart.items.push('y')                 // 내부 상태가 바뀐다
+```
+
+## 핵심 정리
+
+- 원시 값(7종)은 불변이고, 대입과 인수 전달에서 값이 복사됩니다. 문자열 메서드는 새 문자열을 반환합니다.
+- 객체는 변경 가능하고, 대입과 인수 전달에서 참조가 복사되어 같은 객체를 공유합니다.
+- `const`는 재할당만 막고 `Object.freeze`는 얕게만 막으므로, 중첩 객체의 변경은 막히지 않습니다.
+- JavaScript의 인수 전달은 공유에 의한 전달입니다. 매개변수에 대입해도 호출한 쪽 변수는 바뀌지 않고, 객체의 프로퍼티 변경은 보입니다.
+- `===`는 원시 값은 값으로, 객체는 참조로 비교합니다.
+- 스프레드 계열은 얕은 복사, `structuredClone`은 데이터 구조의 깊은 복사이며 함수·Symbol은 복제하지 못하고 프로토타입을 잃습니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="const user = Object.freeze({ name: 'Kim', tags: ['a'] }) 선언 뒤에 user.tags.push('b')를 실행하면 어떻게 되는가?"
+  options={['TypeError가 발생한다', '아무 일도 일어나지 않고 무시된다', 'tags 배열에 b가 추가된다', 'user의 동결이 풀리고 b가 추가된다']}
+  correctAnswer={3}
+  explanation="Object.freeze는 얕은 동결이라 user의 프로퍼티만 잠그고, tags가 가리키는 배열은 잠그지 않습니다. tags는 동결되지 않은 일반 배열이므로 push가 정상 동작해 a, b 두 원소가 됩니다. 1번(TypeError)과 2번(무시)은 user 자체를 바꾸려 할 때의 동작이고, 4번은 한번 건 동결이 풀리지 않으므로 틀립니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="function f(list) { list.push(3); list = [9] } 를 정의하고 const arr = [1, 2]로 f(arr)를 호출했다. 호출 뒤 arr의 값은?"
+  options={['[1, 2]', '[1, 2, 3]', '[9]', '[1, 2, 3, 9]']}
+  correctAnswer={2}
+  explanation="매개변수 list는 arr와 같은 배열을 가리키는 참조의 복사본이므로 push(3)은 arr에 보입니다. 이후 list = [9]는 매개변수가 새 배열을 가리키게 할 뿐 호출한 쪽 변수 arr에는 영향이 없습니다. 따라서 [1, 2, 3]입니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="const a = { n: 1, inner: { v: 1 } }; const b = { ...a }; b.n = 5; b.inner.v = 2; 를 실행한 뒤 a.n과 a.inner.v의 값은?"
+  options={['1과 1', '1과 2', '5와 2', '5와 1']}
+  correctAnswer={2}
+  explanation="스프레드는 얕은 복사입니다. 최상위 프로퍼티 n은 값이 복사되어 b.n을 바꿔도 a.n은 1로 유지됩니다. inner는 참조가 복사되어 a.inner와 b.inner가 같은 객체이므로 b.inner.v = 2가 a.inner.v에도 반영되어 2가 됩니다."
+/>
+
+## 참고 자료
+
+- [ECMA-262 — ECMAScript Language Specification](https://tc39.es/ecma262/)
+- [MDN — Primitive](https://developer.mozilla.org/en-US/docs/Glossary/Primitive)
+- [MDN — Object.freeze()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/freeze)
+- [MDN — Equality comparisons and sameness](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Equality_comparisons_and_sameness)
+- [MDN — Shallow copy](https://developer.mozilla.org/en-US/docs/Glossary/Shallow_copy)
+- [MDN — Spread syntax](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Spread_syntax)
+- [MDN — structuredClone()](https://developer.mozilla.org/en-US/docs/Web/API/Window/structuredClone)
+- [MDN — Structured clone algorithm](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Structured_clone_algorithm)
+- [Node.js — Globals](https://nodejs.org/api/globals.html)

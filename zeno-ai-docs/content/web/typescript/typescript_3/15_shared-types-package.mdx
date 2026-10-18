@@ -1,0 +1,65 @@
+---
+title: '15. 공용 타입 패키지 만들기'
+description: '책 도메인 타입과 zod 스키마를 packages/shared-types로 옮기고 workspace 프로토콜로 참조합니다'
+---
+
+14편에서 `apps/web` + 빈 `packages/`로 폴더를 나눴습니다. 앞으로 만들 `packages/ui`(17편)나 서버 코드가 생기면 이 타입을 다시 정의하거나 상대 경로로 억지로 끌어와야 합니다.
+
+## 개념 정리
+
+### 왜 앱 안이 아니라 별도 패키지인가
+
+`apps/web/src/schemas/`에 두면 이 타입을 쓸 수 있는 곳은 `apps/web` 하나뿐입니다. 별도 패키지로 빼면 `packages/ui`, 나중에 추가될 서버 코드, 심지어 다른 앱도 같은 타입·같은 검증 규칙을 그대로 가져다 쓸 수 있습니다.
+
+### workspace: 프로토콜
+
+일반적인 npm 패키지는 버전 범위(`^1.2.0`)로 의존성을 명시하지만, 같은 워크스페이스 안의 패키지는 `workspace:` 프로토콜로 가리킵니다.
+
+| 표기 | 의미 |
+|------|------|
+| `workspace:*` | 워크스페이스에 있는 버전 그대로 연결. 배포 시 실제 버전 번호로 치환됨 |
+| `workspace:^` | 배포 시 `^`가 붙은 버전 범위로 치환됨 |
+
+```json
+{
+  "dependencies": {
+    "@bookshelf/shared-types": "workspace:*"
+  }
+}
+```
+
+별도의 빌드 없이도 `import`가 실제 소스 파일을 바로 찾아갑니다.
+
+### package.json의 main·types가 소스를 직접 가리키는 이유
+
+`packages/shared-types`는 아직 빌드 스크립트가 없습니다(빌드는 18편에서 `tsdown`으로 추가). 지금은 `package.json`의 `main`·`types`가 `dist/`가 아니라 `src/index.ts`를 직접 가리키게 해서, `apps/web`을 개발 모드로 실행하는 `vite`가 이 소스를 즉시 변환해 쓰도록 합니다.
+
+## 자주 하는 실수
+
+| 증상 | 원인 | 고치는 법 |
+|------|------|-----------|
+| `Cannot find module @bookshelf/shared-types` | `pnpm install`을 다시 실행하지 않음 | `package.json`에 의존성을 추가한 뒤 반드시 `pnpm install`을 실행해 링크를 새로 만든다 |
+| 타입은 잡히는데 실행 시 모듈을 못 찾음 | `packages/shared-types/package.json`의 `main`이 존재하지 않는 경로를 가리킴 | `main`·`types`가 실제 `src/index.ts` 경로와 정확히 일치하는지 확인한다 |
+| 스키마를 옮긴 뒤 어디서 import하는지 찾기 어려움 | 상대 경로 import를 하나씩 수동으로 찾음 | 에디터의 전체 검색으로 `from '../schemas/book'`, `from '../../schemas/book'`을 모두 찾아 바꾼다 |
+
+## 확인 문제
+
+<Quiz
+  questionNumber={1}
+  question={"도메인 타입을 apps/web 안이 아니라 packages/shared-types로 분리하는 가장 큰 이유는"}
+  options={["타입스크립트 컴파일 속도를 위해서만","여러 패키지(ui, 서버 등)가 같은 타입과 검증 규칙을 공유할 수 있게 하기 위해서","React 렌더링 성능을 높이기 위해서","zod 패키지 용량을 줄이기 위해서"]}
+  correctAnswer={2}
+  explanation={"별도 패키지로 분리하면 apps/web뿐 아니라 packages/ui나 서버 코드도 같은 소스에서 타입과 검증 규칙을 그대로 가져다 쓸 수 있습니다."}
+/>
+
+<Quiz
+  questionNumber={2}
+  question={"packages/shared-types/package.json의 main이 dist가 아니라 src/index.ts를 가리키는 이유는"}
+  options={["dist 폴더 이름이 금지어라서","아직 빌드 스크립트가 없어 개발 중에는 소스를 직접 쓰기 위해서","TypeScript가 dist 경로를 지원하지 않아서","테스트 실행 속도를 늦추기 위해서"]}
+  correctAnswer={2}
+  explanation={"tsdown 빌드는 18편에서 추가되므로, 그전까지는 main·types가 소스 파일을 직접 가리켜 개발 중 바로 쓸 수 있게 합니다."}
+/>
+
+## 참고 자료
+
+- [pnpm — Workspace](https://pnpm.io/workspaces)

@@ -1,0 +1,340 @@
+---
+title: '16. 최종 체크리스트와 면접 질문'
+description: '이벤트 루프 순서, 블로킹 탐지, 스트림, CJS·ESM, 에러 분류, graceful shutdown, 워커·클러스터 선택, 인증, N+1, 캐시, 배포 구성의 면접 질문과 답의 뼈대를 기초·중급·고급 편과 연결해 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** Node.js 면접 단골 질문 11가지에 대해, 정의에서 시작해 이유와 trade-off까지 말하는 답의 뼈대를 갖추고 더 파고들 편을 찾을 수 있습니다.
+</Callout>
+
+각 절은 대표 질문, 답의 뼈대, 이어지는 꼬리 질문, 연결 편 순서입니다. 답은 "정의 → 동작 이유 → 실무에서의 결정 → 한계" 순서로 말하면 짧아도 구조가 잡힙니다. 버전과 기본값은 2026-10 기준 공식 문서에서 확인한 값입니다.
+
+## 이벤트 루프 순서
+
+**대표 질문:** 아래 코드의 출력 순서와 그 이유를 설명하세요.
+
+```js
+// CommonJS 파일의 최상위
+console.log('A');
+setTimeout(() => console.log('B'), 0);
+setImmediate(() => console.log('C'));
+Promise.resolve().then(() => console.log('D'));
+process.nextTick(() => console.log('E'));
+console.log('F');
+// A F E D 다음에 B와 C (B, C 순서는 보장되지 않음)
+```
+
+**답의 뼈대**
+
+1. 동기 코드(`A`, `F`)가 콜 스택에서 먼저 끝납니다.
+2. 스택이 비면 `process.nextTick` 큐(`E`)가 비워지고, 이어 Promise 마이크로태스크 큐(`D`)가 비워집니다. 둘 다 이벤트 루프의 다음 단계로 넘어가기 전에 처리됩니다. nextTick을 재귀로 계속 걸면 루프가 굶습니다.
+3. 이벤트 루프 단계는 timers → pending callbacks → idle·prepare → poll → check → close callbacks 순서입니다. `setTimeout`은 timers에서, `setImmediate`는 check에서 실행됩니다.
+4. 최상위에서 `setTimeout(0)`과 `setImmediate`의 순서는 프로세스 성능에 따라 달라 보장되지 않습니다. I/O 콜백 안에서는 poll 다음이 check라서 `setImmediate`가 항상 먼저입니다.
+5. 타이머의 시간은 정확한 실행 시각이 아니라 최소 지연(임계값)입니다.
+
+**꼬리 질문:** ESM의 최상위에서는 순서가 같은가? 같지 않습니다. CommonJS에서는 `nextTick`이 Promise보다 먼저이고 ES 모듈의 최상위에서는 Promise가 먼저입니다. Node.js `process` 문서의 `queueMicrotask`와 `nextTick` 비교 절을 참고하고, 실행 순서 문제는 기초 04편에서 다룹니다.
+
+**연결:** 기초 03편(단계), 기초 04편(타이머와 마이크로태스크), 06편(libuv 내부 구현).
+
+## 블로킹 탐지
+
+**대표 질문:** 서버가 갑자기 느려졌습니다. 이벤트 루프가 막혔는지 어떻게 확인하고, 막는 원인은 무엇인가요?
+
+**답의 뼈대**
+
+1. Node.js는 이벤트 루프 하나가 요청을 조율하고, 파일·DNS·일부 암호·압축은 작은 워커 풀이 맡습니다. 한 콜백이 오래 돌면 모든 요청이 기다립니다. 공식 가이드의 표현으로 각 클라이언트에 대한 작업이 작아야 빠릅니다.
+2. 막는 대표 원인은 다음과 같습니다.
+   - 동기 API(`fs.readFileSync`, `pbkdf2Sync`, `zlib` 동기판, `spawnSync`).
+   - 큰 JSON의 `JSON.parse`·`stringify`. 가이드는 50MB 문자열 파싱에 약 1.3초 걸린 예를 듭니다.
+   - 중첩 수량자가 있는 정규식(ReDoS).
+   - 긴 동기 루프와 큰 배열 정렬 같은 CPU 계산.
+3. 확인은 지표로 합니다. `perf_hooks.monitorEventLoopDelay()`의 히스토그램에서 평균, 최대, p99 지연(나노초)을 보고, `performance.eventLoopUtilization()`의 `utilization`(0에서 1) 값이 1에 가까우면 루프가 쉬지 못하는 것입니다.
+4. 원인은 `node --cpu-prof`로 CPU 프로파일을 만들어 DevTools나 플레임그래프로 어느 함수가 오래 도는지 봅니다(`--heap-prof`는 힙).
+5. 해법은 비동기·스트림으로 바꾸기, 작업을 잘게 나눠 `setImmediate`로 양보하기(partitioning), 워커 스레드나 자식 프로세스로 옮기기(offloading)입니다.
+
+**꼬리 질문:** libuv 스레드 풀의 기본 크기는? 4개이고 `UV_THREADPOOL_SIZE`로 바꾸며 최대 1024입니다. 파일 시스템 연산과 `getaddrinfo`·`getnameinfo`가 이를 쓰고, TCP·UDP·파이프 같은 네트워크 I/O는 쓰지 않습니다. 그래서 `dns.lookup`이 몰리면 파일 읽기가 느려질 수 있습니다.
+
+**연결:** 기초 04편, 04편(성능), 05편(프로파일링), 06편, 07편(ReDoS).
+
+## 스트림과 backpressure
+
+**대표 질문:** 큰 파일을 HTTP 응답으로 보낼 때 `readFile`을 쓰면 안 되는 이유와 backpressure가 무엇인지 설명하세요.
+
+**답의 뼈대**
+
+1. `readFile`은 파일 전체를 메모리에 올려 요청 수에 비례해 메모리가 늘고, 스트림은 조각 단위로 흘려 메모리를 일정하게 유지합니다.
+2. backpressure는 데이터가 소비되는 속도보다 빨리 들어와 버퍼에 쌓이는 현상입니다. 무시하면 메모리 폭증과 가비지 컬렉션 부담이 생깁니다.
+3. Writable의 `write()`가 `false`를 돌려주면 내부 버퍼가 `highWaterMark`(기본 16KB, objectMode는 16개)를 넘은 것입니다. 이때 Readable을 멈추고 `'drain'` 이벤트가 오면 다시 흘립니다.
+4. `pipe()`와 `pipeline()`이 이 과정을 자동으로 처리합니다. `readable.on('data', (d) => writable.write(d))`는 반환값을 무시해서 backpressure를 깨뜨립니다.
+5. `pipeline()`은 에러가 나면 연결된 모든 스트림을 정리하고 콜백(또는 `stream/promises` 버전의 Promise)으로 에러를 줍니다. `pipe()`는 에러 전파와 정리를 해 주지 않아서 파일 핸들 누수가 생깁니다.
+
+```js
+import { pipeline } from 'node:stream/promises';
+import { createReadStream } from 'node:fs';
+import { createGzip } from 'node:zlib';
+
+await pipeline(
+  createReadStream('in.log'),
+  createGzip(),
+  res, // HTTP 응답도 Writable
+);
+```
+
+**꼬리 질문:** 웹 스트림과의 차이는? 웹 스트림은 브라우저와 같은 표준 API이고 Node 스트림과는 `Readable.toWeb`, `Readable.fromWeb` 등으로 변환합니다(15편).
+
+**연결:** 중급 01편(스트림 기초), 중급 02편(pipeline과 backpressure), 04편.
+
+## CJS·ESM
+
+**대표 질문:** CommonJS와 ES Modules의 차이, 그리고 둘을 섞어 쓸 때 생기는 문제는?
+
+**답의 뼈대**
+
+| 항목 | CommonJS | ES Modules |
+|------|----------|------------|
+| 문법 | `require`, `module.exports` | `import`, `export` |
+| 로딩 | 동기 | 비동기(정적 분석 후 로드) |
+| 내보낸 값 | 값의 스냅샷(캐시된 `module.exports`) | 라이브 바인딩 |
+| 최상위 `await` | 불가 | 가능 |
+| 파일 확장자 | 생략 가능 | import 경로에 확장자 필수 |
+| `__dirname`, `__filename` | 있음 | 없음, `import.meta.dirname`·`import.meta.filename` 사용 |
+| JSON | `require('./a.json')` | `import` 뒤에 `with { type: 'json' }` 필요 |
+
+- 어느 쪽인지는 확장자(`.mjs`, `.cjs`)와 가장 가까운 `package.json`의 `"type"`이 정합니다.
+- ESM에서 CommonJS를 `import`하면 `module.exports`가 기본 내보내기가 됩니다. 이름 있는 내보내기는 정적 분석으로 추정하는 편의 기능이라 항상 잡히지 않습니다.
+- CommonJS에서 ESM을 가져오는 길은 두 가지입니다. 비동기 `import()`와, v22.12.0·v20.19.0부터 플래그 없이 되는 `require(esm)`입니다. 후자는 최상위 `await`가 없는 모듈만 되고 있으면 `ERR_REQUIRE_ASYNC_MODULE`이 납니다.
+- ESM에서 `require`가 필요하면 `module.createRequire(import.meta.url)`을 씁니다.
+- 새 코드는 ESM과 `node:` 접두사를 기본으로 하고, 라이브러리는 `exports`의 조건(`import`, `require`)으로 형식을 나눠 공개합니다.
+
+**꼬리 질문:** "ERR_REQUIRE_ESM"이나 "Cannot use import statement outside a module"는 왜 나는가? 형식과 확장자·`type` 설정이 어긋난 것입니다. `__dirname`이 없다는 에러도 같은 계열입니다.
+
+**연결:** 기초 08편(CommonJS), 기초 09편(ES Modules), 기초 10편(모듈 해석), 기초 27편(TypeScript), 15편(`require(esm)`).
+
+## 에러 분류
+
+**대표 질문:** Node.js에서 에러를 어떻게 분류하고, 각각 어떻게 처리하나요?
+
+**답의 뼈대**
+
+1. 에러가 전달되는 방식이 네 가지입니다. 동기는 `throw`와 `try...catch`, Promise는 rejection과 `await`의 `try...catch`, 콜백은 첫 인수 `err`, EventEmitter는 `'error'` 이벤트입니다. 방식마다 잡는 곳이 달라서 하나를 빠뜨리면 프로세스가 죽거나 실패가 조용히 사라집니다.
+2. Node.js 문서가 나누는 종류는 표준 JavaScript 에러(`TypeError`, `RangeError` 등), 시스템 에러(`ENOENT`, `ECONNREFUSED` 같은 OS 제약), 단정 에러(`AssertionError`), 사용자 정의 에러입니다.
+3. 에러는 `message`가 아니라 `code`로 구분합니다. 문서가 메시지는 버전마다 바뀔 수 있다고 안내합니다. 원인을 잇는 `new Error(msg, { cause })`로 체인을 보존합니다.
+4. 운영 관점의 분류(이 시리즈의 용어)는 운영 에러와 프로그래머 에러입니다. 운영 에러는 예상 가능한 실패(연결 거부, 입력 오류, 타임아웃)라서 처리·재시도·사용자 응답으로 끝내고, 프로그래머 에러는 버그(`TypeError`, 상태 불일치)라서 로깅하고 프로세스를 재시작합니다.
+5. 처리되지 않은 Promise rejection은 Node 15 이상에서 기본이 throw 모드라 uncaught exception이 됩니다. `uncaughtException` 핸들러는 마지막 수단이고, 문서는 이후 프로세스가 정의되지 않은 상태가 되므로 정상 재개가 안전하지 않고 동기 정리만 하라고 안내합니다. 그래서 기록 후 종료하고 프로세스 매니저나 오케스트레이터가 다시 띄웁니다.
+6. HTTP 응답은 도메인 에러를 상태 코드와 일관된 본문(RFC 9457)으로 바꿉니다. 내부 스택·쿼리를 응답에 노출하지 않습니다.
+
+**꼬리 질문:** `fetch`가 404에서 reject하지 않는 이유는? HTTP 오류 상태도 정상 응답이라서 `res.ok`를 확인해야 하고, 네트워크 실패만 reject됩니다.
+
+**연결:** 기초 24편, 기초 25편(에러), 중급 08편(상태 코드), 12편(에러 계층), 13편(RFC 9457).
+
+## graceful shutdown
+
+**대표 질문:** 배포 중에 요청이 끊기지 않게 서버를 종료하려면 어떻게 하나요?
+
+**답의 뼈대**
+
+1. 오케스트레이터는 종료할 때 `SIGTERM`을 보내고 유예 시간이 지나면 `SIGKILL`로 죽입니다. `SIGKILL`은 핸들러를 달 수 없습니다. 비Windows에서 `SIGTERM`·`SIGINT`의 기본 동작은 즉시 종료(종료 코드 128 + 시그널 번호)이므로 핸들러를 직접 달아야 정리할 수 있습니다.
+2. 순서는 다음과 같습니다.
+   - 준비 상태 확인(readiness)이 실패하도록 바꿔 로드 밸런서가 새 요청을 보내지 않게 합니다.
+   - `server.close()`로 새 연결을 받지 않습니다. v19.0.0부터 이 호출이 유휴 연결도 닫습니다.
+   - 진행 중인 요청이 끝나길 기다립니다.
+   - DB 연결, 큐 워커, 타이머를 정리합니다.
+   - 시간 제한을 두고, 넘으면 `server.closeAllConnections()`(v18.2.0)로 강제 종료합니다.
+3. 종료 코드는 `process.exit()`로 바로 끊지 말고 `process.exitCode`로 설정해 대기 중인 작업이 끝나게 합니다.
+4. 컨테이너에서는 PID 1의 시그널 처리가 문제가 될 수 있어서, 앱이 시그널을 직접 받도록 시작 방식과 init 프로세스를 점검합니다(08편).
+5. `beforeExit`은 이벤트 루프가 비었을 때만 불리고 `process.exit()`나 시그널로 죽을 때는 불리지 않아 정리의 근거로 쓰면 안 됩니다.
+
+```js
+const stop = (sig) => () => {
+  console.log(sig);
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(1), 10_000).unref();
+};
+process.on('SIGTERM', stop('SIGTERM'));
+process.on('SIGINT', stop('SIGINT'));
+```
+
+**꼬리 질문:** 로드 밸런서의 idle timeout과 서버 `keepAliveTimeout`(기본 5초)의 관계는? 서버가 먼저 연결을 닫으면 로드 밸런서가 닫힌 연결로 요청을 보내 오류가 날 수 있어서, 서버 쪽 keep-alive 값을 로드 밸런서의 idle timeout보다 길게 두라는 것이 일반적인 권장입니다(중급 06편).
+
+**연결:** 중급 25편(설정·시그널·종료), 중급 06편(타임아웃), 08편(PID 1, 컨테이너 시그널), 09편(헬스체크, 무중단 배포), 11편(readiness).
+
+## 워커·클러스터 선택
+
+**대표 질문:** 워커 스레드, 클러스터, 자식 프로세스, 스케일 아웃은 각각 언제 쓰나요?
+
+**답의 뼈대**
+
+| 선택 | 해결하는 문제 | 메모리 | 통신 |
+|------|---------------|--------|------|
+| 워커 스레드 | 한 프로세스 안의 CPU 계산(해시, 이미지, 파싱) | 스레드마다 V8 인스턴스, `SharedArrayBuffer`로 공유 가능 | `postMessage`(구조적 복제, `transferList`) |
+| 클러스터 | 한 머신의 여러 코어에서 같은 서버 실행 | 프로세스 간 공유 안 됨 | IPC |
+| 자식 프로세스 | 외부 프로그램 실행, 격리된 Node 스크립트 | 별도 프로세스 | stdio, IPC(`fork`) |
+| 스케일 아웃 | 여러 머신·컨테이너에 인스턴스 추가 | 인스턴스별 | 외부 저장소·큐 |
+
+1. 워커는 I/O를 빠르게 해 주지 않습니다. I/O는 이미 비동기이므로 CPU 바운드 작업에만 효과가 있습니다.
+2. 클러스터는 같은 포트를 여러 프로세스가 받아 코어를 쓰게 합니다. 프로세스끼리 메모리를 공유하지 않으므로 세션·캐시·카운터는 Redis 같은 외부 저장소로 빼야 하고(무상태 설계), 상태가 필요하면 sticky session을 씁니다.
+3. 컨테이너 환경에서는 클러스터 대신 컨테이너를 코어 수에 맞춰 늘리고 오케스트레이터가 분산하는 편이 일반적입니다. 헬스체크·재시작·배포 단위가 컨테이너 하나와 일치하기 때문입니다.
+4. 순서는 먼저 측정해 병목이 CPU인지 I/O인지 확인하고, CPU면 워커나 외부 작업 큐, 처리량이 모자라면 인스턴스를 늘립니다. 유입 폭주는 큐로 완충합니다(14편).
+5. 워커에는 함수를 그대로 넘길 수 없고 구조적 복제가 가능한 값만 복사됩니다.
+
+**꼬리 질문:** 워커를 요청마다 만들면? 생성 비용이 크므로 워커 풀(piscina 같은 도구)로 재사용합니다.
+
+**연결:** 01편(자식 프로세스), 02편(워커 스레드), 03편(클러스터와 스케일 아웃), 04편(성능), 09편, 14편.
+
+## 인증 방식
+
+**대표 질문:** 세션 기반과 JWT 기반 인증을 비교하고, 어떤 상황에서 무엇을 쓰는지 설명하세요.
+
+**답의 뼈대**
+
+| 항목 | 세션(쿠키) | JWT(액세스 토큰) |
+|------|------------|------------------|
+| 상태 저장 | 서버가 세션을 저장(Redis, DB) | 토큰 자체에 클레임을 담고 서명 |
+| 폐기 | 서버에서 세션 삭제로 즉시 | 만료 전 폐기가 어려움, 짧은 만료와 거부 목록 필요 |
+| 확장 | 공유 저장소 필요 | 서버가 저장소 없이 서명만 검증 |
+| 크기 | 쿠키에는 ID만 | 클레임만큼 커짐 |
+| 약점 | 쿠키 기반이라 CSRF 대응 필요 | 저장 위치와 탈취, 알고리즘 검증 실수 |
+
+1. 세션 ID는 서버가 CSPRNG로 만든 의미 없는 값이어야 하고(OWASP는 최소 64비트 엔트로피), 쿠키에는 `Secure`, `HttpOnly`, `SameSite`를 붙입니다. 로그인 같은 권한 변경 직후 세션 ID를 새로 발급해 세션 고정을 막고, 로그아웃은 서버에서 세션을 파기하며, 유휴 만료와 절대 만료를 둘 다 둡니다.
+2. JWT는 `header.payload.signature` 세 부분을 base64url로 인코딩한 값이고, 클레임으로 `iss`, `sub`, `aud`, `exp`, `nbf`, `iat`, `jti` 등을 씁니다. 서명만 된 JWT의 페이로드는 base64url 인코딩일 뿐 누구나 읽을 수 있으므로 비밀을 넣지 않습니다.
+3. JWT 검증은 서명, `exp`, `iss`, `aud`를 모두 확인합니다. RFC 8725는 라이브러리 호출자가 허용 알고리즘 집합을 지정하고 그 밖은 쓰지 않으며, `none`은 따로 보호되지 않는 한 거부하라고 권합니다. 토큰의 `alg` 헤더를 그대로 믿으면 안 됩니다.
+4. 실무 조합은 짧은 수명의 액세스 토큰과 긴 수명의 리프레시 토큰입니다. 리프레시 토큰은 새 액세스 토큰을 받는 데 쓰고 서버에서 폐기·회전할 수 있게 저장합니다.
+5. OAuth 2.0은 인증 방식이 아니라 위임된 권한 부여 프레임워크입니다. 역할은 리소스 소유자, 리소스 서버, 클라이언트, 인가 서버이고, 가장 안전한 흐름인 인가 코드 방식은 클라이언트가 사용자의 비밀번호를 직접 다루지 않게 합니다. 로그인(신원 확인)까지 하려면 그 위의 OIDC를 씁니다.
+6. 인증(누구인가)과 인가(무엇을 할 수 있는가)를 구분하고, 비밀번호는 argon2·bcrypt 같은 느린 해시로 저장합니다.
+
+**꼬리 질문:** JWT를 로그아웃시키려면? 만료를 짧게 하고, 서버에 거부 목록을 두거나 리프레시 토큰을 폐기합니다. 이러면 서버 상태가 생겨 JWT의 무상태 이점이 줄어드는 trade-off를 말합니다.
+
+**연결:** 중급 09편(CORS와 쿠키), 중급 10편(세션·토큰·인증·인가), 07편(보안).
+
+## N+1
+
+**대표 질문:** N+1 문제란 무엇이고 어떻게 찾아 해결하나요?
+
+**답의 뼈대**
+
+1. N+1은 목록을 가져오는 쿼리 1번 뒤에 각 항목의 연관 데이터를 가져오는 쿼리가 N번 나가는 문제입니다. Prisma 문서의 정의로, 결과를 반복하면서 결과마다 쿼리를 하나씩 더 실행하는 것입니다. GraphQL의 필드별 resolver에서도 같은 모양으로 생깁니다.
+2. 찾는 방법: 쿼리 로그에서 같은 모양의 쿼리가 반복되는지 보고, 요청 하나당 쿼리 수와 트레이스의 DB 구간을 봅니다. 개발 환경의 적은 데이터에서는 드러나지 않습니다.
+3. 해결 방법은 다음과 같습니다.
+   - 연관 데이터를 한 번에 읽기(ORM의 `include`, JOIN). Prisma는 `relationLoadStrategy: "join"`으로 쿼리를 하나로 만듭니다.
+   - ID 목록을 모아 `IN` 조건으로 한 번 더 조회(총 2번).
+   - 같은 틱의 요청을 모아 한 번에 보내는 배치(DataLoader 계열).
+4. JOIN은 행이 곱해져 결과가 커질 수 있고, `IN`은 목록이 너무 길면 나눠야 합니다. 상황에 맞춰 고릅니다.
+5. 같이 점검할 것: 조회 조건 컬럼의 인덱스, 필요한 컬럼만 가져오기, 페이지네이션(13편), 커넥션 풀 크기.
+
+```js
+// ❌ 사용자 수만큼 쿼리
+for (const u of users) u.posts = await findPosts(u.id);
+// ✅ 두 번의 쿼리
+const posts = await findPostsIn(users.map((u) => u.id));
+```
+
+**꼬리 질문:** 왜 코드에서 안 보이는가? ORM의 지연 로딩이나 resolver가 쿼리를 숨기기 때문입니다.
+
+**연결:** 중급 16편(데이터 저장), 중급 17편(SQL과 ORM), 11편(트레이스), 13편(GraphQL).
+
+## 캐시 전략
+
+**대표 질문:** 캐시를 어디에 어떻게 두고, 무효화는 어떻게 하나요?
+
+**답의 뼈대**
+
+1. 캐시 위치는 계층별입니다. 브라우저·CDN(HTTP 캐시 헤더, 13편), 애플리케이션 메모리, 공유 캐시(Redis), DB입니다. 인스턴스 메모리 캐시는 인스턴스마다 값이 달라 불일치가 생기므로 여러 인스턴스에서는 공유 캐시가 맞습니다.
+2. 대표 패턴은 cache-aside입니다. 캐시에서 먼저 읽고, 없으면(miss) 저장소에서 읽어 캐시에 넣고 반환합니다. 쓰기는 저장소에 먼저 쓰고 캐시 항목을 무효화합니다. 순서를 바꿔 캐시를 먼저 지우면 그 사이의 읽기가 옛 값을 다시 캐시에 넣을 수 있습니다.
+3. 쓰기 직후 읽기 정합성이 중요하면 write-through(저장소와 캐시를 같은 쓰기에서 갱신)를 검토합니다. cache-aside는 정합성을 보장하지 않습니다.
+4. TTL은 접근 패턴에 맞춥니다. 너무 짧으면 계속 miss이고 너무 길면 오래된 값이 남습니다. 용량이 차면 LRU 같은 정책으로 밀려납니다.
+5. 캐시를 쓰지 않는 쪽이 나은 경우: 민감한 데이터, 거의 모든 요청이 miss인 데이터, 항상 최신이어야 하는 데이터입니다.
+6. 운영 위험: 인기 키가 만료되는 순간 요청이 한꺼번에 저장소로 몰리는 stampede(대응은 만료 시각에 지터 추가, 갱신 락, 오래된 값 임시 반환), 캐시 장애 시 저장소로 폴백하되 보호하기(14편의 graceful degradation), 캐시된 값에 개인 정보가 섞여 다른 사용자에게 나가는 사고입니다.
+
+**꼬리 질문:** "캐시 무효화는 어렵다"는 말은? 같은 데이터가 여러 곳에 복제되어 무엇을 언제 지울지 알기 어렵기 때문이고, 그래서 TTL을 안전망으로 함께 둡니다.
+
+**연결:** 중급 18편(Redis·캐시), 13편(ETag·Cache-Control), 14편.
+
+## 배포 구성
+
+**대표 질문:** Node.js 서비스를 운영에 배포하려면 무엇을 갖춰야 하나요?
+
+**답의 뼈대**
+
+1. 12-Factor를 기준으로 설명하면 짧습니다. 설정은 환경에 둡니다(코드와 분리, 시크릿은 저장소 밖). 프로세스는 무상태로 만들고(스케일 아웃의 전제), 빠른 시작과 graceful shutdown으로 폐기 가능하게 하며, 로그는 stdout의 이벤트 스트림으로 내보냅니다. 빌드와 실행을 분리하고, 개발·운영의 차이를 줄입니다.
+2. 이미지: 멀티 스테이지 빌드로 빌드 도구를 최종 이미지에서 빼고, 운영 의존성만 설치(`npm ci --omit=dev` 계열)하며, non-root 사용자(`node`)로 실행하고, `.dockerignore`로 `node_modules`·`.git`이 컨텍스트에 들어가지 않게 합니다. Docker의 Node.js 가이드가 이 구성을 따릅니다.
+3. 버전 고정: 이미지 태그와 `engines`, `.nvmrc`로 Node.js 버전을 고정하고, 운영은 LTS 단계의 버전을 씁니다. 락파일을 커밋하고 CI에서는 `npm ci`를 씁니다.
+4. 상태 점검: liveness(프로세스가 살아 있나)와 readiness(트래픽을 받아도 되나)를 나눠 노출합니다. 오케스트레이터가 이 값으로 재시작과 트래픽 분배를 결정합니다.
+5. 배포 방식: 롤링이나 블루그린으로 무중단 배포하고, graceful shutdown과 짝으로 동작해야 합니다. 데이터 마이그레이션은 이전 버전 코드와 호환되게 단계를 나눕니다.
+6. 관측성: 구조화 로그와 상관 ID, 요청률·오류율·지연(RED) 지표, 트레이스, 에러 추적, 알림 기준을 배포 전에 정합니다.
+7. 운영 안전: 보안 헤더, 본문·헤더 크기 제한, rate limit, 의존성 감사와 비밀값 관리, 인스펙터(`--inspect`)를 공개 주소에 열지 않기(문서가 안전하지 않다고 경고).
+
+**출시 전 점검표**
+
+| 영역 | 확인할 것 |
+|------|-----------|
+| 설정 | 환경 변수 주입, 시작 시 검증, 시크릿이 이미지·저장소에 없음 |
+| 종료 | `SIGTERM` 처리, 진행 요청 대기, 강제 종료 시한 |
+| 안정성 | 모든 나가는 호출의 타임아웃, 재시도 상한, 멱등성 |
+| 성능 | 동기 API 없음, 이벤트 루프 지연 지표, 메모리 한도 |
+| 보안 | 입력 검증, 인증·인가, rate limit, 의존성 점검 |
+| 관측 | 로그, 지표, 트레이스, 알림, 헬스체크 |
+| 배포 | 이미지 크기, non-root, 롤백 방법, 마이그레이션 호환 |
+
+**꼬리 질문:** 컨테이너 안에서 PM2가 필요한가? 오케스트레이터가 재시작과 확장을 맡으므로 보통 필요하지 않습니다. 단일 서버에 직접 배포하면 프로세스 매니저가 필요합니다.
+
+**연결:** 08편(배포 전에), 09편(Docker와 CI/CD), 10편(AWS와 서버리스), 11편(관측성), 07편(보안).
+
+## 핵심 정리
+
+- 이벤트 루프는 동기 코드 → nextTick → Promise 마이크로태스크 → 단계 순서로 말하고, 최상위의 `setTimeout(0)`과 `setImmediate`는 순서가 보장되지 않는다고 덧붙입니다.
+- 블로킹은 동기 API, 큰 JSON, ReDoS, CPU 계산이 원인이고 이벤트 루프 지연 지표와 CPU 프로파일로 확인하며, 워커 풀 기본 크기는 4입니다.
+- 스트림은 `pipeline`으로 backpressure(`write()`의 `false`, `highWaterMark`, `drain`)와 에러 정리를 맡기고, CJS와 ESM은 로딩, 바인딩, 확장자, `__dirname`의 차이로 설명합니다.
+- 에러는 `code`로 구분하고 운영 에러는 처리, 프로그래머 에러는 기록 후 재시작이며, 종료는 `SIGTERM`, `server.close()`, 진행 요청 대기, 시한 후 강제 종료 순서입니다.
+- 워커는 CPU, 클러스터와 스케일 아웃은 처리량이며, 클러스터는 메모리를 공유하지 않으므로 무상태 설계가 전제입니다.
+- 인증은 세션과 JWT의 폐기·확장 trade-off로, N+1은 쿼리 수 줄이기로, 캐시는 cache-aside와 무효화 순서로, 배포는 12-Factor와 점검표로 답합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="HTTP 서버를 종료하기 위해 SIGTERM을 받았을 때 올바른 순서로 가장 알맞은 것은?"
+  options={['process.exit(0)을 즉시 호출한다', '서버 close로 새 연결을 막고, 진행 중인 요청이 끝나기를 기다린 뒤 자원을 정리하며, 시한이 지나면 강제 종료한다', 'beforeExit 이벤트에서 모든 정리를 수행한다', 'SIGKILL 핸들러를 달아 정리 작업을 한다']}
+  correctAnswer={2}
+  explanation="graceful shutdown은 새 연결 차단, 진행 중 요청 대기, 자원 정리, 시한 후 강제 종료 순서입니다. process.exit(0)은 진행 중인 요청을 끊고, beforeExit은 시그널이나 exit 호출로 죽을 때 불리지 않으며, SIGKILL에는 핸들러를 달 수 없습니다."
+  optionExplanations={['즉시 종료하면 처리 중이던 요청이 끊깁니다', '새 연결을 막고 진행 요청을 기다린 뒤 정리하고 시한을 두는 것이 graceful shutdown의 순서입니다', 'beforeExit은 이벤트 루프가 비었을 때만 불리므로 시그널 종료의 정리 근거로 쓸 수 없습니다', 'SIGKILL은 프로세스가 가로챌 수 없는 시그널이라 핸들러를 달 수 없습니다']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="큰 파일을 읽어 응답으로 보내는 코드에서 readable의 data 이벤트마다 writable.write를 호출하는 방식으로 연결했더니 메모리가 크게 늘었습니다. 가장 알맞은 원인과 해법은?"
+  options={['write의 반환값을 무시해 backpressure가 깨졌으므로 pipeline으로 연결한다', 'highWaterMark가 너무 작으므로 무한대로 늘린다', 'gzip은 동기 작업이므로 Promise.all로 감싼다', 'data 이벤트가 느리므로 setImmediate로 감싼다']}
+  correctAnswer={1}
+  explanation="write가 false를 돌려주면 버퍼가 highWaterMark를 넘었다는 신호인데 이를 무시하고 계속 쓰면 데이터가 메모리에 쌓입니다. pipeline은 backpressure를 자동으로 처리하고 에러 시 스트림을 정리합니다. highWaterMark를 늘리면 쌓이는 양만 커지고, Promise.all이나 setImmediate는 속도 불균형을 해결하지 못합니다."
+  optionExplanations={['write의 반환값을 무시한 것이 원인이고 pipeline이 backpressure와 정리를 맡아 해결합니다', 'highWaterMark를 늘리면 버퍼에 더 많이 쌓일 뿐 생산과 소비 속도 차이는 그대로입니다', 'Promise.all은 병렬 실행 도구라서 쓰기 속도에 맞춰 읽기를 멈추게 하지 못합니다', 'setImmediate는 실행 시점을 바꿀 뿐 backpressure 신호를 처리하지 않습니다']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="게시글 목록 API가 사용자 100명의 글을 보여 주는데 DB 쿼리가 101번 실행됩니다. 이 문제의 이름과 해결 방향으로 알맞은 것은?"
+  options={['캐시 스탬피드, 만료 시각에 지터를 더한다', 'N+1 문제, 연관 데이터를 JOIN이나 IN 조건으로 한 번에 읽는다', '백프레셔 문제, highWaterMark를 늘린다', '서킷 브레이커 문제, 실패 임계값을 올린다']}
+  correctAnswer={2}
+  explanation="목록 쿼리 1번과 항목별 연관 쿼리 100번이 나가는 모양이 N+1 문제입니다. 연관 데이터를 JOIN이나 include, ID 목록을 모은 IN 조건, 배치로 한꺼번에 읽어 쿼리 수를 줄입니다. 스탬피드는 캐시 만료 시 요청이 몰리는 현상이고, 백프레셔는 스트림의 속도 차이, 서킷 브레이커는 실패하는 호출 차단과 관련이 있습니다."
+  optionExplanations={['캐시 스탬피드는 인기 키 만료 시 저장소로 요청이 몰리는 문제로 쿼리 101번과 모양이 다릅니다', '목록 1번에 항목별 쿼리 N번이 나가는 N+1 문제이고 JOIN이나 IN 또는 배치로 쿼리 수를 줄여 해결합니다', '백프레셔는 스트림에서 생산 속도가 소비 속도보다 빠른 문제입니다', '서킷 브레이커는 실패하는 의존 호출을 막는 패턴이라 쿼리 반복과 무관합니다']}
+/>
+
+## 참고 자료
+
+- [Node.js Learn — The Node.js Event Loop](https://nodejs.org/en/learn/asynchronous-work/event-loop-timers-and-nexttick)
+- [Node.js Learn — Don't Block the Event Loop (or the Worker Pool)](https://nodejs.org/en/learn/asynchronous-work/dont-block-the-event-loop)
+- [Node.js Learn — Backpressuring in Streams](https://nodejs.org/en/learn/modules/backpressuring-in-streams)
+- [Node.js — process](https://nodejs.org/api/process.html)
+- [Node.js — perf_hooks](https://nodejs.org/api/perf_hooks.html)
+- [Node.js — Command-line API (--cpu-prof, --heap-prof, --inspect)](https://nodejs.org/api/cli.html)
+- [Node.js — ECMAScript modules](https://nodejs.org/api/esm.html)
+- [Node.js — Modules: CommonJS](https://nodejs.org/api/modules.html)
+- [Node.js — Errors](https://nodejs.org/api/errors.html)
+- [Node.js — HTTP (server.close, closeAllConnections)](https://nodejs.org/api/http.html)
+- [libuv — Thread pool work scheduling](https://docs.libuv.org/en/v1.x/threadpool.html)
+- [RFC 7519 — JSON Web Token](https://www.rfc-editor.org/rfc/rfc7519.html)
+- [RFC 8725 — JSON Web Token Best Current Practices](https://www.rfc-editor.org/rfc/rfc8725.html)
+- [RFC 6749 — The OAuth 2.0 Authorization Framework](https://www.rfc-editor.org/rfc/rfc6749.html)
+- [OWASP — Session Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)
+- [Prisma — Query optimization (n+1)](https://www.prisma.io/docs/orm/prisma-client/queries/query-optimization-performance)
+- [Azure Architecture Center — Cache-Aside pattern](https://learn.microsoft.com/en-us/azure/architecture/patterns/cache-aside)
+- [The Twelve-Factor App](https://12factor.net/)
+- [Docker Docs — Containerize a Node.js application](https://docs.docker.com/guides/nodejs/containerize/)

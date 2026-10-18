@@ -1,0 +1,849 @@
+---
+title: '08. 타입 변환과 단축 평가'
+description: '타입 변환 규칙과 ToPrimitive·== 알고리즘, 단축 평가, 옵셔널 체이닝, 널 병합, 논리 할당 연산자를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 값이 언제 어떤 규칙으로 다른 타입으로 바뀌는지 변환표와 알고리즘 수준에서 예측하고, 단축 평가·옵셔널 체이닝·널 병합 연산자로 기본값과 존재 확인 코드를 정확하게 쓸 수 있습니다.
+</Callout>
+
+## 타입 변환의 개념
+
+타입 변환(type conversion)은 값을 다른 타입의 값으로 바꾸는 일입니다. 변환은 새 값을 만들 뿐이고 원본 값과 변수는 바뀌지 않습니다.
+
+```js
+let x = '5'
+x * 2     // 10 — 계산 중에는 '5'가 임시로 숫자 5가 된다
+typeof x  // 'string' — x는 그대로
+```
+
+변환이 일어나는 방식은 두 가지입니다.
+
+| 구분 | 누가 바꾸는가 | 예 |
+|------|---------------|----|
+| 암묵적 변환(coercion) | 엔진이 연산 도중 자동으로 | `'5' * 2` |
+| 명시적 변환(casting) | 개발자가 변환 코드를 직접 써서 | `Number('5')` |
+
+JavaScript는 타입이 맞지 않아도 에러를 내지 않고 변환을 시도합니다. 규칙을 모르면 에러 없이 틀린 값(`NaN`, `'11'`)이 나옵니다.
+
+명세는 변환 규칙을 추상 연산이라는 이름의 내부 알고리즘으로 정의합니다(ECMA-262 7.1절). 코드로 직접 호출할 수 없고, 연산자와 내장 함수가 내부에서 호출합니다.
+
+| 추상 연산 | 결과 | 호출되는 대표 상황 |
+|-----------|------|--------------------|
+| ToBoolean | 불리언 | `if`, `!`, 삼항 연산자의 조건 |
+| ToNumber, ToNumeric | 숫자 (ToNumeric은 BigInt도 통과) | 산술·비교 연산자, 단항 `+`, `Number()` |
+| ToString | 문자열 | `+`의 문자열 연결, 템플릿 리터럴, `String()` |
+| ToPrimitive | 원시 값 | 객체가 위 연산에 쓰일 때 먼저 호출 |
+| ToObject | 객체 | 원시 값의 프로퍼티 접근 |
+| ToPropertyKey | 문자열 또는 심벌 | `obj[expr]`의 `expr` |
+
+- 변환의 목적지는 사실상 문자열·숫자·불리언 세 원시 타입입니다. 객체는 직접 변환되지 않고 ToPrimitive로 원시 값이 된 뒤 변환됩니다.
+- 원시 값에 `.length`나 메서드를 쓰면 엔진이 임시 래퍼 객체를 만듭니다(자세히는 20편). `null`과 `undefined`는 객체로 바꿀 수 없어 TypeError입니다.
+- 심벌은 문자열·숫자로의 암묵적 변환이, BigInt는 Number와 섞는 연산이 막혀 있습니다(아래 각 절).
+
+## 암묵적 변환(문자열·숫자·불리언)
+
+연산자가 기대하는 타입과 피연산자의 타입이 다르면 엔진이 연산자가 정한 타입으로 바꿉니다. 연산자의 문법과 우선순위는 06편에서 다루고, 여기서는 변환 규칙만 다룹니다.
+
+### 문자열로의 변환
+
+`+`는 두 피연산자를 원시 값으로 바꾼 뒤 하나라도 문자열이면 나머지를 문자열로 바꿔 연결합니다. 템플릿 리터럴의 `${}`는 항상 문자열로 바꿉니다.
+
+```js
+1 + '2'          // '12'
+'5' + null       // '5null'
+'a' + undefined  // 'aundefined'
+true + '1'       // 'true1'
+`${[1, 2]}`      // '1,2'
+```
+
+- `+`는 왼쪽부터 계산하므로 문자열이 어디서 등장하는지에 따라 결과가 달라집니다.
+
+```js
+1 + 2 + '3'   // '33' — 3 + '3'
+'1' + 2 + 3   // '123' — '12' + 3
+```
+
+- 문자열 연결은 `+`만 합니다. 나머지 산술 연산자는 항상 숫자로 바꿉니다.
+- 심벌은 문자열로 암묵적 변환이 되지 않습니다. 명시적 `String(sym)`은 허용됩니다.
+
+```js
+Symbol('a') + ''    // TypeError
+`${Symbol('a')}`    // TypeError
+String(Symbol('a')) // 'Symbol(a)'
+```
+
+### 숫자로의 변환
+
+`+`를 뺀 산술 연산자(`-`, `*`, `/`, `%`, `**`), 단항 `+`·`-`, `++`·`--`, 비트 연산자는 피연산자를 ToNumeric으로 바꿉니다.
+
+```js
+'3' - 1        // 2
+'6' / '2'      // 3
++'3'           // 3
+true + 1       // 2
+null + 1       // 1
+undefined + 1  // NaN
+'a' * 2        // NaN
+```
+
+- 바꿀 수 없으면 에러가 아니라 `NaN`이 됩니다.
+- `x++`는 문자열 x를 숫자로 바꿔 증가시키지만 `x += 1`은 `+`이므로 문자열 연결입니다.
+
+```js
+let x = '5'
+x++        // x는 6
+let y = '5'
+y += 1     // y는 '51'
+```
+
+- 비트 연산자는 32비트 정수로 바꿉니다. `'5.7' | 0`은 5, `~~'7.9'`는 7입니다(자세히는 06편).
+- BigInt와 Number는 섞을 수 없습니다. `1n + 1`은 TypeError이고, 단항 `+1n`도 TypeError입니다. `1n + '1'`은 문자열 연결이라 `'11'`입니다.
+- 심벌은 숫자로도 바뀌지 않습니다. `+Symbol()`은 TypeError입니다.
+- 전역 `isNaN`도 인수를 숫자로 바꾼 뒤 검사하므로 `isNaN('abc')`는 true입니다. 변환 없이 검사하는 `Number.isNaN('abc')`는 false입니다(자세히는 30편).
+
+### 비교 연산자의 변환
+
+`<`, `>`, `<=`, `>=`는 두 피연산자가 모두 문자열이면 변환 없이 UTF-16 코드 유닛 순서로 사전식 비교하고, 그 외에는 숫자로 바꿔 비교합니다.
+
+```js
+'10' < '9'      // true  — 문자열끼리: '1'(49)이 '9'(57)보다 작다
+'10' < 9        // false — 한쪽이 숫자: 10 < 9
+'B' < 'a'       // true  — 대문자(66)가 소문자(97)보다 앞
+null >= 0       // true  — null이 0으로
+null > 0        // false
+undefined >= 0  // false — NaN과의 비교
+```
+
+- `null >= 0`은 true인데 `null == 0`은 false입니다. 비교 연산자는 숫자 변환을, `==`는 별도 알고리즘을 쓰기 때문입니다(아래 `==` 절).
+- 한쪽이 `NaN`이 되면 `<`, `>`, `<=`, `>=`가 모두 false입니다.
+- 폼 입력처럼 문자열로 들어온 숫자를 비교할 때 `'10' > '9'`는 false입니다. `Number(a) > Number(b)`로 먼저 바꿉니다.
+
+### 불리언으로의 변환
+
+조건이 필요한 자리(`if`, `while`, 삼항 연산자의 조건, `!`, `&&`·`||`의 좌변 판정)에서 ToBoolean이 적용됩니다. 어떤 값이 true·false가 되는지는 Truthy·Falsy 절에 있습니다.
+
+```js
+if ('0') console.log('실행') // 실행 — '0'은 truthy
+!''                          // true
+```
+
+`&&`와 `||`는 판정에만 ToBoolean을 쓰고 결과로는 불리언이 아니라 피연산자 값을 돌려줍니다(단축 평가 절). `!`와 비교·동등 연산자는 항상 불리언을 반환합니다.
+
+### 프로퍼티 키로의 변환
+
+`obj[key]`의 `key`는 ToPropertyKey로 바뀝니다. 심벌은 그대로 쓰이고 나머지는 문자열이 됩니다. 객체는 ToPrimitive를 string 힌트로 거칩니다.
+
+```js
+const o = {}
+o[1] = 'a'
+o[{}] = 'b'
+o[[1, 2]] = 'c'
+Object.keys(o) // ['1', '[object Object]', '1,2']
+```
+
+## 명시적 변환
+
+### 문자열로
+
+| 방법 | `null`, `undefined` | 심벌 | 특징 |
+|------|---------------------|------|------|
+| `String(x)` | `'null'`, `'undefined'` | `'Symbol(a)'` | 모든 값에 쓸 수 있다 |
+| `x.toString()` | TypeError | `'Symbol(a)'` | 숫자는 진법 인수를 받는다 |
+| `x + ''` | `'null'`, `'undefined'` | TypeError | 객체는 valueOf를 먼저 호출 |
+| `` `${x}` `` | `'null'`, `'undefined'` | TypeError | 객체는 toString을 먼저 호출 |
+
+```js
+String(123)         // '123'
+String(null)        // 'null'
+(255).toString(16)  // 'ff'
+(255).toString(2)   // '11111111'
+255.toString()      // SyntaxError — 점이 소수점으로 읽힌다
+255..toString()     // '255'
+```
+
+### 숫자로
+
+방법은 `Number(x)`, `parseInt(str, radix)`, `parseFloat(str)`, 단항 `+`입니다. `+x`는 `Number(x)`와 같은 규칙이고 BigInt에는 TypeError를 냅니다.
+
+| 입력 | `Number` | `parseInt` | `parseFloat` |
+|------|----------|------------|--------------|
+| `'12px'` | NaN | 12 | 12 |
+| `''` | 0 | NaN | NaN |
+| `' 12 '` | 12 | 12 | 12 |
+| `'3.9'` | 3.9 | 3 | 3.9 |
+| `'1e3'` | 1000 | 1 | 1000 |
+| `'0x1f'` | 31 | 31 | 0 |
+| `null` | 0 | NaN | NaN |
+
+- `Number`는 문자열 전체가 숫자 표기여야 변환됩니다. 앞뒤 공백은 허용되고 빈 문자열은 0입니다.
+- `parseInt`·`parseFloat`는 앞에서부터 읽을 수 있는 만큼만 해석하고, 읽을 것이 없으면 `NaN`입니다. 문자열이 아닌 인수는 먼저 문자열로 바꿉니다.
+- `parseInt`는 정수 부분만 읽습니다. `radix`는 2에서 36 사이이고, 생략하면 `0x` 접두사가 있을 때 16, 아니면 10을 씁니다. 범위 밖의 값(0 제외)은 `NaN`입니다. 항상 명시하는 편이 안전합니다.
+- `Number.parseInt`와 `Number.parseFloat`는 전역 함수와 같은 함수 객체입니다(ES2015).
+
+```js
+parseInt('101', 2)       // 5
+parseInt('ff', 16)       // 255
+parseInt(0.0000005)      // 5 — 숫자가 '5e-7'로 바뀐 뒤 파싱
+['1', '2', '3'].map(parseInt)  // [1, NaN, NaN]
+['1', '2', '3'].map(Number)    // [1, 2, 3]
+```
+
+`map`이 콜백에 `(요소, 인덱스, 배열)`을 넘기므로 인덱스가 `radix`로 들어갑니다. `parseInt('2', 1)`과 `parseInt('3', 2)`가 `NaN`입니다.
+
+BigInt와의 변환은 정밀도를 확인해야 합니다.
+
+```js
+BigInt('10')    // 10n
+BigInt(1.5)     // RangeError — 정수가 아니다
+Number(10n)     // 10 — 큰 값은 정밀도를 잃는다
+```
+
+### 불리언으로
+
+`Boolean(x)`와 `!!x`가 같은 결과를 냅니다. 둘 다 ToBoolean을 적용합니다.
+
+`new`를 붙이면 변환이 아니라 래퍼 객체 생성이 되어 결과가 달라집니다.
+
+```js
+typeof Number('1')          // 'number'
+typeof new Number(1)        // 'object'
+new Number(1) === 1         // false
+new Boolean(false) ? 1 : 2  // 1 — 객체는 항상 truthy
+```
+
+## Truthy·Falsy
+
+조건 자리에서 ToBoolean이 true로 만드는 값이 truthy, false로 만드는 값이 falsy입니다. falsy는 여덟 가지로 닫혀 있고 나머지는 전부 truthy입니다.
+
+| 타입 | falsy 값 |
+|------|----------|
+| Boolean | `false` |
+| Number | `0`, `-0`, `NaN` |
+| BigInt | `0n` |
+| String | `''` (빈 문자열) |
+| Null, Undefined | `null`, `undefined` |
+
+웹 브라우저의 `document.all`은 객체인데도 호환성 예외(명세 Annex B)로 falsy입니다. 언어 코드에서 마주칠 일은 거의 없습니다.
+
+truthy인데 falsy처럼 보이는 값이 헷갈림의 원인입니다.
+
+```js
+Boolean('0')                // true — 비어 있지 않은 문자열
+Boolean('false')            // true
+Boolean(' ')                // true — 공백 한 칸도 문자열
+Boolean([])                 // true — 빈 배열도 객체
+Boolean({})                 // true
+Boolean(new Boolean(false)) // true — 래퍼 객체
+Boolean(-1)                 // true
+Boolean(Symbol())           // true
+```
+
+ToBoolean이 적용되는 자리는 다음과 같습니다.
+
+- `if`, `while`, `do...while`, `for`의 조건식
+- 삼항 연산자의 조건, `!`, `&&`·`||`의 좌변 판정, `Boolean()`
+- `filter`, `some`, `every`, `find` 같은 배열 메서드 콜백의 반환값(자세히는 29편)
+
+흔한 실수는 세 가지입니다.
+
+값이 `0`이나 `''`일 수 있는데 존재 확인에 truthy 검사를 쓰는 경우입니다.
+
+```js
+function setVolume(v) {
+  if (v) volume = v        // ❌ setVolume(0)이 무시된다
+  if (v !== undefined) volume = v  // ✅
+}
+```
+
+`==`는 ToBoolean을 쓰지 않습니다. 불리언과 `==`로 비교하면 truthy·falsy 판정과 결과가 어긋납니다.
+
+```js
+[] == false    // true — 그런데 [] 자체는 truthy
+'2' == true    // false — 그런데 if ('2')는 실행된다
+```
+
+`filter(Boolean)`은 falsy를 전부 지우므로 유효한 `0`도 사라집니다.
+
+```js
+[0, 1, '', null, 'a', NaN].filter(Boolean) // [1, 'a']
+```
+
+배열은 비어 있어도 truthy이므로 `if (arr)`로는 빈 배열을 거를 수 없습니다. `if (arr.length)`는 길이 0이 falsy라서 비어 있지 않을 때만 참입니다.
+
+## ToPrimitive
+
+ToPrimitive는 객체를 원시 값으로 바꾸는 추상 연산입니다. 객체가 산술·비교·문자열 연산에 쓰이면 엔진이 먼저 ToPrimitive를 호출하고, 그 결과를 숫자나 문자열 변환에 넘깁니다. 입력이 원시 값이면 그대로 돌려줍니다.
+
+연산마다 원하는 결과 타입이 달라 힌트(hint)를 전달합니다. 힌트는 `'string'`, `'number'`, `'default'` 세 가지입니다.
+
+| 힌트 | 쓰이는 연산 |
+|------|-------------|
+| `'string'` | `String()`, 템플릿 리터럴, `obj[key]`의 key, 문자열 인수를 받는 내장 함수(`parseInt`, `join` 등) |
+| `'number'` | `Number()`, 단항 `+`·`-`, `-` `*` `/` `%` `**`, `<` `>` `<=` `>=`, `Math` 함수, `isNaN` |
+| `'default'` | 이항 `+`, 객체와 원시 값 사이의 `==`, `new Date(obj)` |
+
+`'default'`는 호출한 연산이 문자열과 숫자 중 어느 쪽이 좋은지 정하지 못할 때 쓰입니다.
+
+알고리즘은 다음 순서입니다.
+
+1. 입력이 원시 값이면 그대로 반환합니다.
+2. 객체에 `Symbol.toPrimitive` 메서드가 있으면 힌트 문자열을 인수로 호출합니다. 결과가 원시 값이면 반환하고, 객체면 TypeError입니다.
+3. 메서드가 없으면 `valueOf`와 `toString`을 정해진 순서로 시도합니다(다음 절). `'default'` 힌트는 `'number'`로 취급합니다.
+
+```js
+const money = {
+  amount: 500,
+  [Symbol.toPrimitive](hint) {
+    if (hint === 'string') return `${this.amount}원`
+    return this.amount
+  },
+}
+`${money}`   // '500원' (string 힌트)
+money * 2    // 1000 (number 힌트)
+money + 1    // 501 (default 힌트)
+```
+
+- `Symbol.toPrimitive`가 있으면 `valueOf`와 `toString`은 호출되지 않습니다(자세히는 34편).
+- 명세 안의 내장 객체 중 이 메서드를 정의한 것은 Date와 Symbol 객체뿐입니다. Symbol 객체는 힌트와 관계없이 심벌 값을 돌려주므로 `Object(sym) + ''`는 TypeError입니다.
+- 객체끼리 `==`로 비교할 때는 ToPrimitive를 호출하지 않고 참조만 비교합니다.
+
+## valueOf·toString 호출 순서
+
+`Symbol.toPrimitive`가 없는 객체는 힌트에 따라 두 메서드를 이 순서로 시도합니다.
+
+| 힌트 | 순서 |
+|------|------|
+| `'string'` | `toString` → `valueOf` |
+| `'number'`, `'default'` | `valueOf` → `toString` |
+
+- 메서드가 함수가 아니면 건너뜁니다.
+- 호출한 결과가 원시 값이면 즉시 반환하고 나머지는 호출하지 않습니다.
+- 결과가 객체면 다음 메서드로 넘어갑니다.
+- 둘 다 원시 값을 주지 못하면 TypeError입니다.
+
+```js
+const obj = {
+  valueOf() { console.log('valueOf'); return {} },
+  toString() { console.log('toString'); return '7' },
+}
++obj      // 콘솔: valueOf, toString → 7
+`${obj}`  // 콘솔: toString → '7'
+obj + 1   // 콘솔: valueOf, toString → '71'
+```
+
+내장 객체의 기본 구현은 다음과 같습니다.
+
+| 객체 | `valueOf` | `toString` |
+|------|-----------|------------|
+| 일반 객체 | 자기 자신 (객체라서 건너뜀) | `'[object Object]'` |
+| 배열 | 자기 자신 | 요소를 쉼표로 이은 문자열 |
+| 함수 | 자기 자신 | 소스 코드 텍스트 |
+| 래퍼 객체 | 감싼 원시 값 | 원시 값의 문자열 |
+| Date | 밀리초 숫자 | 날짜 문자열 |
+| 정규식, Error | 자기 자신 | `'/a/g'`, `'Error: msg'` |
+
+그래서 기본 객체는 number 힌트에서도 결국 `toString`의 결과로 바뀝니다.
+
+```js
+({}) * 2            // NaN — '[object Object]'를 숫자로
+({}) + 1            // '[object Object]1'
+[] + 1              // '1' — [].toString()이 ''
+[2] * [3]           // 6 — '2' * '3'
+new Number(5) + 1   // 6
+```
+
+두 메서드를 모두 정의하면 힌트에 따라 다른 값이 나옵니다.
+
+```js
+const a = { valueOf: () => 10, toString: () => '20' }
+a + 1       // 11    — default: valueOf
+a * 2       // 20
+`${a}`      // '20'  — string: toString
+String(a)   // '20'
+a + ''      // '10'  — default: valueOf, 그 값이 문자열과 연결
+`${a}` + a  // '2010'
+```
+
+`obj + ''`는 `String(obj)`와 같지 않을 수 있습니다. `+`는 default 힌트라 `valueOf`가 먼저이기 때문입니다.
+
+TypeError가 나는 경우는 두 가지입니다.
+
+```js
+Object.create(null) + ''   // TypeError — 두 메서드가 모두 없다
+const bad = { valueOf: () => ({}), toString: () => ({}) }
+bad + 1                    // TypeError — 둘 다 객체를 반환
+```
+
+`valueOf`만 정의하면 객체를 숫자처럼 비교할 수 있지만 `==`는 여전히 참조 비교입니다.
+
+```js
+class Money {
+  constructor(a) { this.a = a }
+  valueOf() { return this.a }
+}
+new Money(5) > new Money(3)   // true — number 힌트
+new Money(5) + new Money(3)   // 8
+new Money(5) == new Money(5)  // false — 객체끼리는 참조 비교
+```
+
+## Date의 기본 힌트
+
+Date는 `'default'` 힌트를 `'string'`으로 취급하는 유일한 내장 객체입니다. 명세의 `Date.prototype[Symbol.toPrimitive](hint)`가 다음처럼 동작합니다.
+
+| 전달받은 힌트 | 시도 순서 |
+|---------------|-----------|
+| `'string'`, `'default'` | `toString` → `valueOf` |
+| `'number'` | `valueOf` → `toString` |
+| 그 밖의 값 | TypeError |
+
+```js
+const d = new Date(0)
+d + 1    // 'Thu Jan 01 1970 ... 1' — default 힌트라 문자열
+d + ''   // 'Thu Jan 01 1970 ...'
+d - 1    // -1 — number 힌트
++d       // 0
+d < new Date(1000)   // true — number 힌트라 밀리초 비교
+```
+
+연산별 결과를 정리하면 다음과 같습니다.
+
+| 연산 | 힌트 | 결과 |
+|------|------|------|
+| `d + 1`, `` `${d}` `` | default, string | 날짜 문자열 |
+| `d - e`, `+d`, `Number(d)` | number | 밀리초 숫자 |
+| `d < e`, `d >= e` | number | 밀리초 비교 |
+| `d == '문자열'` | default | `toString` 결과와 비교 |
+| `d == e` (둘 다 Date) | 해당 없음 | 참조 비교 |
+
+흔한 실수는 다음과 같습니다.
+
+```js
+new Date(0) == new Date(0)  // false — 서로 다른 객체
+new Date(0) <= new Date(0)  // true
+new Date(0) >= new Date(0)  // true
+d == d.getTime()   // false — d의 문자열이 NaN이 되어 0과 다름
+d == d.toString()  // true
+```
+
+- 같은 시각인지 확인하려면 `d.getTime() === e.getTime()`처럼 숫자로 바꿔 비교합니다.
+- 날짜 문자열의 형식과 시간대 이름은 실행 환경에 따라 다릅니다.
+- `new Date(value)`는 `value`가 Date면 내부 시간 값을 그대로 복사하고, 다른 객체면 default 힌트의 ToPrimitive를 거쳐 문자열이면 날짜로 파싱하고 아니면 숫자로 바꿉니다(자세히는 31편).
+
+## ToNumber·ToString·ToBoolean 변환표
+
+자주 쓰는 입력에 세 변환을 적용한 결과입니다.
+
+| 입력 | ToBoolean | ToNumber | ToString |
+|------|-----------|----------|----------|
+| `undefined` | false | NaN | `'undefined'` |
+| `null` | false | 0 | `'null'` |
+| `true` | true | 1 | `'true'` |
+| `false` | false | 0 | `'false'` |
+| `0` | false | 0 | `'0'` |
+| `-0` | false | -0 | `'0'` |
+| `NaN` | false | NaN | `'NaN'` |
+| `Infinity` | true | Infinity | `'Infinity'` |
+| `''` | false | 0 | `''` |
+| `'0'` | true | 0 | `'0'` |
+| `'abc'` | true | NaN | `'abc'` |
+| `[]` | true | 0 | `''` |
+| `[5]` | true | 5 | `'5'` |
+| `[1, 2]` | true | NaN | `'1,2'` |
+| `{}` | true | NaN | `'[object Object]'` |
+| `Symbol()` | true | TypeError | TypeError |
+| `0n` | false | TypeError | `'0'` |
+
+- 표의 ToNumber·ToString은 추상 연산 기준입니다. 함수 `Number(10n)`은 BigInt를 허용해 10을 돌려주고, `String(Symbol())`은 `'Symbol()'`을 돌려줍니다.
+- 객체는 ToNumber에서 number 힌트, ToString에서 string 힌트의 ToPrimitive를 거친 뒤 변환됩니다.
+
+문자열을 숫자로 바꾸는 규칙은 다음과 같습니다.
+
+- 앞뒤의 공백과 줄바꿈 문자(스페이스, 탭, 줄바꿈, NBSP 등)를 제거합니다.
+- 남은 것이 비어 있으면 0입니다.
+- 10진수는 부호(`+`, `-`), 소수점, 지수(`e`)를 허용합니다. `'.5'`는 0.5, `'5.'`는 5, `'1e3'`는 1000입니다.
+- `'Infinity'`와 `'-Infinity'`는 허용되지만 대소문자를 구분해 `'infinity'`는 `NaN`입니다.
+- `0x`, `0b`, `0o` 접두사의 정수는 허용되지만 부호는 붙일 수 없습니다. `'0x1F'`는 31, `'-0x1F'`는 `NaN`입니다.
+- 숫자 구분자(`'1_000'`)와 BigInt 접미사(`'10n'`)는 허용되지 않아 `NaN`입니다.
+- 그 밖의 문자가 섞이면 `NaN`입니다. `'12px'`, `'1,000'`, `'12 3'`이 해당합니다.
+
+숫자를 문자열로 바꾸는 규칙은 다음과 같습니다.
+
+- `NaN`은 `'NaN'`, 무한대는 `'Infinity'`·`'-Infinity'`입니다. `-0`은 부호가 사라져 `'0'`입니다.
+- 기본은 10진 표기이고, 절댓값이 1e21 이상이거나 1e-6 미만이면 지수 표기가 됩니다.
+- 소수는 같은 값으로 되돌릴 수 있는 가장 짧은 자릿수로 표기합니다.
+
+```js
+String(1e21)       // '1e+21'
+String(1e-7)       // '1e-7'
+String(0.000001)   // '0.000001'
+String(0.1 + 0.2)  // '0.30000000000000004'
+```
+
+## == 비교 알고리즘 단계
+
+`x == y`는 명세의 IsLooselyEqual(x, y)로 계산됩니다. 타입이 다르면 변환해 같은 타입으로 맞춘 뒤 다시 비교하는 과정을 반복합니다.
+
+1. 두 값의 타입이 같으면 `===`와 같은 결과입니다. 객체끼리는 참조를 비교합니다.
+2. `null`과 `undefined`의 조합(순서 무관)은 true입니다.
+3. Number와 String이면 문자열을 ToNumber로 바꿔 다시 비교합니다.
+4. BigInt와 String이면 문자열을 BigInt로 바꿔 다시 비교합니다. 바꿀 수 없으면 false입니다.
+5. 한쪽이 Boolean이면 그 값을 ToNumber로 바꿔(true는 1, false는 0) 다시 비교합니다.
+6. 한쪽이 객체이고 다른 쪽이 String, Number, BigInt, Symbol이면 객체를 ToPrimitive(default 힌트)로 바꿔 다시 비교합니다.
+7. BigInt와 Number면 수학적 값이 같을 때 true입니다. `NaN`과 무한대는 false입니다.
+8. 위 어느 단계에도 해당하지 않으면 false입니다.
+
+단계를 순서대로 따라가면 결과가 나옵니다.
+
+| 식 | 변환 과정 | 결과 |
+|----|-----------|------|
+| `'1' == 1` | `'1'` → 1 | true |
+| `true == '1'` | true → 1, `'1'` → 1 | true |
+| `true == 'true'` | true → 1, `'true'` → NaN | false |
+| `'0' == false` | false → 0, `'0'` → 0 | true |
+| `null == 0` | 해당 단계 없음 | false |
+| `[] == false` | false → 0, `[]` → `''` → 0 | true |
+| `[] == ![]` | `![]`는 false이므로 윗줄과 같다 | true |
+| `[1, 2] == '1,2'` | `[1, 2]` → `'1,2'` | true |
+| `NaN == NaN` | 타입이 같아 엄격 비교 | false |
+| `0n == ''` | `''` → 0n | true |
+| `[] == []` | 타입이 같아 참조 비교 | false |
+
+- `null`과 `undefined`는 서로와만 `==`로 같고, `0`, `''`, `false`와는 같지 않습니다. `x == null`은 `x === null || x === undefined`와 같은 결과여서 두 값을 한 번에 거르는 관용구로 쓰입니다.
+- 불리언은 ToBoolean이 아니라 숫자로 바뀝니다. `'2' == true`는 `'2' == 1`이 되어 false입니다.
+- 변환은 전이되지 않습니다. `'0' == 0`과 `0 == ''`는 true이지만 `'0' == ''`는 같은 타입(문자열)끼리의 비교라 false입니다.
+- `!=`는 `==`의 결과를 뒤집은 것입니다.
+- `null`·`undefined` 검사 외에는 변환이 없는 `===`를 쓰는 편이 안전합니다(자세히는 06편).
+
+## 단축 평가
+
+단축 평가(short-circuit evaluation)는 논리 연산에서 좌변만으로 결과가 정해지면 우변을 평가하지 않는 동작입니다. `&&`, `||`, `??`가 해당하고, 결과는 불리언이 아니라 피연산자 중 하나의 값 그대로입니다.
+
+```js
+a || b   // a가 truthy면 a, falsy면 b
+a && b   // a가 falsy면 a, truthy면 b
+a ?? b   // a가 null·undefined가 아니면 a, 맞으면 b
+```
+
+```js
+0 || 'x'     // 'x'
+'a' || 'x'   // 'a'
+'' && 'x'    // ''
+1 && 'x'     // 'x'
+0 ?? 'x'     // 0
+null ?? 'x'  // 'x'
+```
+
+- 왼쪽에서 오른쪽으로 평가하다가 결과가 정해지는 순간 멈춥니다. `||` 체인은 첫 truthy를, `&&` 체인은 첫 falsy를, `??` 체인은 첫 non-nullish를 반환합니다. 멈출 곳이 없으면 마지막 값입니다.
+
+```js
+0 || null || 'z'   // 'z' — 첫 truthy
+1 && 2 && 3        // 3 — 모두 truthy면 마지막 값
+1 && 0 && 3        // 0 — 첫 falsy
+```
+
+- 우변이 평가되지 않으므로 우변의 함수 호출, 증가 연산, 에러도 일어나지 않습니다.
+
+```js
+let n = 0
+const f = () => { n++; return 'f' }
+1 || f()               // 1 — f는 호출되지 않아 n은 0
+0 || f()               // 'f' — n은 1
+1 || undeclaredVar     // 1 — ReferenceError도 일어나지 않는다
+```
+
+- `&&`는 `||`보다 먼저 묶입니다. `a || b && c`는 `a || (b && c)`입니다.
+- 결과가 불리언이 아니므로 `const ok = a && b`의 `ok`는 `''`나 `0`일 수 있습니다. 불리언이 필요하면 `Boolean(a && b)`로 감쌉니다.
+- 비트 연산자 `&`와 `|`는 단축 평가를 하지 않고 양쪽을 모두 평가합니다.
+
+## 단축 평가 활용
+
+`a && b()`는 `if (a) b()`와, `a || b()`는 `if (!a) b()`와 같은 흐름을 한 식으로 씁니다.
+
+기본값 지정에는 `||`나 `??`를 씁니다.
+
+```js
+const name = input || 'guest'   // input이 ''이면 'guest'
+const port = config.port ?? 3000 // port가 0이어도 0 유지
+```
+
+조건부 실행에는 `&&`를 씁니다.
+
+```js
+isAdmin && showPanel()       // isAdmin이 truthy일 때만 호출
+callback && callback(result) // 콜백이 있을 때만 호출
+```
+
+값에 따라 고르는 체인은 첫 번째로 쓸 수 있는 값을 찾습니다.
+
+```js
+const label = user.nick || user.name || '익명'
+```
+
+비싼 계산은 필요할 때만 실행하도록 우변에 둡니다.
+
+```js
+const data = cache || loadData()  // cache가 있으면 호출 안 됨
+```
+
+중첩 프로퍼티 접근을 보호할 때 `&&`를 이어 씁니다. 같은 용도의 `?.`와 차이는 다음 절에서 다룹니다.
+
+```js
+const city = user && user.address && user.address.city
+```
+
+조건부로 객체 속성을 추가할 때는 객체 스프레드가 falsy를 무시하는 점을 이용합니다. 배열 스프레드는 falsy를 받지 못해 TypeError이므로 삼항 연산자를 씁니다(자세히는 36편).
+
+```js
+const opts = { a: 1, ...(isDev && { debug: true }) }
+const list = [...(isDev ? ['dev'] : [])]
+const bad = [...(isDev && ['dev'])]  // false면 TypeError
+```
+
+흔한 실수는 네 가지입니다.
+
+`||`로 준 기본값이 유효한 falsy 값을 덮어씁니다. 값이 `0`, `''`, `false`일 수 있으면 `??`를 씁니다.
+
+```js
+const volume = settings.volume || 50   // ❌ 0이 50이 된다
+const volume2 = settings.volume ?? 50  // ✅
+```
+
+`||`로 여러 값과 비교하는 문장은 항상 참이 됩니다. `(x === 1) || 2`로 읽히고 `2`가 truthy이기 때문입니다.
+
+```js
+if (x === 1 || 2) {}        // ❌ 항상 true
+if (x === 1 || x === 2) {}  // ✅
+if ([1, 2].includes(x)) {}  // ✅
+```
+
+`cond && 'yes' || 'no'`를 삼항 연산자 대신 쓰면 `'yes'` 자리가 falsy일 때 `'no'`가 나옵니다. 삼항 연산자 `cond ? a : b`를 씁니다.
+
+`count && render()`에서 `count`가 0이면 결과가 `0`입니다. 이 값을 문자열에 넣거나 화면에 출력하면 `0`이 그대로 나타납니다. `count > 0 && render()`처럼 불리언이 나오는 조건을 씁니다.
+
+## Optional Chaining
+
+옵셔널 체이닝(optional chaining) `?.`는 좌변이 `null` 또는 `undefined`이면 접근이나 호출을 중단하고 `undefined`를 반환하는 연산자입니다(ES2020).
+
+```js
+user?.name         // 프로퍼티 접근
+user?.['name']     // 계산된 키 접근
+fn?.(1, 2)         // 함수 호출
+```
+
+```js
+const user = null
+user.name           // TypeError
+user?.name          // undefined
+user?.address.city  // undefined — 체인 전체가 중단된다
+```
+
+- 검사 대상은 `null`과 `undefined`뿐입니다. falsy 전체가 아닙니다. `''?.length`는 0, `0?.toFixed(1)`은 `'0.0'`, `false?.toString()`은 `'false'`입니다.
+- 중단되면 그 뒤에 이어진 접근과 호출 체인 전체를 건너뜁니다. 호출 인수의 식도 평가하지 않습니다.
+
+```js
+let i = 0
+user?.a.b.c(i++)   // undefined — i는 0 그대로
+```
+
+- 괄호로 체인이 끊어집니다. `(user?.address).city`는 user가 `null`이면 `undefined.city`를 계산해 TypeError입니다.
+- 오른쪽 단계는 보호하지 않습니다. `a?.b.c`는 `a`가 있어도 `a.b`가 `undefined`이면 TypeError이므로 단계마다 `?.`가 필요합니다.
+
+```js
+const a = {}
+a?.b.c    // TypeError — a는 있지만 a.b가 undefined
+a?.b?.c   // undefined
+```
+
+- 메서드를 호출할 때 `?.`의 위치가 검사 대상을 정합니다.
+
+```js
+const obj = {}
+obj.run?.()    // undefined — run이 없으면 호출하지 않는다
+obj?.run()     // TypeError — obj만 검사하고 run은 검사 안 함
+obj.name = 5
+obj.name?.()   // TypeError — 함수가 아닌 값은 호출 시도
+```
+
+- 메서드 호출의 `this`는 유지됩니다. `obj.f?.()`에서 `f`의 `this`는 `obj`입니다.
+- `delete a?.b`는 허용되고 `a`가 nullish면 true입니다.
+- 쓸 수 없는 곳이 있습니다. 대입 좌변(`a?.b = 1`), `a?.b++`, `new a?.()`, 태그된 템플릿(`` a?.`x` ``)은 SyntaxError입니다.
+- 선언되지 않은 변수는 막아 주지 않습니다. `undeclaredVar?.x`는 ReferenceError입니다.
+- `?.` 바로 뒤에 숫자가 오면 옵셔널 체이닝이 아니라 삼항 연산자로 파싱됩니다. `a?.5:1`은 `a ? .5 : 1`입니다.
+- 기본값은 `??`와 함께 씁니다. 둘 다 nullish를 기준으로 하므로 짝이 맞습니다.
+
+```js
+const name = user?.profile?.name ?? '익명'
+```
+
+`&&` 체인과의 차이는 falsy 값의 처리입니다.
+
+```js
+const user = 0
+user && user.name   // 0 — falsy 자체를 반환
+user?.name          // undefined
+```
+
+흔한 실수는 반드시 있어야 하는 값에도 `?.`를 붙이는 것입니다. 에러가 나야 할 곳에서 `undefined`가 조용히 흘러 더 먼 곳에서 문제가 드러납니다.
+
+## Nullish Coalescing
+
+널 병합 연산자(nullish coalescing) `??`는 좌변이 `null` 또는 `undefined`이면 우변을, 아니면 좌변을 반환합니다(ES2020).
+
+```js
+null ?? 'x'       // 'x'
+undefined ?? 'x'  // 'x'
+0 ?? 'x'          // 0
+'' ?? 'x'         // ''
+false ?? 'x'      // false
+NaN ?? 'x'        // NaN
+```
+
+`||`는 falsy 전체를 대체하고 `??`는 nullish만 대체합니다.
+
+```js
+const retries = 0
+retries || 3   // 3 — 0이 falsy라 덮어씀
+retries ?? 3   // 0 — 값이 있으므로 유지
+```
+
+- 우변은 좌변이 nullish일 때만 평가됩니다(단축 평가).
+- `a ?? b ?? c`처럼 이어 쓰면 첫 non-nullish 값을 반환합니다.
+- 우선순위는 산술·비교 연산자보다 낮고 삼항 연산자와 대입 연산자보다 높습니다. `a ?? b + 1`은 `a ?? (b + 1)`이고, `a ?? b ? c : d`는 `(a ?? b) ? c : d`입니다.
+- 함수 매개변수 기본값과 구조 분해 기본값은 `undefined`에만 적용됩니다. `??`는 `null`도 대체합니다(자세히는 11편, 37편).
+
+```js
+function f(x = 1) { return x }
+f(undefined)      // 1
+f(null)           // null — 기본값이 쓰이지 않는다
+const g = (x) => x ?? 1
+g(null)           // 1
+```
+
+- `NaN`은 nullish가 아니므로 `Number('x') ?? 0`은 `NaN`입니다.
+
+빈 문자열이나 0을 "값 없음"으로 취급하고 싶을 때는 `||`가 맞는 선택입니다. 빈 입력을 기본 문자열로 바꾸는 경우가 그렇습니다.
+
+## ??와 OR·AND 혼용 제한
+
+`??`를 괄호 없이 `||`나 `&&`와 한 식에 섞으면 SyntaxError입니다. 어느 연산자가 먼저 묶이는지 모호해 읽는 사람이 잘못 해석하기 쉬워 제안 단계에서 문법으로 금지했습니다.
+
+```js
+a ?? b || c     // SyntaxError
+a || b ?? c     // SyntaxError
+a && b ?? c     // SyntaxError
+a ?? b && c     // SyntaxError
+(a ?? b) || c   // ✅ 괄호로 묶으면 허용
+a ?? (b || c)   // ✅
+a ?? b ?? c     // ✅ ?? 끼리는 이어 쓸 수 있다
+```
+
+- 구문 오류이므로 스크립트 전체가 실행되지 않습니다.
+- 금지되는 조합은 `??`와 `||`, `??`와 `&&`뿐입니다. `a && b || c`는 허용됩니다.
+- 삼항 연산자와는 섞을 수 있습니다. `a ?? b ? c : d`는 허용됩니다.
+- 대입 연산자의 우변은 별개의 식이므로 `x ||= y ?? z`는 허용됩니다.
+
+## 논리 할당 연산자
+
+논리 할당 연산자는 단축 평가와 대입을 합친 `||=`, `&&=`, `??=`입니다(ES2021).
+
+- `a ||= b`는 a가 falsy일 때만 b를 대입합니다.
+- `a &&= b`는 a가 truthy일 때만 b를 대입합니다.
+- `a ??= b`는 a가 `null` 또는 `undefined`일 때만 b를 대입합니다.
+
+```js
+let retries = 0
+retries ||= 3      // 3 — 0이 falsy라 대입
+let timeout = 0
+timeout ??= 3000   // 0 — nullish가 아니라 유지
+let count = 5
+count &&= count + 1  // 6 — truthy라 대입
+```
+
+의미는 다음 식과 같습니다.
+
+```js
+a ||= b   // a || (a = b)
+a &&= b   // a && (a = b)
+a ??= b   // a ?? (a = b)
+```
+
+- `a = a || b`와 다릅니다. 단축되면 대입 자체가 일어나지 않으므로 setter가 호출되지 않고, 읽기 전용 프로퍼티에도 에러가 나지 않습니다.
+
+```js
+const o = Object.freeze({ x: 1 })
+o.x ||= 2        // 대입이 없어 에러 없음, o.x는 1
+o.x = o.x || 2   // strict mode에서 TypeError (자세히는 14편)
+```
+
+- `const` 변수도 단축되면 대입이 없어 에러가 나지 않습니다. `const c = 1; c ||= 2`는 통과하고 `const c = 0; c ||= 2`는 TypeError입니다.
+- 식 전체의 값은 대입이 없었으면 a, 있었으면 b입니다.
+- 좌변은 한 번만 평가됩니다. `obj[key()] ??= v`에서 `key()`는 한 번 호출됩니다. `obj[key()] = obj[key()] ?? v`는 두 번 호출됩니다.
+- 좌변은 변수나 프로퍼티 참조여야 합니다. 옵셔널 체이닝(`a?.b ??= 1`)과 구조 분해 패턴은 SyntaxError입니다.
+
+활용은 기본값 채우기, 지연 초기화, 존재할 때만 변환입니다.
+
+```js
+options.retries ??= 3          // 없을 때만 기본값
+cache[key] ??= compute(key)    // 처음 한 번만 계산
+user.name &&= user.name.trim() // 있을 때만 가공
+```
+
+그룹 모으기에서는 괄호로 묶은 `??=`의 결과에 바로 메서드를 호출합니다.
+
+```js
+const groups = {}
+for (const w of words) {
+  (groups[w.length] ??= []).push(w)
+}
+```
+
+흔한 실수는 기본값 목적에 `||=`를 쓰는 것입니다. `0`, `''`, `false`가 유효한 값이면 덮어쓰이므로 `??=`를 씁니다.
+
+## 핵심 정리
+
+- 변환은 새 값을 만들 뿐 변수를 바꾸지 않습니다. 암묵적 변환의 목적지는 연산자가 정하며, `+`는 문자열 우선, 나머지 산술과 비교는 숫자, 조건 자리는 불리언입니다.
+- falsy는 `false`, `0`, `-0`, `0n`, `''`, `null`, `undefined`, `NaN` 여덟 가지이고 나머지는 truthy입니다. `==`는 ToBoolean을 쓰지 않습니다.
+- 객체는 ToPrimitive로 원시 값이 됩니다. `Symbol.toPrimitive`가 먼저이고, 없으면 string 힌트는 toString부터, number·default 힌트는 valueOf부터 시도합니다. Date만 default를 string으로 취급합니다.
+- `==`는 타입이 같으면 `===`, `null`과 `undefined` 쌍은 true이고, 그 외에는 불리언·문자열·객체를 숫자나 원시 값으로 바꿔 다시 비교합니다.
+- `&&`, `||`, `??`는 우변을 평가하지 않고 피연산자 값을 반환합니다. `?.`, `??`, `??=`는 nullish만, `||`, `||=`는 falsy 전체를 기준으로 합니다. `??`는 괄호 없이 `||`, `&&`와 섞을 수 없습니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="다음 중 결과가 true인 비교는 무엇입니까?"
+  options={['null == 0', 'NaN == NaN', '"0" == false', '[] == []']}
+  correctAnswer={3}
+  explanation="false가 숫자 0으로, 문자열 0이 숫자 0으로 바뀌어 0 == 0이 되므로 true입니다. null은 undefined와만 같으므로 null == 0은 false입니다. NaN == NaN은 타입이 같아 엄격 비교로 처리되며 NaN은 자기 자신과도 같지 않으므로 false입니다. 서로 다른 배열은 참조가 달라 false입니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="valueOf가 숫자 10을, toString이 문자열 20을 반환하는 객체 obj가 있습니다. 표현식 `${obj}` + obj 의 결과는?"
+  options={['2020', '30', '2010', '1010']}
+  correctAnswer={3}
+  explanation="템플릿 리터럴은 string 힌트라 toString이 먼저 호출되어 문자열 20이 됩니다. 이어지는 + 연산은 default 힌트라 obj에서 valueOf가 먼저 호출되어 10이 되고, 한쪽이 문자열이므로 연결되어 2010입니다. 2020은 둘 다 toString을 쓴다고, 30은 둘 다 숫자로 더한다고, 1010은 둘 다 valueOf를 쓴다고 잘못 생각한 값입니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="cfg가 retries 0, opts null인 객체일 때 [cfg.retries || 3, cfg.retries ?? 3, cfg.opts?.timeout ?? 1000] 의 값은?"
+  options={['[3, 0, 1000]', '[0, 0, 1000]', '[3, 3, undefined]', 'TypeError가 발생한다']}
+  correctAnswer={1}
+  explanation="0은 falsy라 OR 연산은 3을 고르고, ??는 null이나 undefined가 아닌 0을 유지합니다. cfg.opts가 null이므로 ?.가 체인을 중단해 undefined를 만들고, ??가 이를 1000으로 대체합니다. ?.가 있으므로 TypeError는 발생하지 않습니다."
+/>
+
+## 참고 자료
+
+- [ECMA-262 — Type Conversion](https://tc39.es/ecma262/#sec-type-conversion)
+- [ECMA-262 — IsLooselyEqual](https://tc39.es/ecma262/#sec-islooselyequal)
+- [ECMA-262 — ToPrimitive](https://tc39.es/ecma262/#sec-toprimitive)
+- [ECMA-262 — Date.prototype[%Symbol.toPrimitive%]](https://tc39.es/ecma262/#sec-date.prototype-%symbol.toprimitive%)
+- [MDN — Type coercion](https://developer.mozilla.org/en-US/docs/Glossary/Type_coercion)
+- [MDN — Equality comparisons and sameness](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Equality_comparisons_and_sameness)
+- [MDN — Symbol.toPrimitive](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Symbol/toPrimitive)
+- [MDN — Optional chaining](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Optional_chaining)
+- [MDN — Nullish coalescing operator](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Nullish_coalescing)
+- [MDN — Logical OR assignment](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Logical_OR_assignment)
+- [TC39 — proposal-nullish-coalescing](https://github.com/tc39/proposal-nullish-coalescing)

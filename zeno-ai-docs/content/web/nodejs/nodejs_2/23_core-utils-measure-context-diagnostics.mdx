@@ -1,0 +1,355 @@
+---
+title: '23. 코어 유틸: 측정·컨텍스트·진단'
+description: 'perf_hooks 시간 측정, AsyncLocalStorage 요청 단위 컨텍스트, diagnostics_channel, v8 힙 통계, vm의 한계, node:sqlite와 node:test 입문을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 실행 시간 측정, 요청 단위 컨텍스트 전달, 진단 이벤트 구독, 힙 통계 조회에 쓰는 내장 모듈을 구분하고, `vm`이 보안 장치가 아니라는 점과 `node:sqlite`·`node:test`의 현재 상태를 설명할 수 있습니다.
+</Callout>
+
+## perf_hooks
+
+`node:perf_hooks`는 W3C Web Performance API의 일부와 Node 전용 측정 API를 제공하는 모듈입니다. 안정성 지수는 2(Stable)입니다.
+
+```js
+import { performance } from 'node:perf_hooks'
+```
+
+`performance`는 전역에도 있어서 `import` 없이 `performance.now()`를 쓸 수 있습니다.
+
+### now와 timeOrigin
+
+`performance.now()`는 고해상도 밀리초 타임스탬프이고 0은 현재 `node` 프로세스가 시작된 시점입니다. 소수점 아래까지 나옵니다.
+
+```js
+const start = performance.now()
+await doWork()
+const ms = performance.now() - start
+// 걸린 시간(밀리초). 예: 20.4
+performance.timeOrigin   // 프로세스 시작 시각(Unix 시간, 밀리초)
+```
+
+- `Date.now()`는 시스템 시계라서 시계가 조정되면 값이 튑니다. 경과 시간을 잴 때는 `performance.now()`를 씁니다.
+- `performance.now()`는 `performance` 객체를 수신자로 호출해야 합니다(v19.0.0부터). `const { now } = performance`로 떼어 호출하면 에러입니다.
+
+### mark와 measure
+
+`mark(name)`은 이름 붙은 시점을 기록하고, `measure(name, startMark, endMark)`는 두 시점 사이의 구간을 만들어 `duration`을 돌려줍니다.
+
+```js
+performance.mark('db:start')
+await query()
+performance.mark('db:end')
+const m = performance.measure('db', 'db:start', 'db:end')
+m.duration   // 구간의 밀리초
+```
+
+- `measure`의 끝 마크를 생략하면 현재 시점까지, 시작 마크도 생략하면 프로세스 시작부터 현재까지 잽니다.
+- 기록은 성능 타임라인에 쌓입니다. 오래 도는 서버에서는 `performance.clearMarks()`와 `clearMeasures()`로 비웁니다.
+
+### PerformanceObserver
+
+`PerformanceObserver`는 타임라인에 새 항목이 생길 때 콜백으로 받아 봅니다.
+
+```js
+import { PerformanceObserver } from 'node:perf_hooks'
+
+const obs = new PerformanceObserver((list) => {
+  for (const e of list.getEntries()) {
+    console.log(e.name, e.duration)
+  }
+})
+obs.observe({ entryTypes: ['measure'] })
+```
+
+- 항목 종류(`entryTypes`)에는 `'mark'`, `'measure'`, `'function'`, `'gc'`, `'http'` 등이 있습니다. 필요한 종류만 구독합니다.
+- 사용을 마치면 `obs.disconnect()`로 끊습니다.
+
+### timerify
+
+`performance.timerify(fn)`은 함수를 감싸 실행 시간을 항목으로 남기는 래퍼를 만듭니다. `'function'` 종류를 구독하고 있어야 결과를 볼 수 있습니다. Node 전용 확장이고 브라우저에는 없습니다.
+
+```js
+const wrapped = performance.timerify(someFunction)
+obs.observe({ entryTypes: ['function'] })
+wrapped()   // 호출할 때마다 function 항목이 생김
+```
+
+### 이벤트 루프 지표
+
+이벤트 루프가 얼마나 지연되는지가 서버의 응답성을 보여 줍니다. 두 가지 도구가 있습니다.
+
+| 도구 | 반환 | 의미 |
+|------|------|------|
+| `monitorEventLoopDelay()` | 히스토그램 | 이벤트 루프 지연 분포(나노초) |
+| `performance.eventLoopUtilization()` | `{ idle, active, utilization }` | 루프가 바빴던 비율(ELU) |
+
+```js
+import { monitorEventLoopDelay } from 'node:perf_hooks'
+
+const h = monitorEventLoopDelay({ resolution: 10 })
+h.enable()
+// ... 서버 동작 ...
+h.disable()
+h.max / 1e6          // 최대 지연(밀리초)
+h.percentile(99)     // 상위 99퍼센트 지점(나노초)
+```
+
+- 지연 히스토그램은 `resolution`(기본 10ms) 간격으로 타이머를 돌려 늦게 실행되는 정도를 잽니다. 값이 나노초라서 밀리초로 보려면 1e6으로 나눕니다. 이 편의 환경에서 100ms 동안 이벤트 루프를 막자 `max`가 약 118ms로 나왔습니다.
+- `samplePerIteration: true` 옵션(v24.19.0에 추가)은 루프 반복마다 한 번씩 표본을 잡고, 기본 방식과 결과가 크게 달라서 둘을 직접 비교하지 않습니다.
+- `eventLoopUtilization()`은 누적 `idle`, `active` 시간과 `utilization`(0–1)을 돌려줍니다. 인수에 이전 결과를 주면 그 이후 구간만의 값을 계산합니다.
+- 지연이 크면 CPU를 오래 쓰는 동기 코드가 이벤트 루프를 막고 있다는 신호입니다. 원인 분석(프로파일링)은 이 과목의 범위가 아닙니다.
+
+## AsyncLocalStorage
+
+`AsyncLocalStorage`는 비동기 호출 체인 전체에 걸쳐 같은 값을 유지하는 저장소를 만드는 클래스입니다. 함수 인수로 값을 일일이 넘기지 않고도 `await`, 콜백, 타이머를 지난 뒤에 같은 컨텍스트를 읽을 수 있습니다. 안정성 지수는 2(Stable)이고 v16.4.0에 안정화되었습니다. `node:async_hooks`에서 가져옵니다.
+
+```js
+import { AsyncLocalStorage } from 'node:async_hooks'
+
+const als = new AsyncLocalStorage()
+als.run({ id: 7 }, async () => {
+  await sleep(10)
+  als.getStore()   // { id: 7 } (await 뒤에도 유지)
+})
+als.getStore()     // undefined (run 밖)
+```
+
+- `als.run(store, callback)`은 `callback`을 `store` 컨텍스트 안에서 동기로 실행하고 반환값을 돌려줍니다. `callback` 안에서 시작된 모든 비동기 작업이 그 `store`를 이어받습니다.
+- `als.getStore()`는 현재 컨텍스트의 `store`를 돌려줍니다. 컨텍스트 밖이면 `undefined`입니다.
+- `run` 안에서 에러가 던져지면 `run`도 그대로 던지고 컨텍스트에서 빠져나옵니다.
+- 인스턴스마다 독립된 저장소입니다. 여러 개를 동시에 써도 서로 간섭하지 않습니다.
+- v24.0.0에 `defaultValue`와 `name` 옵션이 추가되었습니다. `defaultValue`는 컨텍스트가 없을 때의 기본값입니다.
+
+```js
+// async 함수에서 await 한 번만 컨텍스트가 필요할 때
+async function fn() {
+  await als.run(new Map(), () => {
+    als.getStore().set('key', 1)
+    return foo()   // foo가 호출하는 함수들에서 읽을 수 있음
+  })
+}
+```
+
+`enterWith(store)`와 `disable()`은 안정성 지수 1(Experimental)입니다. `enterWith`는 현재 실행의 남은 구간을 컨텍스트에 넣는 방식이고, 공식 문서의 기본 예제는 `run`입니다.
+
+**컨텍스트 유실:** 드물게 비동기 작업 중에 컨텍스트가 사라져 `getStore()`가 `undefined`를 돌려줍니다. 공식 문서의 안내는 다음과 같습니다.
+
+- 콜백 기반 코드는 `util.promisify()`로 네이티브 Promise 체인에 올리면 대개 해결됩니다.
+- 콜백 API나 사용자 정의 thenable을 꼭 써야 하면 `AsyncResource`로 비동기 작업을 올바른 실행 컨텍스트에 연결합니다.
+- 의심되는 호출 뒤에 `getStore()`를 로그로 찍어 처음 `undefined`가 나오는 지점을 찾습니다.
+
+## 요청 단위 컨텍스트
+
+요청 단위 컨텍스트는 한 HTTP 요청이 시작해서 끝날 때까지 요청 ID, 사용자, 시작 시각 같은 정보를 어디서든 읽게 하는 패턴입니다. `AsyncLocalStorage`의 가장 흔한 용도입니다.
+
+```js
+import http from 'node:http'
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { randomUUID as uuid } from 'node:crypto'
+const als = new AsyncLocalStorage()
+const log = (msg) =>
+  console.log(als.getStore()?.id ?? '-', msg)
+http.createServer((req, res) => {
+  als.run({ id: uuid() }, async () => {
+    log('start')
+    await sleep(5)
+    log('done')     // 같은 요청이면 같은 id
+    res.end('ok')
+  })
+}).listen(3000)
+```
+
+요청 두 개를 동시에 보내면 각자 다른 ID로 `start`와 `done`이 섞여 찍히고, 같은 요청의 두 줄은 같은 ID를 가집니다. 컨텍스트 밖에서 호출한 `log`는 `-`를 찍습니다.
+
+- 진입점(미들웨어, 서버 콜백)에서 `run`을 한 번 호출하고 그 안에서 나머지 처리를 합니다. 프레임워크에서는 미들웨어 안에서 `als.run(store, next)`처럼 연결합니다(미들웨어는 13편).
+- 로거가 `getStore()`로 요청 ID를 자동으로 붙이면 함수마다 `reqId` 인수를 전달하지 않아도 같은 요청의 로그를 한 줄로 묶을 수 있습니다.
+- 사용자 ID, 트랜잭션 핸들, 로케일처럼 요청 범위에서 공유할 값에도 씁니다. 다만 숨은 전역 값이 되므로 어떤 함수가 컨텍스트에 의존하는지 불분명해질 수 있습니다. 비즈니스 로직의 입력은 인수로 명시하고, 로깅과 추적 같은 횡단 관심사에 한정합니다.
+- 모듈 최상위의 전역 변수나 싱글톤에 요청 정보를 넣으면 동시에 처리 중인 요청이 서로의 값을 덮어씁니다. 요청별 값은 `AsyncLocalStorage`나 인수로 다룹니다.
+
+## diagnostics_channel 개념
+
+`node:diagnostics_channel`은 이름 붙은 채널로 진단용 메시지를 발행(publish)하고 구독(subscribe)하는 모듈입니다. 안정성 지수는 2(Stable)이고 v19.2.0에 안정화되었습니다. 라이브러리가 "이런 일이 일어났다"는 데이터를 내보내고, 모니터링·트레이싱 도구가 코드를 고치지 않고 받아 갑니다.
+
+```js
+import dc from 'node:diagnostics_channel'
+
+const ch = dc.channel('myapp:db:query')   // 모듈 최상위에서 한 번
+
+dc.subscribe('myapp:db:query', (msg, name) => {
+  console.log(name, msg.sql)
+})
+if (ch.hasSubscribers) ch.publish({ sql: 'select 1' })
+// myapp:db:query select 1
+```
+
+- 발행하는 쪽은 `dc.channel(name)`으로 채널 객체를 한 번 만들어 두고 `ch.publish(message)`를 부릅니다. 채널 객체는 발행 때의 조회 비용이 없도록 분리되어 있습니다. 구독하는 쪽은 `dc.subscribe(name, onMessage)`입니다.
+- 공식 문서는 발행 비용이 아주 작도록 설계했다고 설명합니다. 보낼 메시지를 만드는 비용이 크면 `ch.hasSubscribers`를 먼저 확인하고 만듭니다.
+- 채널 이름은 충돌을 피하도록 모듈 이름을 포함합니다. 메시지의 형태는 모듈이 문서화합니다.
+- `unsubscribe(name, onMessage)`로 구독을 끊습니다.
+- Node 내부도 채널을 발행합니다. `http.server.request.start`, `http.client.request.start`, `console.log` 같은 내장 채널이 있고, 공식 문서는 HTTP·Console 등 내장 채널의 안정성 지수를 1(Experimental)로 표시합니다. 이름과 메시지 형태가 바뀔 수 있습니다.
+- `channel.bindStore(store)`는 `AsyncLocalStorage`를 채널에 연결해 구독자가 컨텍스트를 만들게 하는 기능이고 Experimental입니다.
+- `tracingChannel()`은 시작·끝·에러 이벤트 묶음을 만들어 줍니다. v24 문서에서는 Experimental이고 v26.8.0에서 Stable로 표시되었습니다.
+- 애플리케이션 코드에서 직접 쓸 일은 드물고 APM, OpenTelemetry 계측 같은 도구가 소비하는 쪽입니다(관측성은 고급 과목).
+
+```js
+// 내장 채널 구독 예
+dc.subscribe('http.server.request.start', ({ request }) => {
+  console.log(request.method, request.url)  // GET /hi
+})
+```
+
+## v8 힙 통계 개념
+
+`node:v8`은 Node에 내장된 V8 엔진에 특화된 API를 제공합니다. `v8.getHeapStatistics()`는 V8 힙의 현재 상태를 바이트 단위 숫자 객체로 돌려줍니다. 힙(heap)은 자바스크립트 객체가 사는 메모리 영역입니다.
+
+```js
+import v8 from 'node:v8'
+
+const s = v8.getHeapStatistics()
+s.used_heap_size    // 지금 JS 객체가 쓰는 바이트
+s.total_heap_size   // V8이 힙으로 확보한 바이트
+s.heap_size_limit   // 힙 최대 크기
+```
+
+| 필드 | 의미 |
+|------|------|
+| `used_heap_size` | 현재 JS 객체가 실제로 쓰는 바이트 |
+| `total_heap_size` | V8이 힙으로 할당한 바이트. 필요하면 늘어남 |
+| `heap_size_limit` | 힙의 최대 크기. 기본 한도 또는 `--max_old_space_size` 값 |
+| `total_available_size` | 한도에 닿기 전까지 더 쓸 수 있는 바이트 |
+| `malloced_memory` | V8이 `malloc`으로 할당한 바이트 |
+| `number_of_detached_contexts` | 분리되었지만 아직 수거되지 않은 컨텍스트 수. 0이 아니면 누수 가능성 |
+
+- `used_heap_size`가 시간이 지날수록 계속 오르고 GC 뒤에도 내려오지 않으면 메모리 누수를 의심합니다. 한도에 가까워지면 프로세스가 힙 부족으로 죽습니다.
+- 한도는 `node --max-old-space-size=MB`로 바꿉니다. 이 편의 환경(Node 24.15.0)에서 기본 `heap_size_limit`는 약 4288MB였고 시스템 자원에 따라 달라집니다.
+- `v8.getHeapSpaceStatistics()`는 영역(`new_space`, `old_space` 등)별 사용량을 돌려줍니다.
+- `process.memoryUsage()`는 프로세스 전체의 메모리(`rss`, `heapUsed` 등)를 보여 주고, 힙의 세부는 `v8.getHeapStatistics()`가 봅니다.
+- 주기적으로 지표로 내보내 추세를 보는 용도입니다. 누수를 찾는 힙 스냅샷과 프로파일링은 이 과목의 범위 밖입니다.
+
+## vm은 샌드박스가 아님
+
+`node:vm`은 V8의 별도 컨텍스트에서 코드를 컴파일하고 실행하는 모듈입니다. 공식 문서는 "`node:vm` 모듈은 보안 장치가 아니다. 신뢰할 수 없는 코드를 실행하는 데 쓰지 말라"고 명시합니다.
+
+```js
+import vm from 'node:vm'
+
+const ctx = vm.createContext({ x: 2 })
+vm.runInContext('x += 40; var y = 17', ctx)
+ctx.x   // 42
+ctx.y   // 17 (바깥 변수 x는 영향 없음)
+```
+
+- 컨텍스트마다 전역 객체가 다릅니다. 안쪽 코드는 `process`와 `require`를 전역으로 볼 수 없습니다. 이것은 격리처럼 보여도 보안 경계가 아닙니다.
+- 생성자 체인으로 바깥 세계에 접근할 수 있습니다. 이 편의 환경에서 `process`가 없는 컨텍스트 안에서 아래 코드를 실행하자 `process` 객체가 손에 들어왔습니다.
+
+```js
+const code =
+  'this.constructor.constructor("return process")()'
+const p = vm.runInContext(code, ctx)
+typeof p       // 'object' (process를 얻음)
+p.version      // 'v24.15.0'
+```
+
+- 공식 문서는 `require`처럼 바깥에서 컨텍스트로 넘긴 값이 바깥 상태를 공유한다는 점도 위험으로 짚습니다.
+- `timeout` 옵션으로 실행 시간 상한을 둘 수 있습니다(예: 무한 루프는 `ERR_SCRIPT_EXECUTION_TIMEOUT`). 시간 제한이지 권한 제한이 아닙니다.
+- 사용자가 올린 코드, 플러그인, 템플릿 같은 신뢰할 수 없는 코드는 별도 프로세스, 컨테이너, VM 같은 OS 수준 격리에서 실행합니다. 보안 심화는 이 과목의 범위 밖입니다.
+- 공식 문서가 드는 용도는 호출한 코드와 다른 전역 객체를 가진 V8 컨텍스트에서 코드를 실행하는 것입니다.
+
+## node:sqlite가 생긴 배경
+
+`node:sqlite`는 Node에 내장된 SQLite 데이터베이스 모듈입니다. 별도 패키지 설치 없이 `import`로 쓰고, `node:` 스킴으로만 가져옵니다. 안정성 지수는 1.2(Release candidate)입니다.
+
+```js
+import { DatabaseSync } from 'node:sqlite'
+
+const db = new DatabaseSync(':memory:')
+db.exec('CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT)')
+db.prepare('INSERT INTO t (name) VALUES (?)').run('a')
+db.prepare('SELECT * FROM t').all()
+// [ { id: 1, name: 'a' } ]
+```
+
+| 시점 | 상태 |
+|------|------|
+| v22.5.0 | 추가. `--experimental-sqlite` 플래그 필요 |
+| v22.13.0, v23.4.0 | 플래그 없이 사용 가능(여전히 실험 단계) |
+| v24.15.0 | 릴리스 후보(Release candidate)로 격상 |
+
+- 도입 경위는 이렇습니다. 코어에 SQLite를 넣자는 제안 이슈(nodejs/node#53264)가 한 달 넘게 반대 없이 열려 있었고, 그 뒤 PR #53752가 최소 기능(MVP)으로 모듈을 추가했습니다. 공식 문서와 PR은 도입 동기를 길게 서술하지 않습니다.
+- 지금 확인되는 특징은 동기 API 중심이라는 점입니다. 클래스는 `DatabaseSync`, `StatementSync`이고 파일 DB와 `:memory:` 메모리 DB를 모두 씁니다. 동기 호출은 이벤트 루프를 막으므로 호출 시간이 긴 쿼리는 주의가 필요합니다.
+- SQLite는 서버 프로세스 없이 파일 하나(또는 메모리)에 담긴 임베디드 DB입니다. 스크립트, CLI 도구, 테스트, 로컬 캐시, 소규모 앱에 맞고, 여러 서버 인스턴스가 같은 DB를 쓰는 서비스 구조에는 PostgreSQL·MySQL 같은 서버 DB를 씁니다(자세히는 16편, 17편).
+- v24 문서와 v26 문서 모두 안정성 지수가 1.2입니다. 격상 시점은 v24 계열이 v24.15.0, v26 문서의 변경 기록은 v25.7.0입니다. Stable이 되기 전에는 API가 바뀔 수 있다는 전제로 씁니다.
+- 파라미터는 `?` 또는 이름 바인딩으로 넘깁니다. SQL 문자열에 값을 이어 붙이지 않습니다(자세히는 17편).
+
+## node:test
+
+`node:test`는 Node에 내장된 테스트 러너입니다. 설치할 패키지가 없고 `node --test`로 실행합니다. v18.0.0에 추가되었고 v20.0.0부터 안정(Stable)입니다.
+
+```js
+import test from 'node:test'
+import assert from 'node:assert/strict'
+
+test('더하기', () => {
+  assert.strictEqual(1 + 1, 2)
+})
+```
+
+```bash
+node --test
+```
+
+- 테스트 함수는 세 가지 방식으로 성공·실패를 판정합니다. 동기 함수는 예외를 던지면 실패, `Promise`를 반환하면 거부 시 실패, 콜백(`done`)을 받으면 첫 인수가 참 같은 값일 때 실패입니다.
+- 하나라도 실패하면 프로세스 종료 코드가 1입니다.
+- `node --test`는 `*.test.js`, `*-test.js`, `*_test.js`, `test-*.js`, `test.js`와 `test` 디렉터리 안의 파일을 찾아 실행합니다. `--no-strip-types`를 주지 않으면 `.ts` 파일도 같은 패턴으로 찾습니다. 글로브 패턴을 인수로 줄 수도 있고, 따옴표로 감쌉니다.
+- `node:` 스킴으로만 가져옵니다.
+- `describe`, `it`, 목(mock), 타이머 조작, 커버리지, 스냅샷, 감시 모드는 24편에서 다룹니다.
+
+## 핵심 정리
+
+- 경과 시간은 `performance.now()`로 재고, 구간은 `mark`와 `measure`, 이벤트 루프 지연은 `monitorEventLoopDelay`와 `eventLoopUtilization`으로 봅니다.
+- `AsyncLocalStorage`는 `run`으로 연 컨텍스트를 `await`와 콜백을 지나서도 `getStore`로 읽게 하며, 요청 ID 로깅 같은 요청 단위 컨텍스트에 씁니다.
+- `diagnostics_channel`은 이름 붙은 채널로 진단 메시지를 발행하고 구독하며, 구독자가 있을 때만 메시지를 만들도록 `hasSubscribers`를 확인합니다.
+- `v8.getHeapStatistics()`는 힙 사용량과 한도를 바이트로 돌려주며 `used_heap_size`의 추세가 누수 단서입니다.
+- `vm`은 보안 경계가 아니므로 신뢰할 수 없는 코드는 프로세스·컨테이너 같은 OS 수준 격리에서 실행합니다.
+- `node:sqlite`는 동기 API의 내장 SQLite 모듈(Release candidate)이고, `node:test`는 `node --test`로 실행하는 내장 테스트 러너(Stable)입니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="HTTP 서버에서 요청마다 요청 ID를 만들어 모든 로그에 붙이려 한다. 비동기 호출(await, 타이머)을 거쳐도 같은 ID를 읽게 하는 가장 알맞은 방법은?"
+  options={['모듈 최상위의 let currentId 전역 변수에 요청마다 값을 덮어쓴다', '요청 진입점에서 AsyncLocalStorage의 run으로 컨텍스트를 열고 getStore로 읽는다', 'performance.mark에 요청 ID를 이름으로 기록한다', 'diagnostics_channel의 hasSubscribers 값에 ID를 저장한다']}
+  correctAnswer={2}
+  explanation="AsyncLocalStorage.run은 콜백과 그 안에서 시작된 비동기 작업 전체에 같은 store를 이어 주고 getStore가 이를 읽습니다. 전역 변수는 동시에 처리 중인 요청끼리 값이 덮어써집니다. performance.mark는 시간 측정용이고, hasSubscribers는 구독자 유무를 알려 주는 읽기 전용 속성입니다."
+  optionExplanations={['동시 요청이 서로의 값을 덮어써서 로그의 ID가 섞입니다.', '요청별 컨텍스트를 비동기 경계를 넘어 유지하는 올바른 방법입니다.', 'mark는 시간 측정 기록이며 컨텍스트 전달 수단이 아닙니다.', 'hasSubscribers는 구독자가 있는지 알려 주는 속성이고 값을 저장하는 곳이 아닙니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="사용자가 올린 JavaScript 코드를 서버에서 실행해야 한다. node:vm에 대한 설명으로 올바른 것은?"
+  options={['vm.createContext로 만든 컨텍스트는 process에 접근할 수 없으므로 안전한 샌드박스다', 'timeout 옵션을 주면 악의적인 코드로부터 안전해진다', '공식 문서는 vm이 보안 장치가 아니라고 밝히며, 신뢰할 수 없는 코드는 별도 프로세스나 컨테이너 같은 OS 수준 격리에서 실행해야 한다', 'Object.create(null)을 컨텍스트로 쓰면 완전히 격리된다']}
+  correctAnswer={3}
+  explanation="vm은 전역 객체를 분리할 뿐 보안 경계가 아니며, 생성자 체인으로 process 같은 바깥 객체를 얻을 수 있습니다. timeout은 실행 시간만 제한하지 권한을 제한하지 않습니다. 신뢰할 수 없는 코드는 프로세스나 컨테이너 수준에서 격리합니다."
+  optionExplanations={['전역에 보이지 않을 뿐 생성자 체인으로 process를 얻을 수 있어 샌드박스가 아닙니다.', 'timeout은 무한 루프를 끊을 뿐 접근 권한을 막지 못합니다.', '공식 문서가 밝힌 사실이며 OS 수준 격리가 올바른 대안입니다.', '객체 모양을 바꿔도 보안 경계가 생기지 않습니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="v8.getHeapStatistics()로 메모리 누수를 의심할 때 가장 먼저 볼 지표와 해석은?"
+  options={['heap_size_limit가 계속 늘어나면 누수다', 'used_heap_size가 시간이 지날수록 오르고 GC 뒤에도 내려오지 않으면 누수를 의심한다', 'malloced_memory가 0이면 누수다', 'total_available_size가 크면 누수다']}
+  correctAnswer={2}
+  explanation="used_heap_size는 JS 객체가 실제로 쓰는 바이트라서 GC 뒤에도 계속 오르는 추세가 누수의 단서입니다. heap_size_limit는 한도(기본값 또는 max-old-space-size 값)라서 누수와 무관하게 고정이고, total_available_size가 크다는 것은 한도까지 여유가 있다는 뜻입니다."
+  optionExplanations={['한도는 설정값이라 누수 때문에 늘어나지 않습니다.', '사용량이 GC 뒤에도 계속 오르는 추세가 누수의 단서입니다.', 'malloced_memory는 V8이 malloc으로 쓴 양이며 0이어서 누수라는 근거는 없습니다.', '여유가 크다는 뜻이라 누수의 증거가 아닙니다.']}
+/>
+
+## 참고 자료
+
+- [Node.js — Performance measurement APIs (perf_hooks)](https://nodejs.org/api/perf_hooks.html)
+- [Node.js — Asynchronous context tracking](https://nodejs.org/api/async_context.html)
+- [Node.js — Diagnostics Channel](https://nodejs.org/api/diagnostics_channel.html)
+- [Node.js — V8](https://nodejs.org/api/v8.html)
+- [Node.js — VM](https://nodejs.org/api/vm.html)
+- [Node.js — SQLite](https://nodejs.org/api/sqlite.html)
+- [nodejs/node PR 53752 — add node:sqlite module](https://github.com/nodejs/node/pull/53752)
+- [Node.js — Test runner](https://nodejs.org/api/test.html)

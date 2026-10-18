@@ -1,0 +1,313 @@
+---
+title: '24. Context 기초'
+description: 'Props Drilling 문제와 Context의 구조, createContext·Provider·useContext 사용법, 기본값 규칙, Provider 중첩, Theme·Auth Context 예시, React 19의 Provider 생략과 use(Context)를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** Context로 중간 컴포넌트를 거치지 않고 값을 전달하는 구조를 만들고, 기본값과 Provider 중첩 규칙을 설명하며, React 19에서 달라진 문법을 쓸 수 있습니다.
+</Callout>
+
+## Props Drilling
+
+Props Drilling은 어떤 값을 쓰는 컴포넌트가 트리 깊숙이 있어서, 그 값을 쓰지 않는 중간 컴포넌트들이 props를 그대로 전달만 하는 상황입니다(props는 05편).
+
+```jsx
+function Page({ theme }) {
+  return <Layout theme={theme} />;      // 전달만 함
+}
+function Layout({ theme }) {
+  return <Sidebar theme={theme} />;     // 전달만 함
+}
+function Sidebar({ theme }) {
+  return <Button theme={theme} />;      // 여기서 처음 사용
+}
+```
+
+- 중간 컴포넌트가 늘수록 props 목록이 길어지고, 값 이름을 바꾸거나 새 값을 추가할 때 모든 경로를 고쳐야 합니다.
+- Context는 이 전달 경로를 건너뛰고 필요한 컴포넌트가 값을 직접 읽게 합니다.
+- Context부터 쓰지는 않습니다. 먼저 props로 명시적으로 넘기는 방법을 쓰고, 중첩이 너무 깊어지면 컴포넌트를 추출해서 JSX를 `children`으로 넘기는 방법을 시도합니다. 그래도 맞지 않을 때 Context를 씁니다.
+
+## Context
+
+Context는 트리 위쪽 컴포넌트가 값을 제공하면 그 아래 어느 깊이의 컴포넌트든 props 없이 읽을 수 있게 하는 React 기능입니다.
+
+- 쓰는 순서는 세 단계입니다. 만들고(`createContext`), 값을 제공하고(Provider), 읽습니다(`useContext`).
+- 자주 쓰는 경우는 테마(다크·라이트), 현재 로그인한 계정, 라우팅 상태, 먼 컴포넌트가 함께 쓰는 복잡한 state입니다.
+- Context 객체는 값을 직접 담지 않습니다. 어떤 Context를 읽고 제공할지 가리키는 이름표 역할만 합니다. 실제 값은 Provider의 `value`에 있습니다.
+- 서로 다른 Context는 완전히 독립적입니다. 한 컴포넌트가 여러 Context를 동시에 읽어도 충돌하지 않습니다.
+- 값이 바뀌면 그 Context를 읽는 컴포넌트가 다시 렌더됩니다.
+
+## createContext
+
+`createContext(defaultValue)`는 Context 객체를 만듭니다. 컴포넌트 밖, 보통 별도 파일의 최상위에서 한 번만 만들어 내보냅니다.
+
+```jsx
+// ThemeContext.js
+import { createContext } from 'react';
+
+export const ThemeContext = createContext('light');
+```
+
+- 인자는 기본값입니다(아래 "기본값").
+- 만든 객체를 제공하는 쪽과 읽는 쪽이 둘 다 같은 객체를 import해야 합니다. 객체가 `===`로 같아야 연결됩니다. 빌드 설정(심볼릭 링크 등)이 같은 파일을 두 번 로드하면 연결이 끊기는 사례가 있습니다.
+- 컴포넌트 안에서 `createContext`를 호출하지 않습니다. 렌더마다 새 Context가 만들어져서 읽는 쪽과 연결되지 않습니다.
+
+## Provider
+
+Provider는 Context의 값을 아래 트리에 제공하는 컴포넌트입니다. React 19에서는 Context 객체를 그대로 렌더하며 `value`를 넘깁니다(생략 문법은 아래 "React 19의 Provider 생략").
+
+```jsx
+import { ThemeContext } from './ThemeContext.js';
+
+export default function App() {
+  const [theme, setTheme] = useState('light');
+  return (
+    <ThemeContext value={theme}>
+      <Page />
+    </ThemeContext>
+  );
+}
+```
+
+- React 18 이하에서는 `ThemeContext.Provider`로 감쌌습니다(아래 "React 19의 Provider 생략").
+- `value`로 넘기는 값이 state이면 값이 바뀔 때 아래 소비자들이 다시 렌더됩니다. 값의 비교는 `Object.is`입니다.
+- `value`를 빼먹으면 `undefined`가 제공됩니다. 기본값이 쓰이지 않습니다.
+- `value` 대신 다른 이름의 prop(`theme={theme}`)을 쓰면 같은 증상이 납니다.
+
+**흔한 실수:** 렌더할 때마다 새 객체를 `value`에 넘기는 것입니다. `value={{ user, login }}`은 값이 같아도 매번 새 객체라서 소비자가 모두 다시 렌더됩니다. React 공식 문서는 `useMemo`와 `useCallback`으로 감싸는 방법을 안내합니다(성능은 중급 과목).
+
+## useContext
+
+`useContext(SomeContext)`는 컴포넌트 최상위에서 호출해 가장 가까운 위쪽 Provider의 `value`를 읽습니다.
+
+```jsx
+import { useContext } from 'react';
+import { ThemeContext } from './ThemeContext.js';
+
+function Button() {
+  const theme = useContext(ThemeContext);
+  return <button className={theme}>확인</button>;
+}
+// Provider가 value dark를 줬다면 theme은 'dark'
+```
+
+- 호출한 컴포넌트에서 위로 올라가며 처음 만나는 Provider를 찾습니다. 같은 컴포넌트 안에서 반환하는 Provider는 찾지 못합니다. Provider는 읽는 컴포넌트의 위쪽에 있어야 합니다.
+- Provider의 `value`가 바뀌면 `useContext`를 호출한 컴포넌트가 다시 렌더됩니다. 중간 컴포넌트가 `memo`로 감싸져 있어도 Context를 읽는 컴포넌트는 새 값을 받습니다.
+- Hook이므로 일반 Hook 규칙대로 최상위에서만 호출해야 합니다(규칙은 26편).
+- 값이 `undefined`로 나온다면 Provider를 빠뜨렸거나, Provider에 `value` prop을 안 넘겼거나, 읽는 쪽과 제공하는 쪽이 서로 다른 Context 객체를 import한 경우입니다.
+
+## 기본값
+
+`createContext(defaultValue)`의 기본값은 위쪽에 일치하는 Provider가 하나도 없을 때만 쓰입니다.
+
+```jsx
+const ThemeContext = createContext('light');
+
+function Button() {
+  return useContext(ThemeContext);
+}
+// Provider 없이 렌더: 'light'
+// <ThemeContext value="dark"> 안에서 렌더: 'dark'
+// <ThemeContext value={undefined}> 안에서 렌더: undefined
+```
+
+- 기본값은 시간이 지나도 바뀌지 않는 고정 값입니다. 값이 바뀌게 하려면 state를 만들고 Provider로 감쌉니다.
+- Provider가 하나라도 있으면 그 `value`가 우선입니다. 값이 `undefined`여도 기본값으로 되돌아가지 않습니다.
+- 의미 있는 기본값이 없으면 `null`을 지정하고, 소비하는 쪽에서 `null`을 검사합니다.
+- 기본값은 Provider 없이 컴포넌트를 단독으로 렌더하는 경우(테스트, 스토리)에 유용합니다.
+
+## Provider 중첩
+
+같은 Context의 Provider를 중첩하면 안쪽 Provider가 그 아래 트리의 값을 덮어씁니다. 읽는 쪽은 항상 가장 가까운 위쪽 Provider의 값을 받습니다.
+
+```jsx
+<ThemeContext value="light">
+  <Header />                       {/* light */}
+  <ThemeContext value="dark">
+    <Sidebar />                    {/* dark */}
+  </ThemeContext>
+  <Footer />                       {/* light */}
+</ThemeContext>
+```
+
+- 안쪽 Provider는 바깥 Provider에 영향을 주지 않습니다. 영향 범위는 자기 아래 서브트리뿐입니다.
+- 한 컴포넌트가 같은 Context를 읽고 그 값을 가공해서 다시 제공할 수 있습니다. 중첩 깊이에 따라 제목 레벨을 하나씩 올리는 컴포넌트가 이 방식입니다.
+
+```jsx
+function Section({ children }) {
+  const level = useContext(LevelContext);
+  return (
+    <LevelContext value={level + 1}>
+      {children}
+    </LevelContext>
+  );
+}
+```
+
+- 서로 다른 Context의 Provider를 겹쳐 쓰는 것도 같은 문법입니다. 테마, 인증, 언어 Provider를 앱 최상단에서 차례로 감쌉니다.
+- 어느 Provider가 읽히는지 헷갈리면 React DevTools에서 컴포넌트 위쪽에 Provider가 있는지 확인합니다.
+
+## Theme Context
+
+테마는 앱 전체가 공유하고 자주 바뀌지 않는 값이라 Context의 대표적인 사례입니다. 값과 값을 바꾸는 함수를 함께 제공합니다.
+
+```jsx
+// ThemeContext.js
+export const ThemeContext = createContext(null);
+
+// App.jsx
+function App() {
+  const [theme, setTheme] = useState('light');
+  const value = { theme, setTheme };
+  return (
+    <ThemeContext value={value}>
+      <Page />
+    </ThemeContext>
+  );
+}
+```
+
+```jsx
+// ThemeToggle.jsx
+function ThemeToggle() {
+  const { theme, setTheme } = useContext(ThemeContext);
+  const next = theme === 'light' ? 'dark' : 'light';
+  const toggle = () => setTheme(next);
+  return <button onClick={toggle}>{next}</button>;
+}
+```
+
+- `setTheme`을 value에 같이 넣으면 소비자가 직접 테마를 바꿀 수 있습니다. 값만 필요한 컴포넌트는 `theme`만 꺼냅니다.
+- `theme`이 바뀌면 `useContext(ThemeContext)`를 호출한 모든 컴포넌트가 다시 렌더됩니다. 읽는 컴포넌트가 많으면 값의 갱신 빈도를 낮게 유지합니다.
+- 이 예시는 단순화한 것입니다. `value` 객체를 매 렌더 새로 만들기 때문에 App이 렌더될 때마다 소비자도 다시 렌더됩니다(위 "흔한 실수").
+
+## Auth Context
+
+현재 로그인한 사용자 정보는 여러 화면의 헤더, 권한 분기, 라우팅이 함께 읽으므로 Context에 두는 경우가 많습니다. Provider를 별도 컴포넌트로 만들어 state와 함수를 한곳에 모읍니다.
+
+```jsx
+const AuthContext = createContext(null);
+
+export function AuthProvider({ children }) {
+  const [user, setUser] = useState(null);
+  const login = (nextUser) => setUser(nextUser);
+  const logout = () => setUser(null);
+  return (
+    <AuthContext value={{ user, login, logout }}>
+      {children}
+    </AuthContext>
+  );
+}
+```
+
+읽는 쪽은 Hook으로 감싸서 Provider 누락을 바로 알려 줍니다.
+
+```jsx
+export function useAuth() {
+  const ctx = useContext(AuthContext);
+  if (ctx === null) {
+    throw new Error('AuthProvider 안에서만 사용할 수 있습니다');
+  }
+  return ctx;
+}
+// 사용: const { user, logout } = useAuth();
+```
+
+- 기본값을 `null`로 두고 `useAuth`에서 검사하면 Provider를 빠뜨렸을 때 `undefined`로 조용히 실패하지 않고 명확한 에러가 납니다.
+- `children`을 받는 Provider 컴포넌트로 만들면 앱 최상단에서 `AuthProvider`로 감싸기만 하면 됩니다. `AuthProvider`의 state가 바뀌어도 `children`으로 받은 요소는 그대로라서 불필요한 렌더가 줄어듭니다.
+- 로그인 요청과 토큰 보관 방식은 이 편의 범위가 아니며 API 통신 편에서 다룹니다(27편).
+- 상태가 복잡해지면 `useState` 대신 `useReducer`와 함께 Context를 쓰는 방식이 있습니다(25편).
+
+## React 19의 Provider 생략
+
+React 19부터는 Context 객체를 그대로 Provider처럼 렌더합니다. `.Provider`를 붙이지 않습니다.
+
+```jsx
+// React 19
+<ThemeContext value={theme}>
+  <Page />
+</ThemeContext>
+
+// 이전 버전
+<ThemeContext.Provider value={theme}>
+  <Page />
+</ThemeContext.Provider>
+```
+
+- 두 문법의 동작 의미는 같습니다. 공식 문서는 `Context.Provider`를 이전 버전용 방식으로 분류하고 새 코드에서는 Context를 직접 렌더하는 형태를 보여 줍니다.
+- 이 문서의 코드는 React 19 문법입니다. 기존 프로젝트가 이전 버전이면 `.Provider`로 바꿔 읽습니다.
+- `.Consumer`(`render prop`으로 값을 읽는 방식)도 이전 방식이며 공식 문서는 `useContext`를 권합니다.
+
+## use(Context)
+
+`use(context)`는 React 19에서 Context 값을 읽는 또 다른 API입니다. `useContext`와 읽는 값은 같지만 호출 위치의 제약이 없습니다.
+
+| 항목 | `useContext` | `use(context)` |
+|------|--------------|----------------|
+| 최상위에서 호출 | 필수 | 불필요 |
+| 조건문 안 | 불가 | 가능 |
+| 반복문 안 | 불가 | 가능 |
+| 조기 return 뒤 | 불가 | 가능 |
+
+```jsx
+import { use } from 'react';
+
+function HorizontalRule({ show }) {
+  if (show) {
+    const theme = use(ThemeContext);   // 조건문 안에서 호출
+    return <hr className={theme} />;
+  }
+  return false;
+}
+```
+
+- 반환값은 `useContext`와 같습니다. 위쪽 가장 가까운 Provider의 값이고, 없으면 기본값입니다.
+- 컴포넌트나 Hook 안에서만 호출할 수 있고 모듈 최상위에서는 호출할 수 없습니다.
+- `useContext`처럼 호출한 컴포넌트의 위쪽 Provider만 찾습니다.
+- `use`는 Promise를 읽는 데도 쓰이는 API입니다. Promise와 Suspense 쪽 사용은 이 과목 범위 밖이며 중급 과목에서 다룹니다.
+- 둘 중 무엇을 써도 되지만, 조건에 따라 Context를 읽어야 하는 경우가 아니면 기존 `useContext` 코드를 바꿀 필요는 없습니다.
+
+## 핵심 정리
+
+- Props Drilling은 값을 쓰지 않는 중간 컴포넌트가 props를 전달만 하는 문제이며, 먼저 props 명시와 `children` 구성으로 해결하고 그래도 안 맞을 때 Context를 씁니다.
+- Context는 `createContext`로 만들고, Provider의 `value`로 제공하고, `useContext`로 읽습니다. 값이 바뀌면 읽는 컴포넌트가 다시 렌더됩니다.
+- 기본값은 위쪽에 Provider가 하나도 없을 때만 쓰이고, Provider가 있으면 `value`가 `undefined`여도 그 값이 우선합니다.
+- 같은 Context를 중첩하면 가장 가까운 위쪽 Provider의 값을 읽고, 서로 다른 Context는 독립적입니다.
+- Theme와 Auth는 값과 변경 함수를 Provider 컴포넌트에 모으고, `useAuth` 같은 Hook으로 감싸 Provider 누락을 검사합니다.
+- React 19는 `.Provider` 없이 Context를 직접 렌더하고, `use(context)`는 조건문과 반복문 안에서도 Context를 읽습니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="createContext('light')로 만든 ThemeContext를 읽는 Button이 있다. 위쪽에 Provider가 하나도 없을 때 useContext(ThemeContext)의 값은?"
+  options={['undefined', 'light', 'null', '에러가 발생한다']}
+  correctAnswer={2}
+  explanation="기본값은 위쪽에 일치하는 Provider가 없을 때 반환됩니다. 반대로 Provider가 있으면 value가 undefined여도 그 값이 반환되고 기본값으로 돌아가지 않습니다."
+  optionExplanations={['Provider가 있으면서 value가 undefined일 때의 값입니다. 여기서는 Provider가 없습니다.', 'Provider가 없으면 createContext에 준 기본값이 반환됩니다.', 'null은 기본값으로 null을 줬을 때의 값입니다.', 'Provider가 없어도 기본값이 있어 에러가 아닙니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="같은 ThemeContext의 Provider가 바깥에는 value light, 그 안쪽에는 value dark로 중첩되어 있다. 안쪽 Provider 아래의 컴포넌트가 useContext(ThemeContext)로 읽는 값은?"
+  options={['light', 'dark', 'light와 dark의 배열', 'undefined']}
+  correctAnswer={2}
+  explanation="useContext는 호출한 컴포넌트의 위쪽에서 가장 가까운 Provider의 value를 읽습니다. 안쪽 Provider가 자기 아래 서브트리의 값을 덮어쓰고 바깥 Provider에는 영향을 주지 않습니다."
+  optionExplanations={['바깥 Provider의 값이며 더 가까운 안쪽 Provider에 가려집니다.', '가장 가까운 위쪽 Provider인 안쪽의 값입니다.', 'Context는 값을 합치지 않고 가장 가까운 하나만 읽습니다.', '둘 다 value를 넘겼으므로 undefined가 아닙니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="use(context)가 useContext와 다른 점으로 알맞은 것은?"
+  options={['Provider 없이도 값을 만들어 낸다', '조건문과 반복문 안에서도 호출할 수 있다', '값이 바뀌어도 컴포넌트를 다시 렌더하지 않는다', 'React 18 이하에서만 동작한다']}
+  correctAnswer={2}
+  explanation="use(context)는 useContext와 같은 값을 읽지만 컴포넌트 최상위에서 호출해야 한다는 제약이 없어서 조건문, 반복문, 조기 return 뒤에서도 호출할 수 있습니다. 읽는 값과 Provider 탐색 방식은 같습니다."
+  optionExplanations={['값은 Provider나 기본값에서 오며 use가 만들지 않습니다.', '호출 위치 제약이 없다는 점이 가장 큰 차이입니다.', 'Context 값이 바뀌면 use로 읽는 컴포넌트도 다시 렌더됩니다.', 'use는 React 19에서 쓸 수 있는 API입니다.']}
+/>
+
+## 참고 자료
+
+- [React — Passing Data Deeply with Context](https://react.dev/learn/passing-data-deeply-with-context)
+- [React — createContext](https://react.dev/reference/react/createContext)
+- [React — useContext](https://react.dev/reference/react/useContext)
+- [React — use](https://react.dev/reference/react/use)

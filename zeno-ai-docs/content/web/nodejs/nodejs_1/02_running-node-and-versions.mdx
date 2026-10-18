@@ -1,0 +1,284 @@
+---
+title: '02. 실행과 버전 관리'
+description: 'node 명령의 실행 방식(REPL·파일·-e·--check), 버전 확인과 process.versions, Current·LTS 릴리스 단계와 일정 변경, nvm·fnm·Volta와 버전 파일을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** `node` 명령의 네 가지 실행 방식을 구분하고, 설치된 버전을 확인하며, Current·LTS 단계를 읽고 프로젝트의 Node.js 버전을 고정하는 방법을 설명할 수 있습니다.
+</Callout>
+
+## REPL
+
+REPL(Read-Eval-Print Loop)은 입력한 JavaScript를 바로 실행하고 결과를 출력하는 대화형 환경입니다. 인수 없이 `node`만 실행하면 시작합니다. 표준 입력이 터미널이 아닐 때 강제로 열려면 `node -i`(`--interactive`)를 씁니다.
+
+```text
+$ node
+> [1, 2, 3]
+[ 1, 2, 3 ]
+> _.length
+3
+> await Promise.resolve(7)
+7
+> fs.existsSync('.')
+true
+```
+
+- `_`는 마지막으로 평가한 식의 결과, `_error`는 마지막 에러입니다. `_`에 직접 값을 대입하면 이 동작이 꺼집니다.
+- 최상위 `await`를 `async` 함수 없이 쓸 수 있습니다.
+- `fs`, `path` 같은 내장 모듈은 `import` 없이 변수로 바로 쓸 수 있습니다.
+- Tab으로 자동 완성하고, 빈 줄에서 Tab을 누르면 전역·지역 변수 목록이 나옵니다.
+- 입력 기록은 홈 디렉터리의 `.node_repl_history`에 저장됩니다(`NODE_REPL_HISTORY`로 경로 변경, 빈 문자열이면 저장 안 함).
+
+| 명령 | 동작 |
+|------|------|
+| `.help` | 특수 명령 목록 |
+| `.exit` 또는 Ctrl+D | REPL 종료 |
+| `.break` 또는 Ctrl+C | 여러 줄 입력 중단 |
+| `.clear` | 컨텍스트 초기화 |
+| `.editor` | 여러 줄 편집 모드(Ctrl+D 완료, Ctrl+C 취소) |
+| `.save 파일`, `.load 파일` | 세션 저장, 파일을 세션에 불러오기 |
+
+REPL(`node:repl`)의 안정성 지수는 Stable입니다. 짧은 API 확인용이고, 입력한 코드는 저장되지 않으므로 남길 코드는 `.save`로 저장하거나 파일에 씁니다.
+
+## node 파일 실행
+
+`node 파일명`은 그 파일을 진입점으로 실행합니다. 공식 문서의 형식은 `node [options] [V8 options] [진입점 | -e "script" | -] [--] [arguments]`입니다.
+
+```bash
+node hello.mjs
+node --watch hello.mjs
+echo "console.log('x')" | node -
+```
+
+- 옵션은 파일명 앞에, 스크립트에 넘길 인수는 파일명 뒤에 씁니다(자세히는 05편).
+- `.mjs`는 ES Modules, `.cjs`는 CommonJS로 실행됩니다. `.js`는 가까운 `package.json`의 `type`에 따릅니다(자세히는 09편).
+- `-`는 표준 입력으로 받은 코드를 실행합니다.
+- `--watch`는 파일이 바뀌면 프로세스를 다시 시작합니다. Node.js 22.0.0과 20.13.0에서 Stable이 되었습니다.
+- 진입점이 없으면 `Error: Cannot find module`이 나고 종료 코드는 1입니다.
+
+**흔한 실수:** 확장자를 생략하는 것입니다. `node hello`로는 `hello.mjs`를 찾지 못합니다. 확장자를 포함해 `node hello.mjs`로 씁니다.
+
+## node -e
+
+`-e`(`--eval`)는 뒤따르는 문자열을 JavaScript로 실행합니다. `-p`(`--print`)는 실행하고 마지막 식의 결과를 출력합니다. 둘 다 Stable입니다.
+
+```bash
+node -e "console.log(1 + 1)"   # 2
+node -p "[1, 2].map(x => x * 2)" # [ 2, 4 ]
+node -p "os.cpus().length"       # CPU 논리 코어 수
+```
+
+- REPL처럼 내장 모듈이 변수로 미리 정의되어 있어서 `os`를 `import` 없이 씁니다(v5.11.0부터).
+- 스크립트가 `-`로 시작하면 `=`로 붙여야 합니다. 예: `node --print --eval=-42`.
+- 따옴표는 셸마다 다릅니다. Windows `cmd.exe`는 큰따옴표만 되고, PowerShell과 Git Bash는 작은따옴표도 됩니다.
+- `-e`와 표준 입력의 코드가 CommonJS인지 ES 모듈인지는 `--input-type=module`로 지정할 수 있습니다. 지정하지 않으면 문법을 보고 감지합니다(v22.7.0과 v20.19.0부터 기본).
+
+한 줄 확인에는 편하지만, 길어지면 이스케이프가 복잡해지므로 파일로 만듭니다.
+
+## node --check
+
+`-c`(`--check`)는 스크립트를 실행하지 않고 문법만 검사합니다(Stable).
+
+```bash
+node --check app.mjs
+# 문법 오류가 있으면 SyntaxError를 출력하고 종료 코드 1
+# 문제가 없으면 아무 출력 없이 종료 코드 0
+```
+
+- 검사 대상은 문법뿐입니다. 존재하지 않는 모듈을 `import`하거나 정의되지 않은 함수를 호출해도 통과합니다(실행해야 드러나는 오류).
+- 종료 코드로 성공·실패를 알려서 CI나 커밋 전 검사에 씁니다.
+
+## 버전 확인
+
+설치된 Node.js 버전은 명령줄과 코드 두 곳에서 읽습니다.
+
+```bash
+node -v          # v24.15.0
+node --version   # v24.15.0
+npm -v           # npm의 버전(Node.js와 별개 번호)
+```
+
+```js
+console.log(process.version)        // 'v24.15.0'
+console.log(process.versions.node)  // '24.15.0'
+```
+
+- `process.version`은 `v` 접두사가 붙은 문자열이고, `process.versions.node`는 접두사가 없습니다. 비교하거나 파싱할 때는 접두사 유무를 맞춥니다.
+- 버전은 `주.부.패치` 형식입니다(자세히는 13편).
+
+**흔한 실수:** 터미널을 여러 개 쓸 때 `node -v`와 에디터 내장 터미널, CI의 버전이 다른 것을 놓치는 것입니다. 실행하는 쪽에서 직접 확인합니다.
+
+## process.versions
+
+`process.versions`는 Node.js와 번들된 의존 라이브러리의 버전을 담은 객체입니다.
+
+```js
+const { node, v8, uv, modules } = process.versions
+console.log(node)    // '24.15.0'
+console.log(v8)      // '13.6.233.17-node.48'
+console.log(uv)      // '1.51.0'
+console.log(modules) // '137'
+```
+
+| 키 | 의미 |
+|----|------|
+| `node` | Node.js 버전 |
+| `v8` | V8 엔진 버전(Node.js 고유 접미사 포함) |
+| `uv` | libuv 버전 |
+| `modules` | 네이티브 모듈의 ABI 버전 |
+| `openssl` 등 | 번들된 라이브러리 버전 |
+
+관련 값은 다음과 같습니다.
+
+- `process.release.name`은 `'node'`이고, `process.release.lts`는 LTS 릴리스일 때 코드명(Node.js 24는 `'Krypton'`), Current 릴리스면 `undefined`입니다.
+- `process.platform`(`'win32'`, `'linux'`, `'darwin'` 등)과 `process.arch`(`'x64'`, `'arm64'` 등)는 실행 환경을 알려 줍니다.
+
+## Current와 LTS
+
+Node.js의 주(major) 버전은 릴리스 단계를 거칩니다. 2026-10-06 기준 규칙은 다음과 같습니다.
+
+| 단계 | 의미 |
+|------|------|
+| Current | 새 메이저의 첫 6개월. 라이브러리 작성자가 지원을 추가하는 기간 |
+| Active LTS | 일반 사용에 권장되는 장기 지원 |
+| Maintenance LTS | 장기 지원의 후반 |
+| EOL | 지원 종료 |
+
+- LTS는 보통 총 30개월 동안 치명적 버그 수정을 보장합니다.
+- 27 이전에는 짝수 버전만 LTS가 되었고, 홀수 버전은 6개월 뒤 지원이 끝났습니다. 25가 그 예입니다.
+- 운영 환경에는 Active LTS 또는 Maintenance LTS만 쓰라고 공식 문서가 안내합니다.
+
+| 버전 | 2026-10-06 상태 | LTS 시작 | Maintenance 시작 | 종료 |
+|------|-----------------|----------|------------------|------|
+| 20 Iron | EOL | 2023-10-24 | 2024-10-22 | 2026-04-30 |
+| 22 Jod | Maintenance LTS | 2024-10-29 | 2025-10-21 | 2027-04-30 |
+| 24 Krypton | Active LTS | 2025-10-28 | 2026-10-20 | 2028-04-30 |
+| 26 | Current | 2026-10-28 | 2027-10-20 | 2029-04-30 |
+
+- 24는 2026-10-20에 Maintenance LTS로 넘어가고, 26은 2026-10-28에 LTS가 됩니다. 날짜는 Node.js Release 저장소의 일정 파일 기준입니다.
+- 이 시리즈는 Active LTS인 24와 Current인 26을 기준으로 씁니다.
+
+## 릴리스 일정 변경
+
+Node.js 27부터 릴리스 일정이 바뀝니다. 2026-10부터 적용되고, 26이 옛 방식의 마지막 메이저입니다.
+
+| 항목 | 26까지 | 27부터 |
+|------|--------|--------|
+| 메이저 릴리스 | 연 2회 | 연 1회(4월) |
+| 홀수·짝수 구분 | 짝수만 LTS | 없음. 모든 메이저가 LTS |
+| 단계 | Current 6개월, LTS | Alpha 6개월, Current 6개월, LTS 30개월 |
+| 버전 번호 | 순차 | 해당 연도에 맞춤(27.0.0은 2027년) |
+
+- Alpha는 10월부터 3월까지입니다. 서명된 릴리스지만 semver-major 변경이 허용되고 API가 바뀔 수 있어서, 라이브러리 작성자와 CI 시험용이며 운영용이 아닙니다. 버전은 `27.0.0-alpha.1` 형식입니다.
+- 27의 일정: Alpha 시작 2026-10-28, 27.0.0 릴리스 2027-04, LTS 전환 2027-10, 종료 2030-04.
+- 홀수 버전을 건너뛰고 짝수만 쓰던 규칙이 사라지므로, "짝수가 LTS"라는 기준은 26까지만 맞습니다.
+
+## nvm
+
+nvm(Node Version Manager)은 여러 Node.js 버전을 설치하고 명령줄에서 바꿔 쓰게 해 주는 도구입니다. 사용자별, 셸별로 동작하는 POSIX 셸용 도구입니다.
+
+```bash
+nvm install --lts    # 최신 LTS 설치
+nvm install 24       # 24.x 설치
+nvm use 24           # 현재 셸의 버전을 24.x로
+nvm alias default 24 # 새 셸의 기본값
+nvm ls               # 설치된 버전
+```
+
+- Unix, macOS, Windows의 WSL에서 동작합니다. Windows 네이티브는 지원하지 않고, `nvm-windows` 같은 별도 프로젝트를 써야 합니다.
+- `nvm use`는 그 셸에만 적용됩니다. 새 셸의 기본 버전은 `alias default`로 정합니다.
+- 셸 프로필(`~/.bashrc`, `~/.zshrc`)이 `nvm.sh`를 불러와야 활성화되므로, 프로필을 읽지 않는 환경에서는 nvm이 없습니다.
+- nodejs.org 문서는 nvm을 Node.js 버전 관리자 설치 방법의 예로 소개합니다.
+
+## fnm과 Volta
+
+fnm과 Volta는 nvm과 같은 목적의 도구이며 둘 다 Rust로 작성된 실행 파일입니다.
+
+| 항목 | nvm | fnm | Volta |
+|------|-----|-----|-------|
+| Windows 네이티브 | 안 됨 | 됨 | 됨 |
+| 버전 지정 파일 | `.nvmrc` | `.node-version`, `.nvmrc` | `package.json`의 `volta` 필드 |
+| 폴더 이동 시 자동 전환 | 셸 설정을 따로 추가 | `--use-on-cd` 옵션 | 프로젝트별로 자동 전환 |
+| 버전 고정 | 파일을 직접 작성 | 파일을 직접 작성 | `volta pin node@24` |
+
+- fnm: `fnm install`, `fnm use`, `fnm env`로 설치·전환·셸 연동을 합니다. bash, zsh, fish, PowerShell, cmd를 지원합니다.
+- Volta: `volta install node@22`로 설치하고, `volta pin node@24`로 그 프로젝트가 쓸 Node.js 버전을 `package.json`에 기록합니다. 기록은 저장소에 커밋되어 팀이 같은 버전을 씁니다.
+- 둘 중 무엇을 쓰든 목적은 프로젝트마다 Node.js 버전을 바꿔 가며 쓰는 것입니다. 팀이 정한 도구 하나로 맞춥니다.
+
+## .nvmrc와 .node-version
+
+`.nvmrc`와 `.node-version`은 프로젝트가 쓸 Node.js 버전을 한 줄로 적은 텍스트 파일입니다. 저장소 루트에 두고 커밋합니다.
+
+```text
+24
+```
+
+위는 `.nvmrc` 또는 `.node-version`의 전체 내용 예입니다. 파일에는 이 한 줄만 있고, 정확한 버전을 적을 때는 `24.15.0`처럼 씁니다.
+
+- nvm은 `.nvmrc`를 읽습니다. 값은 `5.9` 같은 버전, `lts/*`, `node` 등이고, 인수 없이 `nvm use`를 실행하면 현재 디렉터리에서 위로 올라가며 `.nvmrc`를 찾아 그 버전으로 전환합니다.
+- fnm은 `.node-version`과 `.nvmrc`를 모두 읽습니다. `--use-on-cd`를 켜면 폴더에 들어갈 때 자동으로 전환합니다.
+- GitHub Actions의 `setup-node`는 `node-version-file`로 `.nvmrc`, `.node-version`, `.tool-versions`, `mise.toml`, `package.json`을 읽습니다. `package.json`에서는 `volta.node`, `devEngines.runtime`, `engines.node` 순으로 찾습니다.
+- `24`처럼 주 버전만 적으면 도구가 24.x 중 하나로 풀어서 사람마다 패치 버전이 다를 수 있습니다. 완전히 맞추려면 `24.15.0`처럼 적습니다.
+- `package.json`의 `engines.node` 필드는 허용 범위를 선언합니다(자세히는 14편).
+
+**흔한 실수:** 버전 파일을 두고 CI와 배포 이미지의 버전은 따로 정해서 서로 어긋나는 것입니다. 같은 파일을 읽게 하면 한 곳만 고치면 됩니다.
+
+## 버전을 고정하는 이유
+
+- **동작 차이:** 같은 코드가 버전에 따라 다르게 동작하거나 아예 동작하지 않습니다. 예를 들어 `fetch`는 v17.5.0에 추가되어 v21.0.0에서 Stable이 되었고, `--env-file` 옵션은 v24.10.0과 v22.21.0에서 실험 단계를 벗어났습니다. 최소 버전을 모르면 어떤 기능을 써도 되는지 알 수 없습니다.
+- **재현성:** 개발자 PC, CI, 운영 서버가 같은 버전이어야 "내 PC에서는 된다" 문제를 줄입니다.
+- **보안 지원:** EOL이 된 버전은 수정을 받지 못합니다. 20은 2026-04-30에 끝났습니다.
+- **lock 파일의 한계:** `package-lock.json`은 패키지 버전만 고정하고 Node.js 자체의 버전은 고정하지 않습니다(자세히는 12편).
+
+버전 파일, `engines`, CI 설정, 배포 이미지에 같은 값을 쓰는 것이 기본입니다.
+
+## 핵심 정리
+
+- `node`는 인수 없이 REPL, 파일명이면 파일 실행, `-e`와 `-p`는 문자열 실행·출력, `--check`는 실행 없이 문법만 검사합니다.
+- 버전은 `node -v`, `process.version`('v' 포함), `process.versions.node`로 읽고, `process.versions`에는 V8·libuv·ABI 등 번들 라이브러리 버전이 들어 있습니다.
+- 운영에는 Active·Maintenance LTS만 씁니다. 2026-10-06 기준 24는 Active LTS, 26은 Current(2026-10-28 LTS 전환), 22는 Maintenance LTS, 20은 EOL입니다.
+- Node.js 27부터 연 1회 메이저 릴리스가 되고 홀수·짝수 구분 없이 모든 메이저가 LTS가 됩니다. 26까지는 짝수만 LTS입니다.
+- nvm(Windows 네이티브 미지원), fnm, Volta는 버전을 바꿔 쓰게 해 주는 도구이며, 버전은 `.nvmrc`·`.node-version`·`volta` 필드 같은 파일에 적어 팀과 CI가 같은 값을 읽게 합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="node --check app.mjs 가 통과하는(종료 코드 0) 경우는?"
+  options={['app.mjs 안에서 존재하지 않는 모듈을 import한 경우', 'app.mjs 에 const a = ; 처럼 문법 오류가 있는 경우', 'app.mjs 가 실행 중에 무한 루프에 빠지는 경우를 미리 알아낸 경우', 'app.mjs 파일이 없는 경우']}
+  correctAnswer={1}
+  explanation="--check는 파일을 실행하지 않고 문법만 검사합니다. 존재하지 않는 모듈 import는 문법 오류가 아니라 실행해야 드러나므로 통과합니다. 문법 오류는 SyntaxError와 종료 코드 1, 무한 루프는 실행하지 않으므로 알 수 없고, 파일이 없으면 오류입니다."
+  optionExplanations={['정답입니다. 모듈 해석은 실행 시점에 일어나므로 문법 검사는 통과합니다.', '문법 오류는 SyntaxError와 종료 코드 1로 실패합니다.', '실행하지 않으므로 런타임 동작은 검사하지 못합니다.', '파일이 없으면 검사할 수 없어서 오류로 끝납니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="2026-10-06 기준 Node.js 릴리스 상태로 옳은 것은?"
+  options={['24는 Current, 26은 Active LTS이다', '24는 Active LTS, 26은 Current이다', '22는 Current, 24는 EOL이다', '20은 Active LTS, 22는 Maintenance LTS이다']}
+  correctAnswer={2}
+  explanation="24는 2025-10-28부터 Active LTS이고 2026-10-20에 Maintenance로 넘어갑니다. 26은 2026-05-05에 나온 Current이고 2026-10-28에 LTS가 됩니다. 22는 Maintenance LTS, 20은 2026-04-30에 EOL이 되었습니다."
+  optionExplanations={['24와 26의 상태가 서로 바뀌었습니다.', '정답입니다. 24는 Active LTS, 26은 Current입니다.', '22는 Maintenance LTS이고 24는 EOL이 아닙니다.', '20은 이미 EOL입니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="Node.js 27부터 바뀌는 릴리스 방식으로 옳은 것은?"
+  options={['연 2회 메이저를 내고 짝수 버전만 LTS가 된다', '연 1회 메이저를 내고 모든 메이저가 Alpha와 Current를 거쳐 LTS가 된다', 'LTS를 없애고 Current만 유지한다', '메이저 버전 번호가 릴리스 순서와 무관해진다']}
+  correctAnswer={2}
+  explanation="Node.js 27부터는 연 1회(4월) 메이저를 내고 홀수·짝수 구분이 사라집니다. Alpha 6개월, Current 6개월을 거쳐 모든 메이저가 30개월의 LTS가 됩니다. 연 2회와 짝수만 LTS는 26까지의 방식이고, 버전 번호는 해당 연도에 맞춥니다."
+  optionExplanations={['26까지의 방식입니다.', '정답입니다. 연 1회 릴리스, 모든 메이저가 LTS입니다.', 'LTS는 없어지지 않고 모든 메이저에 적용됩니다.', '번호는 연도에 맞춥니다(27.0.0은 2027년).']}
+/>
+
+## 참고 자료
+
+- [Node.js API — Command-line options](https://nodejs.org/api/cli.html)
+- [Node.js API — REPL](https://nodejs.org/api/repl.html)
+- [Node.js API — process (version, versions, release)](https://nodejs.org/api/process.html)
+- [Node.js API — Global objects (fetch)](https://nodejs.org/api/globals.html)
+- [Node.js — Releases](https://nodejs.org/en/about/previous-releases)
+- [Node.js Release 저장소 — schedule.json](https://github.com/nodejs/Release/blob/main/schedule.json)
+- [Node.js Blog — Evolving the Node.js Release Schedule](https://nodejs.org/en/blog/announcements/evolving-the-nodejs-release-schedule)
+- [nvm — README](https://github.com/nvm-sh/nvm)
+- [fnm — README](https://github.com/Schniz/fnm)
+- [Volta — Guide](https://docs.volta.sh/guide/)
+- [actions/setup-node — Advanced usage (node-version-file)](https://github.com/actions/setup-node/blob/main/docs/advanced-usage.md)

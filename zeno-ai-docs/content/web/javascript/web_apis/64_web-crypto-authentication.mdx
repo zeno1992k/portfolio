@@ -1,0 +1,522 @@
+---
+title: '64. Web Crypto와 인증 API'
+description: '난수·해시·암복호화·서명, 키 관리와 파생, Credential Management와 WebAuthn 패스키, 조건부 UI, FedCM·WebOTP·Digital Credentials·Payment Request 개요를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** Web Crypto의 연산과 키 수명 규칙을 구분하고, navigator.credentials 아래 인증 방식(WebAuthn·FedCM·WebOTP 등)의 흐름과 지원 상태를 판단합니다.
+</Callout>
+
+## 난수 생성
+
+`crypto.getRandomValues()`와 `crypto.randomUUID()`는 암호학적으로 안전한 난수를 만듭니다. `Math.random()`은 보안용으로 쓰지 않습니다. 토큰, nonce, 솔트, IV에는 둘 중 하나를 씁니다.
+
+```js
+const bytes = crypto.getRandomValues(new Uint8Array(16))
+// Uint8Array(16) [ 201, 12, 87, ... ]
+const id = crypto.randomUUID()
+// '36b8f84d-df4e-4d49-b662-bcde71a8764f' (v4 UUID)
+```
+
+| 항목 | `getRandomValues(typedArray)` | `randomUUID()` |
+|------|-------------------------------|----------------|
+| 반환 | 전달한 배열을 채워 그대로 반환 | 36자 v4 UUID 문자열 |
+| 보안 컨텍스트 | 불필요. `Crypto`에서 비보안 컨텍스트에도 있는 유일한 멤버 | 필요 |
+| 지원 | Baseline 널리 지원 | Baseline 널리 지원(2022) |
+| 워커 | 가능 | 가능 |
+
+- 받는 배열은 정수 TypedArray(`Int8Array`, `Uint8Array`, `Uint8ClampedArray`, `Int16Array`, `Uint16Array`, `Int32Array`, `Uint32Array`, `BigInt64Array`, `BigUint64Array`)입니다. 부동소수 배열은 거부합니다.
+- 한 번에 최대 65,536바이트입니다. 넘으면 `QuotaExceededError`가 발생하므로 나눠서 호출합니다.
+- 키 생성에는 난수를 직접 뽑지 말고 `SubtleCrypto.generateKey()`를 씁니다. 이 함수는 보안 컨텍스트에서만 실행되도록 보장됩니다.
+
+## SubtleCrypto
+
+`crypto.subtle`은 암호 연산을 제공하는 저수준 API입니다. 이름의 subtle(미묘한)은 알고리즘마다 지켜야 할 조건이 까다롭다는 뜻이고, 잘못 쓰기 쉬워서 설계는 검토를 거치는 것이 좋습니다. 보안 컨텍스트(HTTPS)에서만 있고 워커에서도 쓸 수 있습니다. Baseline 널리 지원합니다(2017). 모든 메서드는 프라미스를 반환합니다.
+
+| 메서드 | 하는 일 |
+|--------|---------|
+| `digest()` | 해시 계산 |
+| `encrypt()`, `decrypt()` | 암호화, 복호화 |
+| `sign()`, `verify()` | 서명 또는 MAC 생성, 검증(`verify`는 불리언) |
+| `generateKey()`, `importKey()`, `exportKey()` | 키 생성, 가져오기, 내보내기 |
+| `deriveKey()`, `deriveBits()` | 키 파생 |
+| `wrapKey()`, `unwrapKey()` | 키를 암호화해 내보내기, 가져오기 |
+
+### digest
+
+```js
+async function sha256Hex(text) {
+  const data = new TextEncoder().encode(text)
+  const buf = await crypto.subtle.digest('SHA-256', data)
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+}
+```
+
+- 지원 알고리즘은 `SHA-256`, `SHA-384`, `SHA-512`이고 `SHA-1`은 취약해서 쓰지 않습니다.
+- 입력은 `ArrayBuffer`, TypedArray, `DataView`이고 결과는 `ArrayBuffer`(SHA-256이면 32바이트)입니다. 스트리밍은 지원하지 않아 입력 전체를 메모리에 올립니다.
+- 비밀번호 해시 용도가 아닙니다. 비밀번호 저장은 서버에서 전용 알고리즘으로 합니다.
+
+### encrypt와 decrypt
+
+| 알고리즘 | 종류 | 비고 |
+|----------|------|------|
+| `AES-GCM` | 대칭 | 인증이 내장된 암호화(AEAD). 권장 |
+| `AES-CBC`, `AES-CTR` | 대칭 | 무결성 검증이 없음. CTR의 카운터는 같은 키에서 재사용 금지 |
+| `RSA-OAEP` | 비대칭 | 평문 길이 제한이 있음(2048비트 키와 SHA-256이면 최대 190바이트) |
+
+```js
+const iv = crypto.getRandomValues(new Uint8Array(12))
+const data = new TextEncoder().encode('hello')
+const ct = await crypto.subtle.encrypt(
+  { name: 'AES-GCM', iv }, key, data,
+)
+const pt = await crypto.subtle.decrypt(
+  { name: 'AES-GCM', iv }, key, ct,
+)
+// new TextDecoder().decode(pt) === 'hello'
+```
+
+- IV(초기화 벡터)는 암호화마다 새로 만든 96비트(12바이트) 난수를 씁니다. 같은 키로 IV를 재사용하면 안전성이 깨집니다.
+- IV는 비밀이 아닙니다. 암호문과 함께 저장·전송해야 복호화할 수 있습니다.
+- AES-GCM의 인증 태그는 암호문 끝에 붙어 나옵니다. 암호문이나 IV가 변조되면 `decrypt()`가 `OperationError`로 거부됩니다. 복호화 실패는 정상적인 오류 경로입니다.
+- 옵션 `additionalData`로 암호화하지 않는 부가 데이터(헤더 등)를 인증에 포함할 수 있습니다.
+- 키가 맞지 않는 알고리즘이면 `InvalidAccessError`입니다.
+
+### sign과 verify
+
+| 알고리즘 | 키 | 추가 매개변수 |
+|----------|----|---------------|
+| `HMAC` | 비밀 키(양쪽이 공유) | 키 생성 시 `hash` |
+| `ECDSA` | 개인 키로 서명, 공개 키로 검증 | 서명 시 `hash`, 키 생성 시 `namedCurve`(P-256 등) |
+| `RSA-PSS` | 개인 키로 서명, 공개 키로 검증 | `saltLength` |
+| `RSASSA-PKCS1-v1_5` | 같음 | 없음 |
+| `Ed25519` | 같음 | 없음(지원 환경은 호환성 표 확인) |
+
+```js
+const sig = await crypto.subtle.sign(
+  { name: 'ECDSA', hash: 'SHA-256' }, privateKey, data,
+)
+const ok = await crypto.subtle.verify(
+  { name: 'ECDSA', hash: 'SHA-256' }, publicKey, sig, data,
+)
+// ok: true
+```
+
+`verify()`는 서명이 틀려도 예외를 던지지 않고 `false`를 반환합니다. 결과를 확인하지 않으면 검증을 건너뛴 것과 같습니다. HMAC 값을 직접 `===`로 비교하지 말고 `verify()`를 씁니다.
+
+## 키 관리
+
+### CryptoKey
+
+`CryptoKey`는 키를 감싼 불투명 객체입니다. 키 바이트를 스크립트에 노출하지 않고 연산에 쓸 수 있게 합니다. 보안 컨텍스트에서만 쓸 수 있습니다.
+
+| 속성 | 뜻 |
+|------|----|
+| `type` | `secret`, `private`, `public` |
+| `extractable` | `exportKey()`나 `wrapKey()`로 내보낼 수 있는지 |
+| `algorithm` | 키가 쓰이는 알고리즘과 매개변수 |
+| `usages` | 허용한 용도 배열(`encrypt`, `decrypt`, `sign`, `verify`, `deriveKey`, `deriveBits`, `wrapKey`, `unwrapKey`) |
+
+- 키는 `generateKey()`, `importKey()`, `deriveKey()`, `unwrapKey()`로 얻습니다.
+- 용도(`usages`)에 없는 연산에 쓰면 거부됩니다. 필요한 용도만 지정합니다.
+- 구조적 복제가 가능해서 `postMessage`와 IndexedDB에 저장할 수 있습니다. 비추출 키를 IndexedDB에 두면 키 바이트를 꺼내지 못합니다(자세히는 41편, 54편).
+
+### generateKey
+
+```js
+const key = await crypto.subtle.generateKey(
+  { name: 'AES-GCM', length: 256 },
+  false,
+  ['encrypt', 'decrypt'],
+)
+const pair = await crypto.subtle.generateKey(
+  { name: 'ECDSA', namedCurve: 'P-256' },
+  false,
+  ['sign', 'verify'],
+)
+```
+
+- 인수는 알고리즘 객체, `extractable`, `keyUsages`입니다. AES는 `length`(128, 192, 256), HMAC은 `hash`, RSA는 `modulusLength`·`publicExponent`·`hash`, ECDSA·ECDH는 `namedCurve`를 지정합니다.
+- 대칭 알고리즘은 `CryptoKey`, 공개 키 알고리즘은 `publicKey`와 `privateKey`를 가진 `CryptoKeyPair`를 돌려줍니다. 공개 키는 항상 추출 가능합니다.
+- 비밀·개인 키에 용도가 비어 있거나 알고리즘에 맞지 않으면 `SyntaxError`입니다.
+
+### extractable
+
+`extractable`이 `false`면 `exportKey()`가 `InvalidAccessError`로 거부됩니다. 기본 선택은 `false`입니다. 키를 서버에 보내거나 백업해야 하는 경우에만 `true`로 만듭니다.
+
+비추출 키는 키 바이트를 스크립트가 꺼내지 못하게 할 뿐, 사용을 막지 못합니다. 페이지에 XSS가 있으면 공격자도 같은 `CryptoKey`로 서명·복호화를 호출할 수 있습니다(자세히는 63편).
+
+### importKey와 exportKey
+
+| 형식 | 대상 |
+|------|------|
+| `raw` | AES·HMAC 비밀 키, 타원 곡선 공개 키 |
+| `pkcs8` | RSA·EC 개인 키(DER, 보통 PEM으로 전달되므로 헤더 제거와 base64 해독 필요) |
+| `spki` | RSA·EC 공개 키 |
+| `jwk` | 모든 키 유형을 JSON으로 표현(RFC 7517) |
+
+```js
+const jwk = await crypto.subtle.exportKey('jwk', key)
+const same = await crypto.subtle.importKey(
+  'jwk', jwk, { name: 'AES-GCM' }, false, ['decrypt'],
+)
+```
+
+- `exportKey()`는 키가 추출 가능해야 하고, 결과는 암호화되지 않은 평문 키입니다. 암호화해서 내보내려면 `wrapKey()`와 `unwrapKey()`를 씁니다.
+- `importKey()`로 가져올 때 `extractable`을 다시 지정합니다. 외부에서 받은 키는 가져오면서 `false`로 낮출 수 있습니다.
+- 반환 형식: `raw`·`pkcs8`·`spki`는 `ArrayBuffer`, `jwk`는 객체입니다.
+
+## 키 파생과 알고리즘 선택
+
+키 파생은 비밀 값(비밀번호, 공유 비밀)에서 암호 키를 결정적으로 만드는 일입니다. 같은 입력과 매개변수는 같은 키를 냅니다. `deriveKey()`는 곧바로 쓸 `CryptoKey`를, `deriveBits()`는 원시 비트열(`ArrayBuffer`)을 줍니다. 파생 입력은 먼저 `importKey()`로 키 재료(key material)로 가져옵니다.
+
+| 알고리즘 | 입력 | 필수 매개변수 | 용도 |
+|----------|------|----------------|------|
+| `PBKDF2` | 비밀번호처럼 엔트로피가 낮은 값 | `salt`, `iterations`, `hash` | 비밀번호로 암호화 키 만들기 |
+| `HKDF` | 키 합의 결과처럼 엔트로피가 높은 값 | `salt`, `info`, `hash` | 하나의 비밀에서 여러 키 만들기 |
+| `ECDH`, `X25519` | 상대의 공개 키와 내 개인 키 | 상대 공개 키 | 공유 비밀 합의 |
+
+```js
+const material = await crypto.subtle.importKey(
+  'raw', new TextEncoder().encode(password),
+  'PBKDF2', false, ['deriveKey'],
+)
+const aesKey = await crypto.subtle.deriveKey(
+  { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' },
+  material,
+  { name: 'AES-GCM', length: 256 },
+  false,
+  ['encrypt', 'decrypt'],
+)
+```
+
+- `salt`는 사용자·용도마다 새로 뽑은 난수이며 비밀이 아닙니다. 암호문과 함께 저장합니다.
+- 반복 횟수(`iterations`)는 클수록 무차별 대입이 느려집니다. 값은 NIST SP 800-132와 OWASP 비밀번호 저장 지침 같은 최신 권고에 맞추고, 예제의 숫자를 그대로 믿지 않습니다.
+- HKDF는 비밀번호에 쓰지 않습니다. 반복이 없어서 약한 입력을 강화하지 못합니다.
+- 파생 키의 용도에 맞는 알고리즘 객체(`{ name: 'AES-GCM', length: 256 }` 또는 `{ name: 'HMAC', hash: 'SHA-256' }`)를 넘깁니다.
+
+### 알고리즘 선택
+
+| 하고 싶은 일 | 선택 |
+|--------------|------|
+| 데이터 지문(무결성 확인) | `digest` + `SHA-256` 이상 |
+| 같은 비밀을 아는 쪽끼리 메시지 인증 | `HMAC` |
+| 데이터 암호화 | `AES-GCM` |
+| 공개 키로 서명 검증 | `ECDSA`, `RSA-PSS`, `Ed25519` |
+| 공개 키로 암호화 | `RSA-OAEP`(작은 데이터. 보통 대칭 키를 감싸는 데 씀) |
+| 두 당사자의 공유 비밀 | `ECDH`, `X25519` |
+| 비밀번호에서 키 | `PBKDF2` |
+
+- 브라우저 안의 암호는 전송 구간의 TLS를 대신하지 않고, 서버와의 인증 프로토콜을 직접 설계하는 용도도 아닙니다. 검증된 프로토콜(WebAuthn 등)이 있으면 그것을 씁니다.
+- 직접 만든 프로토콜은 알고리즘 조합, IV 관리, 키 수명 때문에 쉽게 깨집니다.
+
+## Credential Management API
+
+`navigator.credentials`는 로그인 수단(자격 증명)을 만들고 가져오는 공통 진입점입니다. Baseline 2020이며 보안 컨텍스트에서만 있습니다.
+
+| 메서드 | 하는 일 |
+|--------|---------|
+| `get(options)` | 로그인용 자격 증명 하나를 가져옴 |
+| `create(options)` | 새 자격 증명 생성(예: 패스키 등록) |
+| `store(credential)` | 자격 증명 저장 |
+| `preventSilentAccess()` | 로그아웃 후 다음 방문에서 자동 로그인이 일어나지 않게 함 |
+
+`get()`·`create()`는 옵션 키로 자격 증명 종류를 고릅니다.
+
+| 옵션 키 | 반환 타입 | 지원 |
+|---------|-----------|------|
+| `publicKey` | `PublicKeyCredential`(WebAuthn) | Baseline 2021 |
+| `password` | `PasswordCredential` | Chromium 한정 |
+| `identity` | `IdentityCredential`(FedCM) | Chromium 한정 |
+| `otp` | `OTPCredential`(WebOTP) | 일부 |
+| `federated` | `FederatedCredential` | 폐기됨 |
+
+```js
+const cred = await navigator.credentials.get({
+  publicKey: options,
+  mediation: 'optional',
+  signal: AbortSignal.timeout(60000),
+})
+// 가져올 수 없으면 null
+```
+
+- `mediation`은 사용자 개입 정도입니다. `silent`는 프롬프트 없이 자동 로그인하고 동의가 필요하면 `null`, `optional`(기본)은 가능하면 자동·아니면 대화상자, `conditional`은 자동 완성 UI에 표시, `required`는 항상 사용자 확인(민감 작업)입니다.
+- `signal`로 취소하고(`AbortError`), 시간 초과는 `TimeoutError`, 사용자 취소·정책 차단·불투명 출처는 `NotAllowedError`, 호출 도메인이 부적절하면 `SecurityError`입니다.
+- 사용자 취소와 정책 차단이 모두 `NotAllowedError`로 와서 구분할 수 없으므로 UI는 재시도 경로를 항상 제공합니다.
+
+## WebAuthn과 패스키
+
+WebAuthn(Web Authentication)은 비밀번호 대신 공개 키 암호로 인증하는 표준입니다. 인증기(authenticator)가 사이트별 키 쌍을 만들어 개인 키는 인증기 안에 두고 서버는 공개 키만 저장합니다. Baseline 2021이고 보안 컨텍스트가 필요합니다.
+
+| 개념 | 뜻 |
+|------|----|
+| RP(Relying Party) | 인증을 요구하는 웹사이트(서버) |
+| 인증기 | 키를 만들고 서명하는 쪽. 플랫폼 인증기(기기에 내장: Touch ID, Windows Hello)와 로밍 인증기(보안 키) |
+| `rpId` | 자격 증명이 묶이는 도메인. 현재 출처의 등록 가능한 도메인 접미사여야 함 |
+| 챌린지 | 서버가 요청마다 만드는 난수(16바이트 이상) |
+
+사이트별 키와 `rpId` 덕분에 피싱 사이트(`examp1e.com`)는 `example.com`용 자격 증명을 쓸 수 없고, 서버 DB 유출로도 개인 키가 새지 않으며, 재사용 비밀번호 공격이 성립하지 않습니다.
+
+### 등록: create
+
+```js
+const cred = await navigator.credentials.create({
+  publicKey: {
+    challenge, // 서버 난수
+    rp: { id: 'example.com', name: 'Example' },
+    user: { id: userId, name: 'kim', displayName: 'Kim' },
+    pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+    authenticatorSelection: {
+      residentKey: 'required',
+      userVerification: 'preferred',
+    },
+  },
+})
+```
+
+- `pubKeyCredParams`는 허용 서명 알고리즘이고 `alg: -7`은 ES256(ECDSA P-256)입니다.
+- `user.id`는 서버가 정한 불투명 식별자이며 이메일 같은 개인 정보를 넣지 않습니다.
+- `authenticatorSelection`: `residentKey: 'required'`면 발견 가능한 자격 증명(패스키)이 되고, `authenticatorAttachment`는 `platform`이나 `cross-platform`, `userVerification`은 `required`·`preferred`·`discouraged`입니다.
+- `attestation`(`none`, `direct`, `enterprise`)은 인증기 출처 증명 요구 수준입니다.
+- 결과는 `PublicKeyCredential`이고 `response`가 `AuthenticatorAttestationResponse`(자격 증명 ID와 공개 키 포함)입니다. 이를 서버에 보내 챌린지와 증명을 검증하고 공개 키를 저장합니다.
+- 같은 인증기에 중복 등록을 막으려면 `excludeCredentials`에 기존 ID를 나열합니다.
+
+### 인증: get
+
+```js
+const cred = await navigator.credentials.get({
+  publicKey: {
+    challenge,
+    rpId: 'example.com',
+    userVerification: 'preferred',
+    allowCredentials: [],
+  },
+})
+```
+
+- 인증기가 챌린지에 개인 키로 서명하고 결과 `response`는 `AuthenticatorAssertionResponse`입니다. 서버는 저장한 공개 키로 서명을 검증하고, 챌린지와 출처가 기대와 같은지 확인합니다.
+- `allowCredentials`를 빈 배열로 두면 사용자 식별 없이 해당 `rpId`의 발견 가능한 자격 증명을 고르게 합니다.
+- 챌린지는 요청마다 새로 만들고 한 번 쓰면 폐기해 재전송 공격을 막습니다. 검증 로직은 클라이언트가 아니라 서버에 있습니다.
+
+### 패스키
+
+패스키(passkey)는 사용자가 비밀번호 없이 쓰는, 발견 가능하고 동기화될 수 있는 WebAuthn 자격 증명입니다. 사용자가 사용자 이름을 먼저 입력하지 않아도 로그인할 수 있습니다.
+
+- 패스키는 항상 발견 가능한 자격 증명이어야 하므로 등록 때 `residentKey: 'required'`를 지정합니다.
+- 인증기 안에서 `userVerification`(PIN·생체 인식)으로 "가진 것 + 아는 것/본인"이 결합된 다요소 인증이 됩니다.
+- 플랫폼 인증기의 패스키는 클라우드로 기기 간 동기화될 수 있고, 휴대폰이 블루투스로 다른 기기의 인증기 역할을 할 수도 있습니다. 보안 키 같은 기기 고정 자격 증명도 있습니다.
+- 서버는 사용자별로 여러 패스키를 허용하고, 사용자가 목록을 보고 이름을 바꾸고 삭제할 UI를 제공합니다. 백업 인증기를 확보하는 방법이 됩니다.
+- 서버가 보내는 옵션은 JSON으로 직렬화하는 편이 쉽고, `PublicKeyCredential.parseCreationOptionsFromJSON()`·`parseRequestOptionsFromJSON()`이 이를 API 인수로 변환하며 `toJSON()`이 결과를 서버로 보낼 형태로 만듭니다.
+- `PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()`과 `getClientCapabilities()`로 환경의 지원 범위를 확인합니다.
+- Permissions-Policy `publickey-credentials-create`·`publickey-credentials-get`의 기본값은 `self`라서 교차 출처 iframe에서는 쓸 수 없고 위임이 필요합니다.
+
+## 조건부 UI
+
+조건부 UI(conditional UI)는 모달 창 대신 사용자 이름 입력란의 자동 완성 목록에 패스키를 함께 보여 주는 방식입니다. 비밀번호 관리자와 같은 자리에서 패스키를 고를 수 있어서 로그인 화면을 바꾸지 않고 도입할 수 있습니다.
+
+```html
+<input type="text" name="username"
+       autocomplete="username webauthn" autofocus>
+```
+
+```js
+const PKC = PublicKeyCredential
+if (await PKC.isConditionalMediationAvailable()) {
+  const ac = new AbortController()
+  const cred = await navigator.credentials.get({
+    publicKey: options,
+    mediation: 'conditional',
+    signal: ac.signal,
+  })
+}
+```
+
+- 입력란의 `autocomplete` 값에 `webauthn` 토큰을 추가합니다(보통 `username webauthn`).
+- `mediation: 'conditional'` 호출은 UI를 띄우지 않고 대기하다가, 사용자가 입력란을 눌러 자동 완성에서 패스키를 고를 때 이행됩니다. 지원 확인은 `isConditionalMediationAvailable()`이나 `getClientCapabilities()`의 `conditionalGet`입니다.
+- 사용자가 다른 방법(비밀번호)을 선택하거나 페이지가 이동하면 `AbortController`로 대기 중인 요청을 취소합니다. 새 `get()`을 시작하기 전에 이전 요청을 취소해야 합니다.
+- `allowCredentials`는 비워 둡니다. 사용자가 누구인지 아직 모르기 때문입니다.
+- 비밀번호로 로그인한 뒤 패스키를 자동으로 만들어 주는 조건부 생성(`create()`의 `mediation: 'conditional'`)도 있고, 자격 증명 관리자가 패스키를 지원할 때만 동작합니다.
+
+## WebAuthn Signal API
+
+Signal API는 서버의 계정 상태가 바뀌었을 때 인증기(패스키 관리자)에 알려, 사용자가 보는 패스키 목록을 서버와 맞추는 `PublicKeyCredential`의 정적 메서드입니다. 미Baseline이며 Chrome 132 이상과 Safari 26 이상이 지원합니다(데이터 기준). 기능 검사 후 호출합니다.
+
+| 메서드 | 쓰는 때 |
+|--------|---------|
+| `signalUnknownCredential()` | 서버에 없는 자격 증명 ID로 로그인을 시도했을 때(서버에서 삭제됨) |
+| `signalAllAcceptedCredentials()` | 서버가 유효하다고 보는 자격 증명 ID 목록 전체를 알림 |
+| `signalCurrentUserDetails()` | 사용자 이름·표시 이름이 바뀌었을 때 |
+
+```js
+if (res.status === 404 &&
+    PublicKeyCredential.signalUnknownCredential) {
+  await PublicKeyCredential.signalUnknownCredential({
+    rpId: 'example.com',
+    credentialId,
+  })
+}
+```
+
+- 사용자가 인증되지 않은 상태에서도 호출할 수 있고 민감 정보를 노출하지 않습니다.
+- 서버에서 삭제한 패스키가 인증기에 남아 로그인 시도가 계속 실패하는 문제를 줄입니다.
+
+## FedCM
+
+FedCM(Federated Credential Management)은 서드파티 쿠키와 리다이렉트 없이 연합 로그인(Google로 로그인 같은 IdP 연동)을 하게 하는 브라우저 중재 API입니다. 미Baseline이고 Chromium 계열이 지원합니다.
+
+```js
+const cred = await navigator.credentials.get({
+  identity: {
+    providers: [{
+      configURL: 'https://idp.example/fedcm.json',
+      clientId: 'client-123',
+      nonce,
+    }],
+  },
+})
+// IdentityCredential, cred.token 을 서버로
+```
+
+- RP가 `identity` 옵션으로 `get()`을 호출하면 브라우저가 IdP 설정 파일(`configURL`)을 읽고 계정 선택 UI를 직접 보여 줍니다.- IdP는 로그인 상태를 `Set-Login` 헤더나 `navigator.login.setStatus()`로 브라우저에 알립니다.
+- 실패는 `IdentityCredentialError`이고 IdP가 응답하지 않거나 로그아웃 상태면 `NetworkError`입니다.
+- iframe에서는 Permissions-Policy `identity-credentials-get`이 필요합니다.
+- FedCM이 없는 브라우저에서는 기존 OAuth·OIDC 리다이렉트 흐름으로 대체합니다.
+
+## WebOTP
+
+WebOTP는 SMS로 받은 일회용 코드를 페이지가 자동으로 읽는 API입니다. 미Baseline이며 Chrome 계열이 지원하고 Safari는 27 이상에서 제한적으로 지원합니다.
+
+```js
+const ac = new AbortController()
+const otp = await navigator.credentials.get({
+  otp: { transport: ['sms'] },
+  signal: ac.signal,
+})
+input.value = otp.code // 'OTPCredential'의 code
+```
+
+SMS 마지막 줄은 도메인과 코드를 지정한 형식이어야 합니다.
+
+```text
+Your verification code is 123456.
+
+@www.example.com #123456
+```
+
+- 마지막 줄은 `@` 뒤에 스킴·포트 없는 도메인, 공백, `#` 뒤에 코드입니다. 도메인이 현재 페이지와 맞아야 코드가 전달되어 피싱을 막습니다.
+- 입력란에는 `autocomplete="one-time-code"`를 붙입니다. WebOTP가 없는 Safari도 이 속성으로 SMS 코드를 자동 완성합니다.
+- 폼 이탈이나 제출 시 `AbortController`로 요청을 취소하고, 지원 확인은 `'OTPCredential' in window`입니다.
+- SMS 코드는 두 번째 요소로 없는 것보다 낫지만 WebAuthn보다 약합니다. 가능하면 패스키를 권합니다.
+- Permissions-Policy `otp-credentials`의 기본값은 `self`입니다.
+
+## Digital Credentials API 개요
+
+Digital Credentials API는 운전면허증이나 신분증 같은 디지털 자격 증명을 사이트가 요청하고 사용자가 지갑 앱을 통해 제시하게 하는 API입니다. 표준은 편집자 초안 단계이고 미Baseline이며, Chrome 141 이상과 Safari 26 이상이 지원합니다(데이터 기준).
+
+```js
+const res = await navigator.credentials.get({
+  digital: {
+    requests: [{ protocol: 'openid4vp-v1-unsigned', data }],
+  },
+})
+```
+
+- 형식에 중립적이고, 제시 프로토콜은 `openid4vp-v1-unsigned`, `openid4vp-v1-signed`, `openid4vp-v1-multisigned`, `org-iso-mdoc`이며 발급은 `create()`와 `openid4vci-v1`로 합니다.
+- 일시적 사용자 활성화를 소비하므로 클릭 같은 사용자 행동 안에서만 호출됩니다. 보안 컨텍스트에서만 노출되고 사용자는 항상 플랫폼 UI로 동의합니다.
+- 요청 데이터와 응답 검증은 서버가 맡고, 표준이 바뀔 수 있어 실서비스 적용 전에 호환성과 최신 사양을 확인합니다.
+
+## Payment Request와 Payment Handler 개요
+
+두 API는 모두 미Baseline입니다.
+
+| API | 하는 일 | 지원 |
+|-----|---------|------|
+| Payment Request | 브라우저가 결제 수단 선택과 배송 정보 입력 UI를 중재 | Chromium, Safari. Firefox 미지원 |
+| Payment Handler | 웹 앱이 결제 수단(결제 앱)이 되어 Payment Request에 응답 | Chromium 위주 |
+
+```js
+const req = new PaymentRequest(
+  [{ supportedMethods: 'https://pay.example/method' }],
+  { total: {
+    label: '합계',
+    amount: { currency: 'KRW', value: '1000' },
+  } },
+)
+if (await req.canMakePayment()) {
+  const res = await req.show() // 클릭 안에서
+  await res.complete('success')
+}
+```
+
+- `new PaymentRequest(methodData, details)`로 지원할 결제 방식과 금액을 정합니다. `canMakePayment()`로 처리 가능 여부를 확인한 뒤 `show()`로 UI를 엽니다.
+- `show()`는 사용자 활성화가 필요하고 보안 컨텍스트에서만 동작합니다. 교차 출처 iframe에서는 `allowpaymentrequest` 속성이 필요합니다.
+- `PaymentResponse`를 서버로 보내 결제를 승인한 뒤 `complete('success')`나 `'fail'`로 브라우저 UI를 마무리합니다. 결제 승인 자체는 서버와 결제 사업자가 합니다.
+- Payment Handler는 서비스 워커가 `canmakepayment`와 `paymentrequest` 이벤트를 받고 `PaymentRequestEvent.openWindow()`로 결제 창을 연 뒤 `respondWith()`로 결과를 돌려줍니다(서비스 워커는 56편). 결제 앱 설정은 `registration.paymentManager`로 합니다.
+- 결제 수단이 지원되지 않는 환경을 위해 기존 결제 폼을 항상 대체 수단으로 둡니다.
+
+## 핵심 정리
+
+- 보안용 난수는 `crypto.getRandomValues()`와 `randomUUID()`로 만들고, `getRandomValues`는 한 번에 65,536바이트까지입니다.
+- 암호화는 `AES-GCM`과 호출마다 새 96비트 IV를 쓰고, `verify()`는 실패해도 예외 없이 `false`를 반환하며, `SHA-1`과 `digest`로 비밀번호를 해시하는 것은 피합니다.
+- 키는 `extractable: false`와 필요한 `usages`만 주는 것이 기본입니다. 비추출 키도 XSS가 있으면 연산에 쓰일 수 있습니다.
+- 비밀번호에서 키는 `PBKDF2`(솔트와 최신 권고의 반복 횟수), 높은 엔트로피의 비밀에서 여러 키는 `HKDF`입니다.
+- `navigator.credentials`의 `get`·`create`·`store`가 인증 진입점이고, WebAuthn(공개 키, `rpId` 결합, 서버가 챌린지 검증)과 패스키(`residentKey: required`)가 비밀번호를 대체합니다. 조건부 UI는 `autocomplete`의 `webauthn` 토큰과 `mediation: 'conditional'`을 씁니다.
+- Signal API, FedCM, WebOTP, Digital Credentials, Payment Request·Handler는 미Baseline이라 기능 검사와 대체 경로가 필요합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="AES-GCM으로 같은 키를 사용해 여러 메시지를 암호화할 때 IV를 다루는 올바른 방법은?"
+  options={['모든 메시지에 같은 IV를 써도 키가 같으면 안전하다', '암호화마다 getRandomValues로 새 96비트 IV를 만들고 암호문과 함께 저장한다', 'IV는 비밀이므로 암호문과 따로 서버에만 보관한다', 'IV 없이도 암호화할 수 있다']}
+  correctAnswer={2}
+  explanation="AES-GCM은 같은 키로 IV를 재사용하면 안전성이 깨지므로 암호화마다 새 난수 IV(96비트 권장)를 만들어야 합니다. IV는 비밀이 아니고 복호화에 필요하므로 암호문과 함께 저장합니다. AES-GCM의 encrypt는 iv 매개변수가 필수입니다."
+  optionExplanations={['같은 키로 IV를 재사용하면 안전성이 무너집니다.', '정답입니다. 새 난수 IV를 쓰고 암호문과 함께 보관합니다.', 'IV는 비밀이 아니며 복호화 때 필요합니다.', 'AES-GCM 매개변수에 iv는 필수입니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="WebAuthn 인증에서 서버가 하는 일로 옳은 것은?"
+  options={['클라이언트가 보낸 서명 결과를 검증 없이 신뢰한다', '요청마다 새 챌린지를 만들고, 저장한 공개 키로 서명을 검증하며 챌린지와 출처를 확인한다', '개인 키를 서버에 저장해 두었다가 서명을 대신 만든다', '챌린지를 고정값으로 두어 재사용한다']}
+  correctAnswer={2}
+  explanation="WebAuthn에서 개인 키는 인증기 안에만 있고 서버는 공개 키만 저장합니다. 서버는 요청마다 새 난수 챌린지를 내고, 돌아온 서명을 공개 키로 검증하며 챌린지와 출처가 기대와 같은지 확인해 재전송과 피싱을 막습니다."
+  optionExplanations={['검증 없이 신뢰하면 위조된 응답을 받아들입니다.', '정답입니다. 챌린지 갱신과 서명, 출처 검증이 서버의 몫입니다.', '개인 키는 인증기 밖으로 나오지 않습니다.', '챌린지를 재사용하면 재전송 공격이 가능해집니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="로그인 화면에서 모달 없이 입력란 자동 완성 목록에 패스키를 보여 주려면?"
+  options={['input의 autocomplete에 webauthn 토큰을 넣고 get을 mediation conditional로 호출한다', 'allowCredentials에 모든 사용자의 자격 증명 ID를 넣는다', 'residentKey를 discouraged로 등록한다', 'create를 먼저 호출해 매번 새 패스키를 만든다']}
+  correctAnswer={1}
+  explanation="조건부 UI는 입력란의 autocomplete에 webauthn 토큰(보통 username webauthn)을 쓰고, navigator.credentials.get을 mediation conditional로 호출해 UI 없이 대기하다가 사용자가 자동 완성에서 패스키를 고르면 이행되게 합니다. 이때 allowCredentials는 비워 둡니다."
+  optionExplanations={['정답입니다. autocomplete 토큰과 conditional mediation의 조합입니다.', '사용자를 모르는 상태이므로 allowCredentials는 비워 둡니다.', '패스키는 발견 가능한 자격 증명이어야 하므로 residentKey를 required로 등록합니다.', '로그인 때마다 새 패스키를 만들 필요가 없습니다.']}
+/>
+
+## 참고 자료
+
+- [MDN — SubtleCrypto](https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto)
+- [MDN — Crypto.getRandomValues()](https://developer.mozilla.org/en-US/docs/Web/API/Crypto/getRandomValues)
+- [MDN — Crypto.randomUUID()](https://developer.mozilla.org/en-US/docs/Web/API/Crypto/randomUUID)
+- [MDN — SubtleCrypto.digest()](https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/digest)
+- [MDN — SubtleCrypto.encrypt()](https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/encrypt)
+- [MDN — SubtleCrypto.sign()](https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/sign)
+- [MDN — SubtleCrypto.generateKey()](https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/generateKey)
+- [MDN — SubtleCrypto.importKey()](https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/importKey)
+- [MDN — SubtleCrypto.exportKey()](https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/exportKey)
+- [MDN — SubtleCrypto.deriveKey()](https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/deriveKey)
+- [MDN — CryptoKey](https://developer.mozilla.org/en-US/docs/Web/API/CryptoKey)
+- [MDN — Credential Management API](https://developer.mozilla.org/en-US/docs/Web/API/Credential_Management_API)
+- [MDN — CredentialsContainer.get()](https://developer.mozilla.org/en-US/docs/Web/API/CredentialsContainer/get)
+- [MDN — Web Authentication API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Authentication_API)
+- [MDN — PublicKeyCredential](https://developer.mozilla.org/en-US/docs/Web/API/PublicKeyCredential)
+- [MDN — Passkeys](https://developer.mozilla.org/en-US/docs/Web/Security/Authentication/Passkeys)
+- [web.dev — Sign in with a passkey through form autofill](https://web.dev/articles/passkey-form-autofill)
+- [MDN — signalUnknownCredential()](https://developer.mozilla.org/en-US/docs/Web/API/PublicKeyCredential/signalUnknownCredential_static)
+- [MDN — FedCM API](https://developer.mozilla.org/en-US/docs/Web/API/FedCM_API)
+- [MDN — WebOTP API](https://developer.mozilla.org/en-US/docs/Web/API/WebOTP_API)
+- [W3C — Digital Credentials](https://w3c-fedid.github.io/digital-credentials/)
+- [MDN — Payment Request API](https://developer.mozilla.org/en-US/docs/Web/API/Payment_Request_API)
+- [MDN — Payment Handler API](https://developer.mozilla.org/en-US/docs/Web/API/Payment_Handler_API)
+- [web-features 데이터 패키지](https://cdn.jsdelivr.net/npm/web-features/data.json)

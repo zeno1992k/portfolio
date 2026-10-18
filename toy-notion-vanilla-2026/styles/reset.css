@@ -1,0 +1,12 @@
+/* 브라우저 기본 스타일 초기화 */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+
+:where(body,h1,h2,h3,p,ul) {
+  margin: 0;
+  padding: 0;
+}

@@ -1,0 +1,315 @@
+---
+title: '21. Effect 의존성'
+description: 'Reactive Value의 정의, 의존성 배열이 정해지는 방식, exhaustive-deps 린트, 객체·함수 의존성 문제와 줄이는 방법, Updater 함수, 린트를 끄면 안 되는 이유, 무한 루프의 세 가지 형태를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** Effect가 읽는 값이 의존성이 되는 규칙을 설명하고, 의존성이 너무 자주 바뀌거나 린트 경고가 날 때 코드를 고쳐서 해결하며, 무한 루프의 원인을 구분할 수 있습니다.
+</Callout>
+
+## Reactive Value
+
+Reactive Value(반응형 값)는 컴포넌트가 다시 렌더될 때 바뀔 수 있는 값입니다. props, state, 그리고 컴포넌트 본문에서 이 값들로 계산한 모든 값이 해당합니다.
+
+```jsx
+function ChatRoom({ roomId }) {          // props: reactive
+  const [serverUrl, setServerUrl] = useState('/api');
+  // state: reactive
+  const url = serverUrl + '/chat';       // 계산한 값: reactive
+}
+```
+
+- 컴포넌트 본문에서 선언한 변수와 함수도 렌더마다 새로 만들어지므로 reactive입니다.
+- 컴포넌트 밖의 상수, `ref.current`, `location.pathname` 같은 변경 가능한 전역 값은 reactive가 아닙니다. 바뀌어도 React가 다시 렌더하지 않기 때문입니다.
+- Effect 안에서 reactive value를 읽으면 그 값이 바뀔 때 Effect를 다시 동기화해야 합니다. 이 관계를 선언하는 것이 의존성 배열입니다(Effect 기본은 20편).
+
+## Dependency 추론
+
+의존성 배열은 개발자가 고르는 것이 아니라 Effect 코드가 읽는 reactive value에서 정해집니다. React 공식 문서의 표현으로는 의존성을 "선택"할 수 없습니다.
+
+```jsx
+useEffect(() => {
+  const conn = createConnection(serverUrl, roomId);
+  conn.connect();
+  return () => conn.disconnect();
+}, [serverUrl, roomId]); // 코드가 읽는 reactive value 전부
+```
+
+- 배열의 각 값은 `Object.is`로 이전 렌더의 값과 비교합니다. 하나라도 다르면 cleanup을 실행한 뒤 Effect를 다시 실행합니다.
+- 읽는 reactive value가 없으면 `[]`가 맞습니다. 마운트 때 한 번 실행되고 언마운트 때 cleanup이 실행됩니다. 개발 모드의 StrictMode에서는 한 번 더 실행됩니다(자세히는 18편).
+- 배열 자체를 생략하면 렌더가 커밋될 때마다 실행됩니다. 매번 동기화해야 하는 경우가 아니면 쓰지 않습니다.
+
+| 의존성 배열 | 실행 시점 |
+|-------------|-----------|
+| `[a, b]` | 마운트 직후, 그리고 a 또는 b가 바뀐 렌더 뒤 |
+| `[]` | 마운트 직후 한 번 |
+| 생략 | 모든 렌더 뒤 |
+
+**흔한 실수:** 의존성을 "언제 실행할지 정하는 스위치"로 보는 것입니다. 배열은 Effect가 무엇을 읽는지 적는 선언입니다. 한 번만 실행하고 싶어서 `[]`를 쓰면, 그 안에서 읽는 값은 첫 렌더의 값으로 고정됩니다.
+
+## exhaustive-deps
+
+`react-hooks/exhaustive-deps`는 `eslint-plugin-react-hooks`가 제공하는 규칙으로, Hook 안에서 읽는 값이 의존성에 빠졌는지 검사합니다. `useEffect`, `useMemo`, `useCallback`이 대상입니다. 기본 심각도는 `warn`입니다.
+
+```jsx
+useEffect(() => {
+  fetchUser(userId);
+}, []); // ⚠️ React Hook has a missing dependency: 'userId'
+```
+
+- 빠진 값이 있으면 Effect는 첫 렌더 시점의 값을 계속 읽습니다. 이를 오래된 값(stale closure) 문제라고 합니다. 린트는 이 버그를 미리 알려 줍니다.
+- 추가 Hook까지 검사하려면 규칙 옵션 `additionalHooks`에 정규식을 넣습니다. 공유 설정 `settings["react-hooks"].additionalEffectHooks`(플러그인 6.1.1부터)로도 지정할 수 있습니다.
+- React 19.2와 함께 나온 `eslint-plugin-react-hooks` 6은 `recommended` 프리셋이 flat config 기준입니다. 이전 형식은 `recommended-legacy`를 씁니다.
+- 린트가 알려 주는 것은 "빠졌다"는 사실뿐입니다. 해결은 의존성을 추가하거나, 코드를 바꿔서 의존성이 필요 없게 만드는 것입니다.
+
+## Object Dependency
+
+객체와 배열을 렌더 중에 만들어 의존성에 넣으면 Effect가 렌더마다 실행됩니다. 값이 같아도 새로 만든 객체는 `Object.is`로 비교하면 다르기 때문입니다.
+
+```jsx
+function ChatRoom({ roomId }) {
+  const options = { serverUrl: 'https://a.com', roomId };
+  // 렌더마다 새 객체
+  useEffect(() => {
+    const conn = createConnection(options);
+    conn.connect();
+    return () => conn.disconnect();
+  }, [options]); // 렌더마다 재연결
+}
+```
+
+- 증상은 입력창에 글자를 칠 때마다 연결이 끊겼다 다시 맺어지는 식으로 나타납니다. 입력 state가 바뀌어 렌더되면 `options`가 새로 만들어지기 때문입니다.
+- 해결은 객체를 Effect 안으로 옮겨서 reactive value가 `roomId`뿐이게 만드는 것입니다.
+
+```jsx
+useEffect(() => {
+  const options = { serverUrl: 'https://a.com', roomId };
+  const conn = createConnection(options);
+  conn.connect();
+  return () => conn.disconnect();
+}, [roomId]); // 문자열이라 값으로 비교
+```
+
+- 객체를 props로 받는 경우에는 필요한 프로퍼티를 꺼내 원시 값만 의존성에 둡니다. 원시 값(문자열, 숫자, 불리언)은 값으로 비교되므로 안전합니다.
+
+```jsx
+function ChatRoom({ options }) {
+  const { roomId, serverUrl } = options;
+  useEffect(() => { /* roomId, serverUrl 사용 */ },
+    [roomId, serverUrl]);
+}
+```
+
+- 부모가 객체를 렌더마다 새로 만들어 내려보내도, 꺼낸 원시 값이 같으면 자식 Effect는 다시 실행되지 않습니다.
+
+## Function Dependency
+
+컴포넌트 안에서 선언한 함수도 렌더마다 새로 만들어지므로 의존성에 넣으면 객체와 같은 문제가 생깁니다.
+
+```jsx
+function Page({ roomId }) {
+  function createOptions() {
+    return { serverUrl: 'https://a.com', roomId };
+  }
+  useEffect(() => {
+    const conn = createConnection(createOptions());
+    conn.connect();
+    return () => conn.disconnect();
+  }, [createOptions]); // 렌더마다 재연결
+}
+```
+
+해결 방법은 세 가지입니다.
+
+| 상황 | 해결 |
+|------|------|
+| Effect에서만 쓰는 함수 | Effect 안으로 옮김 |
+| reactive value를 읽지 않는 함수 | 컴포넌트 밖으로 옮김 |
+| 부모에게 받은 함수이거나 렌더 중에도 써야 하는 함수 | `useCallback`으로 참조를 고정하거나, 함수 대신 값을 넘김 |
+
+```jsx
+useEffect(() => {
+  function createOptions() {      // Effect 안으로 이동
+    return { serverUrl: 'https://a.com', roomId };
+  }
+  const conn = createConnection(createOptions());
+  conn.connect();
+  return () => conn.disconnect();
+}, [roomId]);
+```
+
+- 컴포넌트 밖으로 옮긴 함수는 reactive가 아니므로 의존성에서 빠집니다. 판단 기준은 그 함수가 props, state를 읽느냐입니다.
+- `useCallback`은 함수 참조를 의존성이 바뀔 때까지 유지합니다. 메모이제이션은 성능 편(중급 과목)에서 따로 다루고, 여기서는 Effect와 함께 쓰는 경우만 알면 됩니다.
+- 부모가 렌더마다 새 함수를 만들어 `onChange`로 내려보내는 경우가 흔합니다. 자식 Effect가 그 함수를 의존성에 두면 재실행되므로 `useEffectEvent`로 읽는 방법이 있습니다(아래 "의존성 줄이기").
+
+## 의존성 줄이기
+
+의존성이 자주 바뀌어 Effect가 과하게 실행될 때는 린트를 끄지 말고 다음 순서로 코드를 바꿉니다.
+
+| 방법 | 쓰는 경우 |
+|------|-----------|
+| 컴포넌트 밖으로 이동 | 값이 렌더와 무관한 상수일 때 |
+| Effect 안으로 이동 | 값을 Effect만 쓰고 reactive value로 만들 수 있을 때 |
+| 원시 값 꺼내기 | 객체 props에서 일부만 읽을 때 |
+| Updater 함수 | state를 갱신하려고 읽을 때(아래 절) |
+| `useEffectEvent` | 최신 값을 읽되 값이 바뀌어도 재동기화하고 싶지 않을 때 |
+| Effect 분리 | 서로 무관한 동기화가 한 Effect에 섞여 있을 때 |
+| 이벤트 핸들러로 이동 | 사용자 동작에 대한 반응일 때(자세히는 22편) |
+
+```jsx
+const [country, setCountry] = useState(null);
+const [city, setCity] = useState(null);
+
+useEffect(() => { /* country로 도시 목록 요청 */ }, [country]);
+useEffect(() => { /* city로 지역 목록 요청 */ }, [city]);
+// 한 Effect에 [country, city]를 같이 두면 city가 바뀔 때
+// 도시 목록도 다시 요청된다. 동기화 대상별로 나눈다.
+```
+
+`useEffectEvent`는 Effect 안에서 최신 props, state를 읽지만 reactive하지 않은 함수를 만듭니다. React 19.2에서 안정판으로 나왔고, 린트 규칙 검사에 `eslint-plugin-react-hooks` 6 이상이 필요합니다.
+
+```jsx
+function ChatRoom({ roomId, theme }) {
+  const onConnected = useEffectEvent(() => {
+    showNotification('Connected!', theme);
+  });
+  useEffect(() => {
+    const conn = createConnection(roomId);
+    conn.on('connected', () => onConnected());
+    conn.connect();
+    return () => conn.disconnect();
+  }, [roomId]); // theme도 onConnected도 넣지 않는다
+}
+```
+
+- 의존성 배열에 Effect Event 함수를 넣지 않습니다.
+- Effect 안이나 다른 Effect Event 안에서만 호출합니다. 렌더 중에 호출하거나 다른 컴포넌트·Hook에 넘기면 안 됩니다.
+- 같은 컴포넌트나 Hook에서 선언한 Effect에서만 씁니다.
+- 바뀌어도 연결을 새로 맺을 필요가 없는 값(알림 테마, 로그용 값)에만 씁니다. 연결 대상이 바뀌는 `roomId`처럼 동기화의 기준인 값을 빼는 데 쓰면 안 됩니다.
+
+**흔한 실수:** 의존성을 줄이려고 `useEffectEvent`를 먼저 꺼내는 것입니다. 위 표에서 코드 이동, Updater 같은 단순한 방법이 안 될 때만 씁니다.
+
+## Updater로 제거
+
+state를 갱신하려고 읽는 값이 의존성에 있으면 갱신할 때마다 Effect가 다시 실행됩니다. 함수 형태의 setter(Updater 함수)를 쓰면 값을 읽지 않으므로 의존성에서 빠집니다(Updater는 10편).
+
+```jsx
+function Counter() {
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => {
+      setCount(count + 1);       // ❌ count를 읽음
+    }, 1000);
+    return () => clearInterval(id);
+  }, [count]);                   // 1초마다 interval 재생성
+}
+```
+
+```jsx
+useEffect(() => {
+  const id = setInterval(() => {
+    setCount((c) => c + 1);      // ✅ 이전 값을 인자로 받음
+  }, 1000);
+  return () => clearInterval(id);
+}, []);                          // 한 번만 설정
+```
+
+- `setCount(c => c + 1)`은 "이전 값에 1을 더하라"는 지시를 React에 넘깁니다. 현재 값은 React가 알고 있으므로 Effect가 읽을 필요가 없습니다.
+- 배열 state도 같은 방식입니다. `setItems(items => [...items, newItem])`로 쓰면 `items`가 의존성에서 빠집니다.
+- 갱신에 다른 reactive value(예: `step`)가 필요하면 그 값은 여전히 의존성입니다.
+
+**흔한 실수:** 린트를 피하려고 `[]`로 두고 `setCount(count + 1)`을 그대로 두는 것입니다. `count`가 첫 렌더 값 0에 고정되어 화면이 1에서 멈춥니다.
+
+## 의존성을 속이지 않기
+
+린트를 끄거나 의존성을 일부러 빼면 Effect가 오래된 값을 읽는 버그가 생깁니다.
+
+```jsx
+useEffect(() => {
+  // ...
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, []); // ❌ 의존성을 속임
+```
+
+- 린트 억제는 "이 Effect는 reactive value를 읽지 않는다"는 거짓 선언입니다. 나중에 코드가 바뀌어 새 값을 읽어도 린트가 알려 주지 못합니다.
+- 배열에서 값을 빼고 싶다면 그 값이 reactive가 아니게 코드를 바꿉니다. 방법은 앞 절의 표와 같습니다.
+- 값이 바뀌는데도 Effect를 다시 실행하고 싶지 않다면, 그 값은 동기화의 일부가 아닌 것입니다. `useEffectEvent`로 읽거나 이벤트 핸들러로 옮깁니다.
+- 린트가 틀린 것처럼 보이는 경우는 대부분 값이 reactive인데 reactive가 아니라고 생각한 경우입니다. 먼저 그 값이 props, state, 이들로 계산한 값인지 확인합니다.
+
+**흔한 실수:** 억제 주석을 "임시"로 달고 잊는 것입니다. 의존성이 빠진 Effect는 대부분 테스트로는 통과하고 특정 순서로 값이 바뀔 때만 오작동합니다.
+
+## 무한 루프가 생기는 3가지 형태
+
+Effect가 state를 바꾸면 렌더가 일어나고, 그 렌더가 Effect를 다시 실행하면 루프가 됩니다. 흔한 형태는 세 가지입니다.
+
+| 형태 | 원인 | 해결 |
+|------|------|------|
+| 1. 읽은 state를 갱신 | Effect가 의존성 `count`를 읽고 `setCount`로 바꿈 | Updater 함수로 의존성 제거, 또는 Effect가 필요한지 재검토 |
+| 2. 렌더마다 새로 만든 객체·배열·함수 | 의존성이 매 렌더 새 참조인데 Effect가 state를 바꿈 | Effect 안·밖으로 이동, 원시 값 사용 |
+| 3. 의존성 배열 없음 | 배열을 생략한 Effect가 state를 바꿈 | 배열 추가, 갱신 조건 확인 |
+
+```jsx
+// 형태 1
+useEffect(() => { setCount(count + 1); }, [count]);
+
+// 형태 2: 요청 결과를 state에 넣는 Effect
+const params = { page };   // 렌더마다 새 객체
+useEffect(() => {
+  fetchItems(params).then(setItems); // setItems로 렌더 발생
+}, [params]);
+
+// 형태 3
+useEffect(() => { setCount((c) => c + 1); });
+```
+
+- 형태 2에서 `setItems`에 받은 배열은 매번 새 참조라서 React가 렌더를 멈추지 못합니다. 같은 값이라도 새 배열이면 변경으로 봅니다.
+- 개발 모드에서 같은 요청이 한 번 더 나가는 것은 StrictMode의 재실행이며 루프가 아닙니다.
+- 루프를 의심할 때는 Effect 안에서 의존성 값을 `console.log`로 찍어 렌더마다 `Object.is`로 같은지 비교합니다.
+- Effect 안에서 state를 갱신하는 코드가 정말 필요한지부터 확인합니다. 렌더 중에 계산할 수 있는 값이거나 이벤트 핸들러에서 처리할 일이면 Effect가 필요 없습니다(22편).
+
+## 핵심 정리
+
+- Reactive value는 props, state, 그리고 이들로 계산한 값이며, Effect가 읽는 reactive value는 모두 의존성 배열에 들어갑니다.
+- 의존성은 코드가 정하는 것이지 개발자가 고르는 것이 아니고, 각 값은 `Object.is`로 비교해 하나라도 다르면 cleanup 후 재실행합니다.
+- 렌더 중에 만든 객체와 함수는 매번 새 참조라서 Effect를 매 렌더 실행시키므로 Effect 안으로 옮기거나 원시 값만 의존성에 둡니다.
+- 의존성은 코드 이동, 원시 값 꺼내기, Updater 함수, `useEffectEvent`, Effect 분리 순으로 줄입니다.
+- 린트 억제는 오래된 값을 읽는 버그의 원인이므로 코드를 바꿔서 해결합니다.
+- 무한 루프는 읽은 state의 갱신, 렌더마다 새로 만든 의존성, 배열 없는 Effect에서 state를 바꾸는 경우에 생깁니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="다음 중 Reactive Value에 해당하지 않는 것은?"
+  options={['컴포넌트가 받은 props', 'useState로 만든 state', '컴포넌트 밖에서 선언한 const 상수', 'props로 계산해 본문에서 만든 변수']}
+  correctAnswer={3}
+  explanation="Reactive value는 렌더 사이에 바뀔 수 있는 props, state, 그리고 이들로 계산한 값입니다. 컴포넌트 밖의 상수는 렌더와 무관하므로 reactive가 아니고 의존성에 넣을 필요가 없습니다."
+  optionExplanations={['props는 렌더마다 달라질 수 있어 reactive입니다.', 'state는 reactive입니다.', '컴포넌트 밖의 상수라서 reactive가 아닙니다.', 'reactive value로 계산한 값은 reactive입니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="컴포넌트 본문에서 const options = { roomId } 로 만든 객체를 useEffect의 의존성 배열에 넣었더니 Effect가 렌더마다 실행되었다. 가장 알맞은 해결은?"
+  options={['의존성 배열을 빈 배열로 바꾸고 린트 경고를 끈다', 'options를 Effect 안에서 만들고 의존성에는 roomId만 둔다', '의존성 배열을 생략한다', 'options를 useState에 넣고 Effect 안에서 매번 갱신한다']}
+  correctAnswer={2}
+  explanation="렌더 중에 만든 객체는 값이 같아도 새 참조라 Object.is 비교에서 다르므로 매 렌더 재실행됩니다. 객체를 Effect 안으로 옮기면 reactive value는 문자열 roomId뿐이어서 roomId가 바뀔 때만 실행됩니다."
+  optionExplanations={['린트를 끄면 roomId가 바뀌어도 반영되지 않는 버그가 생깁니다.', 'Effect 안에서 만들면 의존성이 원시 값 roomId뿐이라 올바른 해결입니다.', '배열을 생략하면 매 렌더 실행되어 문제가 더 커집니다.', 'state 갱신이 렌더를 일으켜 오히려 루프가 생길 수 있습니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="setInterval 안에서 setCount(count + 1)을 호출하는 Effect의 의존성에서 count를 없애면서 올바르게 동작하게 하려면?"
+  options={['setCount(c => c + 1) 로 바꾸고 의존성 배열을 빈 배열로 둔다', 'count를 의존성에서 빼고 린트 억제 주석을 단다', 'count를 useRef로 바꾸고 화면은 그대로 둔다', 'setInterval 대신 setTimeout을 쓴다']}
+  correctAnswer={1}
+  explanation="Updater 함수는 이전 값을 인자로 받으므로 Effect가 count를 읽지 않아도 됩니다. 그래서 의존성이 필요 없고 interval을 한 번만 설정합니다. 린트 억제만 하면 count가 첫 렌더 값에 고정되어 화면이 1에서 멈춥니다."
+  optionExplanations={['Updater 함수로 현재 값을 읽지 않으므로 올바른 방법입니다.', '의존성을 속이는 방법이라 count가 0에 고정되는 버그가 생깁니다.', 'ref는 값이 바뀌어도 렌더를 일으키지 않아 화면이 갱신되지 않습니다.', 'setTimeout으로 바꿔도 count를 읽는 문제는 그대로입니다.']}
+/>
+
+## 참고 자료
+
+- [React — Lifecycle of Reactive Effects](https://react.dev/learn/lifecycle-of-reactive-effects)
+- [React — Removing Effect Dependencies](https://react.dev/learn/removing-effect-dependencies)
+- [React — useEffect](https://react.dev/reference/react/useEffect)
+- [React — useEffectEvent](https://react.dev/reference/react/useEffectEvent)
+- [React — exhaustive-deps (eslint-plugin-react-hooks)](https://react.dev/reference/eslint-plugin-react-hooks/lints/exhaustive-deps)
+- [React Blog — React 19.2](https://react.dev/blog/2025/10/01/react-19-2)

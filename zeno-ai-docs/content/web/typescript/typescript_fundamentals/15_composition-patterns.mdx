@@ -1,0 +1,80 @@
+---
+title: '15. 상속 대신 조합으로 설계하기'
+description: '카테고리별 예산 경고 로직을 인터페이스 기반 전략 객체 조합으로 설계합니다'
+---
+
+이 편에서 처음 만들면서, 서로 다른 경고 규칙(한도 초과, 한도 근접)을 상속이 아니라 조합으로 설계하는 이유를 먼저 살펴보고 실제로 그렇게 만듭니다.
+
+## 개념 정리
+
+### 상속으로 만들면 생기는 문제
+
+경고 규칙이 "한도 초과"와 "한도 근접" 둘뿐이라면 상속으로도 표현할 수 있습니다.
+
+```ts
+class ExpenseWarning {
+  constructor(protected readonly limit: number) {}
+
+  check(spent: number): string | null {
+    return spent > this.limit ? '한도를 넘었습니다' : null
+  }
+}
+
+class ApproachingExpenseWarning extends ExpenseWarning {
+  check(spent: number): string | null {
+    return spent >= this.limit * 0.8 ? '한도에 근접했습니다' : super.check(spent)
+  }
+}
+```
+
+여기에 "지출이 0원이면 알려주는 규칙"까지 더하려면 어떻게 해야 할까요. `ApproachingExpenseWarning`을 상속하는 세 번째 클래스를 또 만들거나, 아예 다른 조합을 위한 클래스를 새로 만들어야 합니다.
+
+### 조합으로 바꾸기
+
+조합은 "이것은 저것을 갖고 있다" 관계로 문제를 풉니다. 공통 동작을 인터페이스로 정의하고, 그 인터페이스를 구현하는 여러 객체를 배열로 들고 있다가 필요할 때 실행합니다.
+
+### 데코레이터를 쓰지 않는 이유
+
+TypeScript는 클래스 프로퍼티·메서드에 부가 동작을 붙이는 데코레이터 문법도 제공합니다. 예산 경고처럼 동작을 조합해야 하는 문제는 데코레이터 없이도 인터페이스 기반 조합만으로 충분히 풀 수 있습니다.
+
+### 네이밍 관례
+
+인터페이스에는 역할을 나타내는 이름을(`BudgetRule`), 각 구현체에는 그 규칙이 무엇을 하는지 드러내는 구체적인 이름을(`LimitExceededRule`, `ApproachingLimitRule`) 짓습니다. 인터페이스 이름 앞에 `I`를 붙이는 관례는 TypeScript 커뮤니티에서 널리 쓰이지 않습니다.
+
+## 자주 하는 실수
+
+| 증상 | 원인 | 고치는 법 |
+|------|------|-----------|
+| 새 규칙 클래스에서 implements 관련 컴파일 에러 | evaluate 시그니처가 BudgetRule 정의와 다름 | 매개변수·반환 타입을 인터페이스와 정확히 맞춘다 |
+| 지출이 한도를 넘었는데도 경고가 안 뜸 | BUDGET_LIMITS에 없는 카테고리로 지출함 | Object.entries는 limits에 실제로 등록된 카테고리만 순회한다는 점을 확인한다 |
+| 새 변형이 필요할 때 기존 클래스를 상속하는 클래스를 또 만듦 | 조합으로 바꾼 목적을 잊고 예전 습관대로 설계함 | 새 동작은 새 BudgetRule 구현체로 추가한다 |
+
+## 확인 문제
+
+<Quiz
+  questionNumber={1}
+  question={"상속 대신 조합으로 예산 경고 로직을 설계했을 때 얻는 이점은"}
+  options={["코드 실행 속도가 항상 빨라진다","새 규칙을 배열에 객체로 추가하기만 하면 되고 클래스 계층이 깊어지지 않는다","타입 검사를 아예 생략할 수 있다","메서드 이름을 자유롭게 지을 수 있게 된다"]}
+  correctAnswer={2}
+  explanation={"조합 방식에서는 새 규칙을 인터페이스를 구현하는 객체로 만들어 배열에 추가하기만 하면 되어 상속 계층을 늘릴 필요가 없습니다."}
+/>
+
+<Quiz
+  questionNumber={2}
+  question={"BudgetRule 인터페이스가 하는 역할은"}
+  options={["모든 규칙 클래스가 공통으로 상속할 부모 클래스가 된다","서로 다른 규칙 클래스가 같은 방식으로 호출될 수 있도록 형태를 통일한다","규칙 실행 순서를 자동으로 결정한다","규칙 개수를 제한한다"]}
+  correctAnswer={2}
+  explanation={"인터페이스는 구현을 물려주지 않고 evaluate 메서드 형태만 통일해, 서로 다른 규칙 클래스를 같은 방식으로 다룰 수 있게 합니다."}
+/>
+
+<Quiz
+  questionNumber={3}
+  question={"BudgetEvaluator의 생성자가 구체 클래스 배열이 아니라 BudgetRule 배열을 받도록 설계한 이유는"}
+  options={["구체 클래스보다 인터페이스가 메모리를 덜 쓰기 때문에","구체 클래스가 아니라 형태에 의존해야 규칙을 교체·추가하기 쉬워지기 때문에","TypeScript 문법상 구체 클래스 배열을 매개변수로 쓸 수 없기 때문에","인터페이스가 아니면 생성자를 만들 수 없기 때문에"]}
+  correctAnswer={2}
+  explanation={"구체 클래스가 아니라 인터페이스(형태)에 의존하면 어떤 규칙을 넣을지 나중에 자유롭게 바꿀 수 있습니다."}
+/>
+
+## 참고 자료
+
+- [TypeScript Handbook — Classes](https://www.typescriptlang.org/docs/handbook/2/classes.html)

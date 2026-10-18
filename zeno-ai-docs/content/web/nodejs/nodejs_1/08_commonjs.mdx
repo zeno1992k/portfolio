@@ -1,0 +1,327 @@
+---
+title: '08. CommonJS'
+description: 'Node.js의 원래 모듈 시스템인 CommonJS의 require·module.exports, 캐시와 resolve, 모듈 래퍼 함수, exports 함정과 순환 참조의 동작을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** CommonJS 모듈이 파일 단위로 격리되는 원리, `require`의 캐시, `exports`와 `module.exports`의 차이, 순환 참조에서 일어나는 일을 설명할 수 있습니다.
+</Callout>
+
+이 편의 코드는 CommonJS 문법입니다. 이 과목의 다른 편은 ES Modules가 기본이고, 두 시스템의 차이는 09편에서 비교합니다.
+
+## 모듈이 필요한 이유
+
+모듈은 코드를 파일 단위로 나누고, 파일마다 공개할 것만 내보내게 하는 단위입니다. 모듈이 없으면 모든 코드가 하나의 전역 공간을 공유합니다.
+
+- 이름 충돌: 서로 다른 파일의 같은 이름 변수나 함수가 서로를 덮어씁니다.
+- 의존 관계 불명: 어떤 파일이 어떤 파일을 필요로 하는지 코드에 드러나지 않습니다.
+- 재사용 어려움: 한 덩어리의 코드를 다른 프로그램으로 옮기기 어렵습니다.
+- 캡슐화 불가: 내부 구현과 공개 인터페이스를 구분할 수 없습니다.
+
+Node.js는 각 파일을 별개의 모듈로 취급합니다. 파일의 최상위 변수는 그 모듈에만 속하고, 밖에서 쓰게 하려면 명시적으로 내보내야 합니다.
+
+## CommonJS
+
+CommonJS는 Node.js가 처음부터 제공한 모듈 시스템입니다. `require()`로 가져오고 `module.exports`(또는 `exports`)로 내보냅니다. 공식 문서에서 안정성 지수는 2(Stable)입니다.
+
+```js
+// circle.js
+const { PI } = Math
+exports.area = (r) => PI * r ** 2
+
+// main.js
+const circle = require('./circle.js')
+console.log(circle.area(4)) // 50.26548245743669
+```
+
+- `PI`는 `circle.js`의 비공개 변수입니다. 내보낸 `area`만 밖에서 보입니다.
+- `require`는 함수 호출이라서 조건문이나 함수 안에서도 부를 수 있고, 모듈 이름을 변수로 만들 수 있습니다. 동기로 실행됩니다.
+- 다음 파일은 기본적으로 CommonJS로 처리됩니다.
+
+| 파일 | 조건 |
+|------|------|
+| `.cjs` | 항상 |
+| `.js` | 가장 가까운 `package.json`의 `type`이 `commonjs`일 때 |
+| `.js` 또는 확장자 없음 | `package.json`이 없거나 `type`이 없을 때. 단 ES 모듈로만 해석되는 문법이 있으면 제외 |
+
+- `type`을 명시하는 것이 권장됩니다. 파일 형식이 무엇인지 도구가 쉽게 알 수 있기 때문입니다(자세히는 09편).
+- `require()`는 항상 CommonJS 로더를 쓰고, `import()`는 항상 ES 모듈 로더를 씁니다.
+
+## require
+
+`require(id)`는 모듈을 찾아 실행하고, 그 모듈이 내보낸 값(`module.exports`)을 돌려줍니다.
+
+```js
+const fs = require('node:fs')            // 내장 모듈
+const local = require('./lib/util.js')   // 상대 경로 파일
+const data = require('./config.json')    // JSON 파일
+const pkg = require('lodash')            // node_modules
+```
+
+- 내장 모듈은 `node:` 접두사를 붙입니다. 접두사를 붙이면 `require` 캐시를 거치지 않고 항상 내장 모듈을 돌려줍니다. `node:test`, `node:sqlite`, `node:sea`는 접두사가 필수입니다.
+- 경로가 `./`, `../`, `/`로 시작하면 파일, 아니면 내장 모듈이거나 `node_modules`에서 찾습니다(자세히는 10편).
+- 정확한 파일명이 없으면 `.js`, `.json`, `.node` 순서로 확장자를 붙여 찾습니다. 그 밖의 확장자는 `require('./file.cjs')`처럼 확장자를 써야 합니다.
+- `.json`은 JSON으로 파싱된 객체를 돌려줍니다. `.node`는 컴파일된 애드온으로 로드됩니다.
+- 파일이 없으면 `MODULE_NOT_FOUND` 에러가 납니다.
+- 경로를 상대로 쓰면 호출한 파일이 있는 디렉터리가 기준입니다. `process.cwd()`가 기준이 아닙니다.
+
+```js
+require('./nope')
+// Error: Cannot find module './nope'
+//   code: 'MODULE_NOT_FOUND'
+```
+
+**흔한 실수:** `.cjs` 같은 확장자를 생략하는 것입니다. `require('./counter')`는 `counter.cjs`를 찾지 못해 `MODULE_NOT_FOUND`입니다.
+
+## require 캐시
+
+모듈은 처음 로드될 때 한 번만 실행되고 결과가 캐시됩니다. 같은 파일로 해석되는 `require`는 모두 같은 객체를 돌려줍니다.
+
+```js
+// counter.js
+console.log('counter loaded')
+let n = 0
+exports.inc = () => ++n
+
+// main.js
+const a = require('./counter.js') // 'counter loaded' 출력
+const b = require('./counter.js') // 출력 없음
+console.log(a === b)              // true
+console.log(a.inc(), b.inc())     // 1 2 (상태 공유)
+```
+
+- 캐시 덕분에 모듈은 사실상 싱글톤입니다. 모듈 최상위의 상태(`n`)를 모든 사용처가 공유합니다.
+- 모듈 코드를 호출할 때마다 실행하고 싶다면 함수를 내보내고 그 함수를 호출합니다.
+- 캐시는 `require.cache` 객체에 있고 키는 해석된 파일 경로입니다. 키를 `delete`하면 다음 `require`가 파일을 다시 로드합니다.
+
+```js
+delete require.cache[require.resolve('./counter.js')]
+const c = require('./counter.js') // 'counter loaded' 다시 출력
+console.log(c === a)              // false (새 객체)
+```
+
+- 네이티브 애드온(`.node`)은 캐시를 지워 다시 로드하면 에러입니다.
+- `require.cache`를 직접 바꾸는 것은 주의해서 써야 합니다. 이미 가져간 참조는 옛 객체를 가리킵니다. 일반 코드에서는 쓰지 않습니다.
+- 캐시 키는 해석된 파일 이름이라서 같은 이름이라도 `node_modules` 위치가 다르면 서로 다른 파일로 해석되어 다른 객체일 수 있습니다.
+- 대소문자를 구분하지 않는 파일시스템에서도 `require('./foo')`와 `require('./FOO')`는 다른 모듈로 취급되어 두 번 로드됩니다.
+
+## require.resolve
+
+`require.resolve(request)`는 모듈을 로드하지 않고 해석된 절대 파일 경로만 돌려줍니다. 모듈이 없으면 `MODULE_NOT_FOUND`를 던집니다.
+
+```js
+require.resolve('./counter.js')
+// '/work/app/counter.js' (절대 경로)
+require.resolve('./nope')       // MODULE_NOT_FOUND 에러
+```
+
+- 로드하지 않으므로 모듈 코드는 실행되지 않습니다. 존재 여부와 실제 위치를 확인할 때 씁니다.
+- `require.cache`의 키가 이 값이라서 캐시 삭제에 함께 씁니다(위 예).
+- 두 번째 인수 `{ paths: [...] }`로 검색을 시작할 경로를 지정할 수 있습니다(v8.9.0).
+- `require.resolve.paths(request)`는 검색할 경로 목록을 돌려줍니다. 내장 모듈이면 `null`입니다.
+- 해석 순서의 자세한 규칙은 10편에서 다룹니다.
+
+## module.exports
+
+`module.exports`는 `require`가 돌려주는 값입니다. 처음에는 빈 객체이고 어떤 값으로든 바꿀 수 있습니다.
+
+```js
+// 1. 프로퍼티를 추가
+module.exports.add = (a, b) => a + b
+
+// 2. 값 하나로 교체 (함수, 클래스, 객체)
+module.exports = class Square {
+  constructor(w) { this.w = w }
+}
+```
+
+- 여러 값을 내보낼 때는 객체에 프로퍼티를 추가하거나 객체 리터럴로 교체하고, 하나를 대표로 내보낼 때는 함수나 클래스로 교체합니다.
+- 가져오는 쪽은 `const { add } = require('./math.js')`처럼 구조 분해로 받을 수 있습니다.
+- 교체는 모듈이 로드되는 동안, 즉 최상위에서 바로 해야 합니다. 콜백 안에서 하면 `require`가 이미 이전 값을 돌려준 뒤입니다.
+
+```js
+// x.js
+setTimeout(() => {
+  module.exports = { a: 'hello' } // ❌ 너무 늦음
+}, 0)
+
+// y.js
+const x = require('./x.js')
+console.log(x.a) // undefined (x는 빈 객체)
+```
+
+- 비동기로 준비되는 값은 값 대신 Promise나 함수를 내보냅니다.
+- 내보낸 값은 `require`가 돌려주는 참조입니다. 복사본이 아니라서 가져간 쪽이 객체를 바꾸면 모든 사용처에 보입니다.
+
+## exports와 module.exports 차이
+
+`exports`는 `module.exports`를 가리키는 짧은 이름입니다. 모듈이 실행되기 전에 `exports = module.exports`로 초기화됩니다. 변수라서 새 값을 대입하면 연결이 끊깁니다.
+
+```js
+exports.a = 1               // ✅ module.exports.a = 1과 같음
+exports = { a: 1 }          // ❌ 지역 변수만 바뀜. 내보내지 않음
+module.exports = { a: 1 }   // ✅ 교체
+```
+
+`require`는 항상 `module.exports`를 돌려줍니다. `exports`를 통해 프로퍼티를 추가하면 같은 객체를 바꾸는 것이라서 반영되고, `exports`에 대입하면 새 객체가 `exports`에만 묶여서 `module.exports`는 빈 객체 그대로입니다.
+
+```js
+// ex1.js
+exports = { a: 1 }
+// ex3.js
+module.exports = function hi() {}
+exports.x = 1    // 옛 객체에 추가하는 것이라서 무시됨
+
+require('./ex1.js') // {}
+require('./ex3.js').x // undefined
+```
+
+- `exports.f = ...` 형태는 안전하고, `exports = ...` 형태는 항상 틀립니다.
+- `module.exports`를 교체한 뒤에는 `exports`가 옛 객체를 가리킵니다. 둘을 모두 바꿔 두는 관용구가 `module.exports = exports = function () {}`입니다.
+- 한 모듈에서 `exports.x`와 `module.exports =`를 섞지 않습니다. 둘 중 하나로 통일합니다.
+
+**흔한 실수:** 함수 하나를 내보내려고 `exports = function () {}`로 쓰는 것입니다. 가져온 쪽은 빈 객체 `{}`를 받아 "is not a function" 에러를 만납니다.
+
+## 모듈 래퍼 함수
+
+Node.js는 CommonJS 모듈 코드를 실행하기 전에 다음 함수로 감쌉니다. 모듈 파일 전체가 이 함수의 본문입니다.
+
+```js
+(function (exports, require, module,
+          __filename, __dirname) {
+  // 모듈 코드가 여기에 들어감
+})
+```
+
+- 최상위의 `var`, `let`, `const`가 전역이 아니라 이 함수의 지역 변수가 되어 모듈에 격리됩니다.
+- `exports`, `require`, `module`, `__filename`, `__dirname`은 전역 변수가 아니라 이 함수의 매개변수입니다. 모든 파일에서 쓸 수 있지만 파일마다 다른 값입니다.
+- 모듈 최상위의 `arguments`는 이 다섯 값을 가집니다.
+
+```js
+console.log(arguments.length)          // 5
+console.log(arguments[0] === exports)  // true
+console.log(arguments[2] === module)   // true
+console.log(this === module.exports)   // true
+```
+
+- 최상위의 `this`는 `module.exports`입니다. 전역 객체가 아닙니다.
+- 최상위에서 `return`을 쓸 수 있는 것도 이 래퍼 함수 덕분입니다.
+- 이 매개변수들은 ES Modules에서는 없습니다. ESM은 래퍼가 아니라 다른 방식으로 격리합니다(자세히는 09편).
+
+## require.main
+
+`require.main`은 프로그램의 진입 모듈(`node 파일`로 직접 실행한 파일)의 `module` 객체입니다. 현재 모듈이 직접 실행됐는지 확인하는 데 씁니다.
+
+```js
+// tool.js
+function main() { console.log('run') }
+
+if (require.main === module) {
+  main() // node tool.js 로 실행할 때만
+}
+module.exports = { main }
+```
+
+- `node tool.js`면 `require.main === module`이 `true`입니다. 다른 파일이 `require('./tool.js')`로 불러오면 `false`입니다.
+- 이 관용구로 한 파일이 실행 파일이면서 라이브러리 역할도 할 수 있습니다.
+- 진입점이 CommonJS가 아니면(ES 모듈이 진입점이면) `require.main`은 `undefined`입니다. ESM에서는 `import.meta.main`이 대체합니다.
+- `module.id`는 진입 모듈에서 `'.'`이고, `module.filename`은 파일의 절대 경로이며, `module.loaded`는 로딩이 끝났는지입니다.
+
+## 순환 참조가 CJS에서 어떻게 깨지는지
+
+두 모듈이 서로를 `require`하면 순환 참조입니다. 한 모듈이 끝나기 전에 상대가 불러오면 아직 완성되지 않은 `exports`를 받습니다.
+
+```js
+// a.js
+exports.done = false
+const b = require('./b.js')
+console.log('in a, b.done =', b.done)
+exports.done = true
+```
+
+```js
+// b.js
+exports.done = false
+const a = require('./a.js')
+console.log('in b, a.done =', a.done)
+exports.done = true
+```
+
+`main.js`가 `require('./a.js')`를 호출하면 실행 순서는 다음과 같습니다.
+
+```text
+a 시작 → exports.done = false
+a가 b를 require → b 시작
+b가 a를 require → 캐시의 미완성 a.exports 반환
+in b, a.done = false
+b 끝 → in a, b.done = true → a 끝
+```
+
+- 무한 루프를 막으려고 캐시에 이미 등록된 미완성 `exports`를 돌려줍니다. 에러는 나지 않습니다.
+- 받은 쪽은 상대가 그 시점까지 `exports`에 붙인 것만 봅니다. 위 예에서 b는 `a.done`이 `false`인 시점의 a를 봅니다.
+
+`module.exports`를 교체하면 이 구조가 깨집니다. 상대가 받은 것은 교체 전의 빈 객체라서 그 뒤에 교체한 값을 영영 보지 못합니다.
+
+```js
+// ca.js
+const b = require('./cb.js')
+module.exports = { name: 'a', b }  // 교체
+
+// cb.js
+const a = require('./ca.js')       // 교체 전의 {}를 받음
+console.log(a.name)                // undefined
+// a의 프로퍼티를 읽으면 순환 참조 경고가 출력될 수 있음
+module.exports = { name: 'b' }
+```
+
+- 증상은 상대 모듈의 값이 `undefined`이거나 `X is not a function`입니다. 에러 위치가 순환 지점이 아니라 사용하는 곳에서 납니다.
+- 대응은 순환을 만들지 않는 것입니다. 공통 부분을 제3의 모듈로 빼내 한쪽 방향 의존으로 만듭니다.
+- 부득이하면 `exports`에 프로퍼티를 붙이는 방식(`exports.x = ...`)을 쓰고, 상대 모듈의 값을 모듈 최상위가 아니라 함수 안에서 호출 시점에 `require`하거나 읽습니다.
+- 공식 문서는 순환 의존이 올바르게 동작하려면 세심한 계획이 필요하다고 설명합니다.
+
+## 핵심 정리
+
+- CommonJS는 파일을 모듈로 격리하며 `require()`로 가져오고 `module.exports`로 내보냅니다. `.cjs`이거나 `type`이 `commonjs`(또는 없음)인 `.js`가 대상입니다.
+- 모듈은 처음 로드될 때 한 번 실행되고 `require.cache`에 저장되어 같은 객체를 돌려줍니다. 캐시를 지우면 다시 로드합니다.
+- `require.resolve()`는 로드 없이 해석된 절대 경로만 돌려주고, 파일이 없으면 `MODULE_NOT_FOUND`입니다.
+- `exports`는 `module.exports`의 별칭이라서 `exports.f = ...`는 되고 `exports = ...`는 내보내지지 않습니다. 교체는 `module.exports`로 즉시 합니다.
+- 모든 모듈은 `(exports, require, module, __filename, __dirname)`을 받는 함수로 감싸져 실행되어 변수가 격리됩니다.
+- `require.main === module`로 직접 실행 여부를 알 수 있고, 순환 참조에서는 미완성 `exports`를 받으며 `module.exports` 교체가 이를 깨뜨립니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="lib.js가 exports = function hello() {} 로 끝난다. main.js에서 const lib = require('./lib.js') 후 lib()를 호출하면 어떻게 되는가?"
+  options={['hello 함수가 호출된다', 'lib는 빈 객체라서 lib is not a function 에러가 난다', 'MODULE_NOT_FOUND 에러가 난다', 'lib는 undefined이다']}
+  correctAnswer={2}
+  explanation="exports는 module.exports의 별칭 변수라서 새 값을 대입하면 연결만 끊어지고 module.exports는 처음의 빈 객체 그대로입니다. require는 항상 module.exports를 돌려주므로 lib는 빈 객체이고 호출하면 함수가 아니라는 TypeError가 납니다. 함수를 내보내려면 module.exports에 대입합니다."
+  optionExplanations={['exports에 대입한 값은 내보내지지 않는다', '정답. require는 module.exports인 빈 객체를 돌려주기 때문이다', '파일은 존재하므로 MODULE_NOT_FOUND가 아니다', 'require는 undefined가 아니라 module.exports 객체를 돌려준다']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="counter.js 최상위에 console.log 호출과 let n = 0 이 있고 inc 함수를 exports에 붙였다. 같은 파일에서 require('./counter.js')를 두 번 호출했을 때 맞는 설명은?"
+  options={['모듈 코드가 두 번 실행되고 n은 각각 독립이다', '모듈 코드는 한 번 실행되고 두 호출은 같은 객체를 돌려준다', '두 번째 호출은 에러가 난다', '두 호출은 서로 다른 객체를 돌려주지만 n은 공유한다']}
+  correctAnswer={2}
+  explanation="모듈은 처음 로드될 때 한 번만 실행되고 결과가 require.cache에 저장됩니다. 같은 파일로 해석되는 이후의 require는 캐시된 같은 exports 객체를 돌려주므로 상태 n을 공유합니다. 매번 실행하려면 함수를 내보내서 호출해야 합니다."
+  optionExplanations={['캐시 때문에 두 번째 호출은 코드를 다시 실행하지 않는다', '정답. 캐시된 같은 객체를 돌려주므로 상태를 공유한다', '같은 모듈을 여러 번 require하는 것은 정상이다', '객체 자체가 같으므로 서로 다른 객체가 아니다']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="a.js와 b.js가 서로를 require하는 순환 구조에서 a.js를 먼저 실행했다. b.js가 받는 a의 exports에 대한 설명으로 맞는 것은?"
+  options={['a.js가 끝난 뒤의 완성된 exports를 받는다', '순환 참조는 항상 에러를 던진다', 'b.js를 로드하는 시점까지 a.js가 채운 미완성 exports를 받는다', 'a.js가 다시 처음부터 실행된다']}
+  correctAnswer={3}
+  explanation="CommonJS는 무한 루프를 막으려고 캐시에 이미 등록된 미완성 exports 객체를 돌려줍니다. 에러는 나지 않고, b.js는 a.js가 require('./b.js')를 호출한 시점까지 exports에 붙인 것만 볼 수 있습니다. a.js가 module.exports를 새 객체로 교체한다면 b.js는 교체 전의 빈 객체를 받습니다."
+  optionExplanations={['a.js는 b.js를 로드하는 중이라서 아직 끝나지 않았다', '순환 참조는 에러 없이 미완성 exports를 돌려준다', '정답. 그 시점까지 채워진 미완성 exports를 받는다', '캐시에 등록되어 있어서 다시 실행하지 않는다']}
+/>
+
+## 참고 자료
+
+- [Node.js — Modules: CommonJS modules](https://nodejs.org/api/modules.html)
+- [Node.js — Modules: The module wrapper](https://nodejs.org/api/modules.html#the-module-wrapper)
+- [Node.js — Modules: require.cache](https://nodejs.org/api/modules.html#requirecache)
+- [Node.js — Modules: Cycles](https://nodejs.org/api/modules.html#cycles)
+- [Node.js — Modules: exports shortcut](https://nodejs.org/api/modules.html#exports-shortcut)
+- [Node.js — Modules: Accessing the main module](https://nodejs.org/api/modules.html#accessing-the-main-module)

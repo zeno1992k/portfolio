@@ -1,0 +1,620 @@
+---
+title: '20. 빌트인 객체'
+description: '표준 빌트인·호스트·사용자 정의 객체의 구분, 정적·프로토타입 메서드, 래퍼 객체, 전역 객체와 전역 함수(eval, isNaN, parseInt, URI 인코딩), 암묵적 전역을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 객체가 어디서 오는지(표준·호스트·사용자)를 구분하고, 원시 값과 래퍼 객체의 관계, 전역 객체가 가진 프로퍼티, 전역 함수의 정확한 동작 규칙을 설명할 수 있습니다.
+</Callout>
+
+## 표준 빌트인·호스트·사용자 정의 객체
+
+프로그램이 다루는 객체는 누가 정의했는지에 따라 세 부류로 나뉩니다. 표준 빌트인 객체(standard built-in object)는 ECMA-262가 정의하고 엔진이 코드 실행 전에 만들어 두는 객체입니다. 호스트 객체(host object)는 실행 환경이 ECMAScript 바깥의 표준이나 자체 문서로 추가하는 객체입니다. 사용자 정의 객체는 개발자가 코드로 만든 객체입니다.
+
+| 분류 | 정의하는 곳 | 예 |
+|------|-------------|----|
+| 표준 빌트인 객체 | ECMA-262, 국제화는 ECMA-402 | `Object`, `Array`, `Math`, `Promise`, `Intl` |
+| 호스트 객체 | HTML·DOM 표준, Node.js 문서 등 | `window`, `document`, `fetch`, `process` |
+| 사용자 정의 객체 | 개발자의 코드 | 리터럴, 생성자 함수, class로 만든 객체 |
+
+```js
+const list = new Array(3)     // 표준 빌트인 객체의 인스턴스
+const user = { name: 'Kim' }  // 사용자 정의 객체
+typeof document  // 브라우저 'object', Node.js 'undefined'
+```
+
+- 표준 빌트인 객체는 어느 엔진, 어느 환경에서나 같은 이름과 동작을 가집니다. 호스트 객체는 환경마다 다르고, 같은 이름이라도 구현이 다를 수 있습니다.
+- `console`, `setTimeout`, `structuredClone`, `URL`은 ECMAScript가 아니라 호스트 API입니다(자세히는 01편).
+- 표준 빌트인 객체의 형태는 둘입니다. 생성자 함수(`Array`, `Date`, `Map`)와 생성자가 아닌 일반 객체(`Math`, `JSON`, `Reflect`, `Atomics`, `Intl`)입니다. 후자를 `new`로 만들거나 함수처럼 호출하면 TypeError가 납니다.
+- 생성자의 `prototype` 객체(`Array.prototype`)도 표준 빌트인 객체입니다. 사용자 정의 객체는 프로토타입 체인으로 빌트인 프로토타입을 상속합니다. `{}`는 `Object.prototype`을, 배열은 `Array.prototype`을 상속합니다(자세히는 17편).
+
+```js
+new Array(3)    // 생성자: 인스턴스를 만든다
+Math.max(1, 2)  // 일반 객체: 메서드를 직접 호출한다
+new Math()      // TypeError: Math is not a constructor
+```
+
+표준 빌트인 객체에 프로퍼티를 직접 추가하는 확장은 피합니다. 나중에 표준이 같은 이름을 추가하면 충돌하기 때문입니다. MooTools 같은 기존 라이브러리가 `Array.prototype.flatten`을 이미 정의해 둔 탓에, ES2019의 표준 메서드 이름은 `flatten`이 아니라 `flat`이 되었습니다. 또 할당으로 추가한 프로퍼티는 열거 가능이어서 배열을 `for...in`으로 순회할 때 키로 나타납니다(자세히는 18편).
+
+## 표준 빌트인 객체 전체 목록
+
+ECMA-262가 전역 이름으로 정의하는 객체를 ES2026 기준으로 분류한 표입니다. 오른쪽 열은 자세히 다루는 편입니다.
+
+| 분류 | 객체 | 편 |
+|------|------|----|
+| 기본 | `Object`, `Function`, `Boolean`, `Symbol` | Object 09편, Function 16편, Boolean 이 편, Symbol 34편 |
+| 에러 | `Error`, `AggregateError`, `EvalError`, `RangeError`, `ReferenceError`, `SyntaxError`, `TypeError`, `URIError` | 44편 |
+| 숫자와 날짜 | `Number`, `BigInt`, `Math`, `Date` | Number·BigInt·Math 30편, Date 31편 |
+| 텍스트 | `String`, `RegExp` | String 33편, RegExp 32편 |
+| 배열 | `Array` | 28·29편 |
+| 타입 배열 | `Int8Array`, `Uint8Array`, `Uint8ClampedArray`, `Int16Array`, `Uint16Array`, `Int32Array`, `Uint32Array`, `Float16Array`(ES2025), `Float32Array`, `Float64Array`, `BigInt64Array`, `BigUint64Array` | 48편 |
+| 키 컬렉션 | `Map`, `Set`, `WeakMap`, `WeakSet` | 38편 |
+| 구조화 데이터 | `ArrayBuffer`, `SharedArrayBuffer`, `DataView`, `Atomics`, `JSON` | 버퍼류 48편, JSON 39편 |
+| 메모리 관리 | `WeakRef`, `FinalizationRegistry` | 49편 |
+| 제어 추상화 | `Iterator`, `Promise` | Iterator 35편, Promise 41편 |
+| 리플렉션 | `Reflect`, `Proxy` | 47편 |
+| 전역 | `globalThis` | 이 편 |
+| 국제화(ECMA-402) | `Intl` | 31편 |
+
+- `Math`, `JSON`, `Reflect`, `Atomics`, `Intl`은 생성자가 아닌 일반 객체입니다. 나머지는 모두 생성자 함수입니다.
+- 전역 이름이 없는 표준 객체도 있습니다. `GeneratorFunction`, `AsyncFunction`, `AsyncGeneratorFunction`, 모든 타입 배열의 부모인 `%TypedArray%`는 전역 프로퍼티가 아니고, 생성기 함수·async 함수·타입 배열 생성자에서 `Object.getPrototypeOf`로 거슬러 올라가 얻습니다(자세히는 42·43·48편).
+
+```js
+const gen = function* () {}
+const GF = Object.getPrototypeOf(gen).constructor
+GF.name                   // 'GeneratorFunction'
+typeof GeneratorFunction  // 'undefined'
+```
+
+- `Temporal`과 명시적 자원 관리(`DisposableStack`, `AsyncDisposableStack`, `SuppressedError`)는 4단계에 올랐지만 ES2027 판에 포함될 예정이므로 ES2026 목록에 없습니다. 엔진마다 구현 시점이 달라 MDN의 지원 표를 확인해야 합니다.
+- 이 표에 없는 전역 이름(`console`, `URL`, `Buffer` 등)은 호스트 객체입니다.
+
+## 프로토타입 메서드와 정적 메서드
+
+빌트인 객체의 메서드는 두 위치에 있습니다. 프로토타입 메서드는 생성자의 `prototype` 객체에 있어 인스턴스가 상속해 호출하고, 정적 메서드(static method)는 생성자 함수 객체 자신의 프로퍼티라서 생성자 이름으로 호출합니다.
+
+```js
+const list = [1, 2, 3]
+list.push(4)         // 프로토타입 메서드: Array.prototype.push
+Array.isArray(list)  // 정적 메서드: true
+list.isArray         // undefined (인스턴스는 상속하지 않는다)
+```
+
+MDN은 이 구분을 표기로 드러냅니다.
+
+| 표기 | 종류 | 호출 형태 |
+|------|------|-----------|
+| `Array.prototype.map()` | 프로토타입 메서드 | `arr.map(fn)` |
+| `Array.from()` | 정적 메서드 | `Array.from(iter)` |
+| `Number.MAX_SAFE_INTEGER` | 정적 프로퍼티 | 그대로 읽는다 |
+
+- 프로토타입 메서드의 `this`는 호출한 인스턴스입니다(자세히는 21편).
+- 정적 메서드는 인스턴스가 필요 없는 기능을 맡습니다. 인스턴스 생성(`Array.from`, `Array.of`), 값 판별(`Array.isArray`, `Number.isInteger`), 상수(`Math.PI`), 유틸리티(`Date.now`, `Promise.all`, `JSON.parse`, `Object.keys`)가 그렇습니다.
+- 판별 메서드가 정적인 이유는 검사 대상이 배열인지 알 수 없는 값이기 때문입니다. `x.isArray()`는 x가 `null`이거나 해당 메서드가 없으면 호출 자체가 실패합니다.
+- `Math`, `JSON`, `Reflect`는 생성자가 아니라서 모든 멤버가 객체 자신의 프로퍼티입니다.
+- 정적 메서드의 `this`는 호출에 쓴 생성자입니다. 하위 클래스로 호출하면 하위 클래스의 인스턴스가 만들어지고, `extends`는 정적 메서드도 상속합니다(자세히는 25편).
+
+```js
+class MyArr extends Array {}
+MyArr.from([1]) instanceof MyArr  // true
+MyArr.isArray === Array.isArray   // true
+```
+
+- 프로토타입이 없는 객체(`Object.create(null)`)에는 프로토타입 메서드가 없어 `hasOwnProperty`를 호출할 수 없습니다. 정적 메서드 `Object.hasOwn`(ES2022)은 어떤 객체에나 적용됩니다(자세히는 18편).
+
+흔한 실수는 호출 위치를 바꿔 쓰는 것입니다.
+
+```js
+const a = Number.toFixed(1)    // ❌ TypeError
+const b = (5).toFixed(1)       // ✅ '5.0'
+const c = [].isArray([])       // ❌ TypeError
+const d = Array.isArray([])    // ✅ true
+```
+
+## 원시 값과 래퍼 객체
+
+원시 값(string, number, boolean, symbol, bigint) 자체에는 프로퍼티가 없습니다. 프로퍼티에 접근하는 순간 엔진이 해당 타입의 래퍼 객체(wrapper object)를 임시로 만들어 접근을 처리하고 곧바로 버립니다.
+
+```js
+const len = 'abc'.length        // 3
+const up = 'abc'.toUpperCase()  // 'ABC'
+const fixed = (5).toFixed(1)    // '5.0'
+```
+
+접근 한 번에 일어나는 일은 다음과 같습니다.
+
+1. 원시 값을 같은 타입의 래퍼 객체로 변환합니다.
+2. 래퍼 객체와 그 프로토타입 체인(`String.prototype` 등)에서 프로퍼티를 찾습니다.
+3. 접근이 끝나면 래퍼 객체를 버립니다. 메서드는 원시 값이 아니라 래퍼의 프로토타입에 있습니다.
+
+| 원시 타입 | 래퍼 객체 | 감싼 값을 담는 내부 슬롯 |
+|-----------|-----------|--------------------------|
+| string | `String` | `[[StringData]]` |
+| number | `Number` | `[[NumberData]]` |
+| boolean | `Boolean` | `[[BooleanData]]` |
+| symbol | `Symbol` | `[[SymbolData]]` |
+| bigint | `BigInt` | `[[BigIntData]]` |
+
+- `null`과 `undefined`는 래퍼가 없어서 프로퍼티 접근 자체가 TypeError입니다(`null.x`).
+- 래퍼는 일회용이므로 원시 값에 프로퍼티를 추가해도 남지 않습니다. 일반 모드에서는 에러 없이 무시되고, strict mode에서는 TypeError입니다(자세히는 19편).
+
+```js
+const s = 'abc'
+s.foo = 1   // 임시 래퍼에 설정되고 버려진다 (strict는 TypeError)
+s.foo       // undefined
+```
+
+- 문자열의 `length`와 인덱스(`'abc'[0]`)는 읽기 전용입니다. strict mode에서 `'abc'.length = 1`은 TypeError입니다.
+- 원시 값에서 메서드를 호출할 때 `this`는 일반 모드 함수에서는 래퍼 객체, strict mode 함수에서는 원시 값 그대로입니다(자세히는 21편).
+
+```js
+function sloppy() { return typeof this }
+function strict() { 'use strict'; return typeof this }
+String.prototype.sloppy = sloppy
+String.prototype.strict = strict
+'x'.sloppy()  // 'object' (this가 래퍼 객체)
+'x'.strict()  // 'string' (this가 원시 값)
+```
+
+- `Object` 함수에 원시 값을 넘기면 대응하는 래퍼 객체가 반환됩니다. `Object('a') instanceof String`은 `true`입니다. 래퍼에서 원시 값을 꺼내는 메서드는 `valueOf()`입니다.
+- `String` 래퍼는 인덱스와 `length`를 가진 특수한 객체여서 `Object.keys(new String('abc'))`가 `['0', '1', '2']`입니다.
+
+흔한 실수는 숫자 리터럴에 바로 `.`을 붙이는 것입니다. `1.`을 소수점이 붙은 숫자로 읽으므로 `1.toFixed(1)`은 SyntaxError입니다. `(1).toFixed(1)` 또는 `1..toFixed(1)`로 씁니다.
+
+## 래퍼 객체를 new로 만들면 안 되는 이유
+
+`new Number(1)`처럼 만든 래퍼 객체는 원시 값처럼 보이지만 객체이므로 여러 지점에서 원시 값과 다르게 동작합니다.
+
+```js
+const p = 1
+const w = new Number(1)
+typeof p                          // 'number'
+typeof w                          // 'object'
+w === 1                           // false
+w == 1                            // true (원시 값으로 변환해 비교)
+new Number(1) === new Number(1)   // false (참조 비교)
+```
+
+| 문제 | 예 | 결과 |
+|------|----|------|
+| 타입 판별 실패 | `typeof new String('a') === 'string'` | `false` |
+| 항상 참 | `new Boolean(false) ? 1 : 2` | `1` |
+| 값이 0이어도 참 | `new Number(0) ? 1 : 2` | `1` |
+| 컬렉션 키 어긋남 | `new Set([new Number(1), new Number(1)]).size` | `2` |
+| 연산에서는 숨음 | `new Number(5) + 1` | `6` |
+
+- `===`는 참조를 비교하므로 같은 값을 담은 래퍼끼리도 다릅니다. `==`는 한쪽이 원시 값이면 변환해서 같다고 판단해 혼란을 더합니다.
+- 객체는 항상 참으로 평가되므로 `new Boolean(false)`, `new Number(0)`, `new String('')`이 모두 조건문을 통과합니다(자세히는 08편).
+- 산술·문자열 연산에서는 `valueOf()`로 원시 값처럼 동작하므로 버그가 연산 단계가 아니라 판별·비교 단계에서 뒤늦게 드러납니다.
+- 원시 값만으로 모든 메서드를 쓸 수 있어서 `new`로 얻는 이점이 없습니다. 객체를 하나 더 할당하므로 메모리와 속도에서도 손해입니다.
+- `new` 없이 호출하면 래퍼가 아니라 형 변환 함수입니다. `Number('1')`은 `1`, `String(1)`은 `'1'`, `Boolean(0)`은 `false`를 돌려주고, 결과의 `typeof`는 원시 타입입니다(자세히는 08편).
+- `Symbol`과 `BigInt`는 `new`로 호출하면 TypeError입니다. `new Symbol()`, `new BigInt(1)` 모두 막혀 있습니다.
+- 이미 래퍼 객체가 들어왔다면 `valueOf()`나 `Number(x)`로 원시 값으로 바꿔 사용합니다.
+
+## 전역 객체와 globalThis
+
+전역 객체(global object)는 코드가 실행되기 전에 만들어지는 유일한 객체로, 전역 스코프의 최상위에 있으며 빌트인 전역 프로퍼티와 호스트가 추가한 전역 프로퍼티를 담습니다. 전역 변수처럼 쓰는 `Array`, `parseInt`, `document`는 모두 이 객체의 프로퍼티입니다.
+
+| 실행 환경 | 전역 객체를 가리키는 이름 |
+|-----------|---------------------------|
+| 브라우저 창 | `window`, `self` |
+| Web Worker | `self` |
+| Node.js | `global` |
+| 모든 환경 | `globalThis` (ES2020) |
+
+```js
+globalThis.Array === Array            // true
+globalThis.globalThis === globalThis  // true
+typeof window === 'undefined'         // Node.js에서 true
+```
+
+- ES2020 이전에는 환경마다 이름이 달라 `typeof window`, `typeof global`, `typeof self`를 차례로 검사해야 했습니다. `globalThis`는 이 분기를 없앱니다.
+- 전역 객체는 일반 객체지만 생성자도 함수도 아닙니다. `new globalThis()`와 `globalThis()`는 TypeError입니다. 프로토타입 체인은 호스트가 정합니다.
+- 스크립트 최상위의 `var` 변수와 함수 선언은 전역 객체의 프로퍼티가 됩니다(configurable이 false). `let`, `const`, `class`는 전역 렉시컬 스코프에만 만들어지고 전역 객체의 프로퍼티가 되지 않습니다(자세히는 13편).
+
+```js
+var a = 1   // 브라우저 스크립트의 최상위
+let b = 2
+globalThis.a  // 1
+globalThis.b  // undefined (식별자 b로는 읽힌다)
+```
+
+- 전역에서 식별자를 찾을 때는 전역 렉시컬 스코프(`let`·`const`·`class`)를 먼저 보고 그다음 전역 객체를 봅니다(자세히는 12편).
+- ES 모듈과 Node.js의 CommonJS 파일은 최상위 선언이 모듈 스코프에 놓이므로 `var`라도 전역 객체의 프로퍼티가 되지 않습니다. Node.js는 CommonJS 파일을 함수로 감싸 실행합니다.
+- 최상위 `this`는 스크립트에서는 전역 객체, ES 모듈에서는 `undefined`, Node.js CommonJS 파일에서는 `module.exports`입니다. 일반 모드 함수의 `this`는 전역 객체, strict mode 함수는 `undefined`입니다(자세히는 21편).
+- 선언되지 않은 이름은 읽으면 ReferenceError이지만, `typeof`로 검사하거나 `globalThis.이름`으로 접근하면 에러가 나지 않습니다.
+
+```js
+typeof undeclared      // 'undefined'
+globalThis.undeclared  // undefined
+undeclared             // ReferenceError
+```
+
+흔한 실수는 `window`가 항상 있다고 가정하는 것입니다. Node.js와 Worker에서는 `window`가 없어 ReferenceError가 나므로 전역 객체는 `globalThis`로 접근합니다.
+
+## 빌트인 전역 프로퍼티
+
+전역 객체가 ECMA-262에 따라 항상 가지는 프로퍼티는 값, 함수, 생성자와 객체로 나뉩니다.
+
+| 분류 | 프로퍼티 | writable / enumerable / configurable |
+|------|----------|---------------------------------------|
+| 값 | `NaN`, `Infinity`, `undefined` | false / false / false |
+| 값 | `globalThis` | true / false / true |
+| 함수 | `eval`, `isFinite`, `isNaN`, `parseFloat`, `parseInt`, `decodeURI`, `decodeURIComponent`, `encodeURI`, `encodeURIComponent` | true / false / true |
+| 함수(Annex B) | `escape`, `unescape` | true / false / true |
+| 생성자와 객체 | 앞 절의 표준 빌트인 객체 목록 | true / false / true |
+
+Annex B는 웹 브라우저 호환을 위한 부가 기능을 모은 부록이고, `escape`와 `unescape`가 여기에 속합니다. 열거 불가(false)이므로 `for...in`으로 전역 객체를 순회해도 나타나지 않습니다.
+
+- `NaN`, `Infinity`, `undefined`는 값을 바꿀 수 없습니다. 대입은 일반 모드에서 에러 없이 무시되고 strict mode에서 TypeError입니다.
+- `Number.NaN`, `Number.POSITIVE_INFINITY`는 같은 값의 별칭입니다(자세히는 30편).
+- `NaN`은 `typeof`가 `'number'`이고 자기 자신과도 같지 않은 유일한 값입니다.
+
+```js
+const a = typeof NaN     // 'number'
+const b = NaN === NaN    // false
+const c = 1 / 0          // Infinity
+const d = -1 / 0         // -Infinity
+const e = 0 / 0          // NaN
+```
+
+- `undefined`는 예약어가 아니라 전역 프로퍼티의 이름입니다. 함수 안에서는 `let undefined = 5`처럼 가릴 수 있지만 쓰면 안 됩니다. 전역 스코프의 `let`·`const`·`class`로 선언하면 SyntaxError이고, 전역 `var undefined = 1`은 에러 없이 값을 바꾸지 못합니다.
+- 어디서나 `undefined` 값을 얻는 안전한 식은 `void 0`입니다. `void` 연산자는 피연산자를 평가한 뒤 항상 `undefined`를 돌려줍니다(자세히는 06편).
+
+## eval
+
+`eval(x)`는 인수가 문자열이면 그것을 ECMAScript 스크립트로 파싱해 실행하고, 마지막으로 평가된 문의 값을 반환하는 전역 함수입니다. 인수가 문자열이 아니면 평가 없이 그대로 반환합니다.
+
+```js
+eval('1 + 2')             // 3
+eval('var n = 5; n * 2')  // 10
+eval(1 + 2)               // 3 (숫자는 그대로 반환)
+eval('{ a: 1 }')          // 1 (객체가 아니라 블록과 레이블)
+eval('({ a: 1 })')        // { a: 1 }
+```
+
+호출 형태에 따라 평가되는 스코프가 다릅니다.
+
+| 호출 형태 | 종류 | 평가 스코프 |
+|-----------|------|-------------|
+| `eval(s)`, `(eval)(s)` | 직접 eval | 호출한 위치의 스코프 |
+| `(0, eval)(s)`, `globalThis.eval(s)`, `eval?.(s)` | 간접 eval | 전역 스코프 |
+| `const e = eval; e(s)`, `obj.eval(s)` | 간접 eval | 전역 스코프 |
+
+```js
+function direct() {
+  const local = 'L'
+  return eval('local')         // 'L'
+}
+function indirect() {
+  const local = 'L'
+  return (0, eval)('local')    // ReferenceError
+}
+```
+
+- 직접 eval은 호출한 위치의 지역 변수와 `this`에 접근합니다. 간접 eval은 전역 스코프에서만 평가됩니다.
+- 일반 모드의 직접 eval 안에서 `var` 선언과 함수 선언은 둘러싼 함수 스코프에 만들어집니다. strict mode(호출 위치가 strict이거나 eval 코드가 `'use strict'`로 시작)에서는 eval이 자체 변수 스코프를 가져 밖으로 새지 않습니다. `let`, `const`, `class`는 항상 eval 안에 갇힙니다.
+
+```js
+function sloppy() {
+  eval('var leak = 1')
+  return typeof leak     // 'number' (함수 스코프에 선언)
+}
+function strictFn() {
+  'use strict'
+  eval('var leak = 1')
+  return typeof leak     // 'undefined' (eval 안에 갇힌다)
+}
+```
+
+- 간접 eval의 `var`는 전역 객체의 프로퍼티가 되고 configurable이 true라서 `delete`로 지워집니다. 일반 전역 `var`와 다른 점입니다. ES2025부터는 이렇게 eval이 만든 전역 `var`를 이후 `let`, `const`, `class`로 다시 선언해도 에러가 나지 않습니다.
+- 문자열에 구문 오류가 있으면 실행 시점에 SyntaxError가 던져집니다. `eval('1 +')`가 그 예이고, `try...catch`로 잡을 수 있습니다.
+
+쓰지 않는 이유는 세 가지입니다.
+
+- 보안: 외부 입력이 문자열에 섞이면 임의 코드가 실행됩니다. 브라우저의 CSP(Content Security Policy)는 `'unsafe-eval'`을 허용하지 않으면 `eval`과 `Function` 생성자를 차단합니다.
+- 성능: 직접 eval은 호출 위치의 모든 변수에 접근할 수 있어서 엔진이 그 스코프를 정적으로 분석하고 최적화하기 어렵습니다.
+- 도구 충돌: 번들러와 minifier가 지역 변수 이름을 바꾸면 문자열 속 변수 이름과 어긋납니다.
+
+| 하려는 일 | 대안 |
+|-----------|------|
+| JSON 문자열 파싱 | `JSON.parse`(자세히는 39편) |
+| 이름으로 프로퍼티·함수 선택 | `obj[name]` 또는 함수를 값으로 담은 객체 |
+| 수식 계산 | 파서를 직접 만들거나 라이브러리 사용 |
+| 문자열로 함수 생성 | `new Function('a', 'b', 'return a + b')` |
+
+`Function` 생성자는 전역 스코프에서 평가되어 지역 변수를 볼 수 없다는 점은 간접 eval과 같고, 코드 주입과 CSP 제약도 똑같이 받습니다.
+
+## isFinite·isNaN
+
+전역 `isNaN(value)`와 `isFinite(value)`는 인수를 먼저 Number로 변환한 뒤 판정합니다. `isNaN`은 변환 결과가 `NaN`이면 `true`, `isFinite`는 변환 결과가 `NaN`, `Infinity`, `-Infinity`가 아니면 `true`를 반환합니다.
+
+| 인수 | 변환 결과 | isNaN | isFinite |
+|------|-----------|-------|----------|
+| `42` | 42 | false | true |
+| `'42'` | 42 | false | true |
+| `''` | 0 | false | true |
+| `null` | 0 | false | true |
+| `true` | 1 | false | true |
+| `[]` | 0 | false | true |
+| `undefined` | NaN | true | false |
+| `'abc'` | NaN | true | false |
+| `{}` | NaN | true | false |
+| `Infinity` | Infinity | false | false |
+
+- 변환 규칙은 Number 변환과 같습니다. 빈 문자열과 공백 문자열, `null`은 0이 되고 `undefined`는 `NaN`이 됩니다(자세히는 08편).
+- 인수를 생략하면 `undefined`로 취급되어 `isNaN()`은 `true`, `isFinite()`는 `false`입니다.
+- Symbol과 BigInt는 Number로 변환할 수 없어 TypeError가 납니다. `isNaN(1n)`도 TypeError입니다.
+- `NaN`은 자기 자신과 같지 않아서 `x === NaN`은 항상 `false`입니다. `NaN` 판정에는 다음 세 가지를 씁니다.
+
+```js
+const x = NaN
+x === NaN          // false
+Number.isNaN(x)    // true
+Object.is(x, NaN)  // true
+x !== x            // true (NaN만 자기 자신과 다르다)
+```
+
+- 입력 검증에 전역 `isFinite`를 쓰면 `''`, `null`, `[]`, `true`가 통과해서 부적합합니다. 변환이 없는 `Number.isFinite`를 씁니다(자세히는 30편).
+- 유효하지 않은 `Date` 판정은 `Number.isNaN(date.getTime())`로 합니다(자세히는 31편).
+
+## 전역 isNaN과 Number.isNaN의 차이
+
+ES2015에서 추가된 `Number.isNaN`과 `Number.isFinite`는 변환을 하지 않고, 값이 number 타입일 때만 판정합니다. 전역 함수와 이름만 비슷한 별개 함수여서 `Number.isNaN === isNaN`은 `false`입니다.
+
+| 비교 | 전역 isNaN | Number.isNaN |
+|------|-----------|--------------|
+| 인수 처리 | Number로 변환 후 판정 | 변환 없음 |
+| `NaN` | true | true |
+| `'abc'` | true | false |
+| `undefined` | true | false |
+| `{}` | true | false |
+| `Symbol()`, `1n` | TypeError | false |
+| 묻는 것 | 숫자로 바꿀 수 없는 값인가 | 값이 정확히 NaN인가 |
+
+`isFinite`와 `Number.isFinite`의 차이도 같습니다. `isFinite('12')`와 `isFinite(null)`은 `true`지만 `Number.isFinite('12')`와 `Number.isFinite(null)`은 `false`입니다.
+
+- 값이 `NaN`인지 확인할 때는 `Number.isNaN`을 씁니다. 전역 `isNaN('abc')`가 `true`라고 해서 그 값이 `NaN`인 것은 아닙니다.
+- 문자열이 숫자로 해석되는지 확인할 때는 먼저 `Number()`로 바꾸고 `Number.isNaN`으로 판정합니다. 빈 문자열이 0이 된다는 점은 따로 검사해야 합니다.
+
+```js
+const n = Number('12px')
+Number.isNaN(n)    // true (숫자로 변환할 수 없다)
+const m = Number('')
+Number.isNaN(m)    // false (빈 문자열은 0이 된다)
+```
+
+## parseInt·parseFloat
+
+`parseInt(string, radix)`는 문자열 앞부분을 정수로 읽고, `parseFloat(string)`은 문자열 앞부분을 부동소수점 수로 읽습니다. 둘 다 숫자가 아닌 문자를 만나면 에러 없이 거기서 멈추고 그 앞까지만 변환합니다.
+
+`parseInt`는 다음 순서로 동작합니다.
+
+1. 인수가 문자열이 아니면 문자열로 바꿉니다.
+2. 앞쪽 공백(스페이스, 탭, 줄바꿈, NBSP 등)을 제거합니다.
+3. 부호(`+`, `-`)가 있으면 읽습니다.
+4. radix를 정합니다.
+5. 그 진법으로 해석할 수 없는 첫 문자에서 멈춥니다. 첫 문자부터 해석할 수 없으면 `NaN`입니다.
+
+| radix | 동작 |
+|-------|------|
+| 생략, `undefined`, `null`, `NaN`, 0 | 10진수. 단 문자열이 `0x`나 `0X`로 시작하면 16진수 |
+| 2–36 | 해당 진법. 16이면 `0x` 접두를 허용 |
+| 그 밖(1, 37, -1 등) | `NaN` |
+
+```js
+parseInt('42px')     // 42 (px에서 멈춘다)
+parseInt('px42')     // NaN (첫 문자부터 숫자가 아니다)
+parseInt('  -7')     // -7
+parseInt('3.9')      // 3 (. 에서 멈춘다. 반올림이 아닌 버림)
+parseInt('0x1f')     // 31 (0x 접두는 16진수)
+parseInt('1f', 16)   // 31
+parseInt('12', 2)    // 1 (2는 2진수 숫자가 아니다)
+parseInt('0b11')     // 0 (0b, 0o 접두는 인식하지 않는다)
+```
+
+- `.`, 지수 표기, 숫자 구분자 `_`에서도 멈춥니다. `parseInt('1e3')`과 `parseInt('1_000')`은 모두 `1`입니다.
+- 2의 53제곱을 넘는 정수 문자열은 정밀도를 잃습니다. `parseInt('9007199254740993')`은 `9007199254740992`입니다. 정확한 큰 정수는 BigInt를 씁니다(자세히는 30편).
+- 인식하는 숫자는 ASCII 숫자뿐입니다. 전각 숫자 `'１２'`는 `NaN`이고, NBSP는 공백으로 제거되지만 폭 없는 공백(U+200B)은 제거되지 않습니다.
+- 숫자를 넘기면 문자열로 바뀐 형태가 파싱됩니다. `parseInt(0.0000005)`는 `'5e-7'`이 되어 `5`, `parseInt(1e21)`은 `1`입니다. 소수 버림이 목적이면 `Math.trunc`를 씁니다(자세히는 30편).
+- ES5 이전 일부 엔진은 `'08'`처럼 0으로 시작하는 문자열을 8진수로 읽었습니다. 지금은 10진수로 읽지만 `0x` 접두 규칙 때문에 radix를 명시하는 것이 관례입니다: `parseInt(s, 10)`.
+
+가장 흔한 실수는 `map`에 `parseInt`를 그대로 넘기는 것입니다. `map`은 콜백에 (값, 인덱스, 배열)을 넘기므로 인덱스가 radix 자리에 들어갑니다.
+
+```js
+['1', '2', '3'].map(parseInt)
+// [1, NaN, NaN]  parseInt('1', 0), ('2', 1), ('3', 2)
+['1', '2', '3'].map(Number)                // [1, 2, 3]
+['1', '2', '3'].map(s => parseInt(s, 10))  // [1, 2, 3]
+```
+
+`parseFloat`은 앞쪽 공백을 제거한 뒤 10진수 숫자 리터럴로 읽을 수 있는 가장 긴 앞부분을 변환합니다. 부호, 소수점, 지수(`e`, `E`), `Infinity`를 읽고 radix는 없습니다.
+
+```js
+parseFloat('3.14abc')    // 3.14
+parseFloat('.5')         // 0.5
+parseFloat('5.')         // 5
+parseFloat('1e3')        // 1000
+parseFloat('1e')         // 1 (지수가 불완전하면 그 앞까지)
+parseFloat('-Infinity')  // -Infinity
+parseFloat('0x10')       // 0 (16진수를 인식하지 않는다)
+parseFloat('1,234.5')    // 1 (쉼표에서 멈춘다)
+parseFloat('1.2.3')      // 1.2
+```
+
+- 소문자 `'infinity'`와 `'NaN'`은 읽지 못해 `NaN`입니다.
+- `parseInt`와 `parseFloat`는 ES2015에서 `Number.parseInt`, `Number.parseFloat`로도 노출되며 전역 함수와 같은 함수 객체입니다. `Number.parseInt === parseInt`는 `true`입니다.
+
+`Number()`와의 차이는 전체를 보느냐 앞부분만 보느냐입니다.
+
+| 입력 | Number | parseInt | parseFloat |
+|------|--------|----------|------------|
+| `'12px'` | NaN | 12 | 12 |
+| `''` | 0 | NaN | NaN |
+| `null` | 0 | NaN | NaN |
+| `'  12  '` | 12 | 12 | 12 |
+| `'3.9'` | 3.9 | 3 | 3.9 |
+| `'1e3'` | 1000 | 1 | 1000 |
+| `'0x10'` | 16 | 16 | 0 |
+| `'1_000'` | NaN | 1 | 1 |
+
+문자열 전체가 숫자여야 할 때는 `Number()`가 엄격하고, `'12px'`처럼 앞부분만 읽어야 할 때는 `parseInt`와 `parseFloat`가 관대합니다.
+
+## encodeURI·encodeURIComponent
+
+URI에 쓸 수 없는 문자를 퍼센트 인코딩(percent-encoding)하는 함수입니다. 문자를 UTF-8 바이트로 바꾸고 각 바이트를 `%` 뒤에 대문자 16진수 두 자리로 적습니다. 두 함수는 변환하지 않고 남겨 두는 문자 집합이 다릅니다.
+
+- `encodeURI`: URI 전체에 씁니다. 영문자와 숫자, `- _ . ! ~ * ' ( )`, 그리고 URI 구조를 이루는 예약 문자 `; , / ? : @ & = + $ #`를 변환하지 않습니다.
+- `encodeURIComponent`: URI의 한 구성요소(쿼리 값, 경로 조각)에 씁니다. 영문자와 숫자, `- _ . ! ~ * ' ( )`만 변환하지 않고 예약 문자는 모두 변환합니다.
+
+```js
+const q = 'a b&c=한'
+encodeURIComponent(q)
+// 'a%20b%26c%3D%ED%95%9C'
+encodeURI('https://a.com/한 글?q=a b&r=1#h')
+// 'https://a.com/%ED%95%9C%20%EA%B8%80?q=a%20b&r=1#h'
+```
+
+- 값 하나를 URL에 넣을 때는 반드시 `encodeURIComponent`를 씁니다. `encodeURI`는 `&`, `=`, `#`, `+`를 그대로 두므로 값 안에 있으면 쿼리 구조가 깨집니다.
+
+```js
+const v = 'a&b=c'
+encodeURI(v)           // 'a&b=c' (&와 =가 그대로 남는다)
+encodeURIComponent(v)  // 'a%26b%3Dc'
+```
+
+- 완성된 URL 전체를 `encodeURIComponent`에 넣으면 `:`와 `/`까지 변환되어 URL이 아니게 됩니다. `'https://a.com'`은 `'https%3A%2F%2Fa.com'`이 됩니다.
+- 이미 인코딩된 문자열에 다시 쓰면 `%`가 `%25`로 바뀝니다. `encodeURI('a%20b')`는 `'a%2520b'`입니다(이중 인코딩).
+- 공백은 `%20`입니다. 폼 전송 형식의 `+`는 이 함수들과 무관하고, `+`를 인코딩하면 `%2B`가 됩니다.
+- `! ' ( ) *`는 `encodeURIComponent`도 변환하지 않습니다. RFC 3986에서 예약 문자인 이 다섯 개까지 변환해야 하면 직접 `%XX`로 치환합니다.
+- 짝이 맞지 않는 서로게이트 문자(lone surrogate)가 있으면 URIError가 납니다. `encodeURIComponent('\uD800')`이 그렇고, `isWellFormed()`로 미리 검사하거나 `toWellFormed()`로 고칠 수 있습니다(ES2024, 자세히는 33편).
+- 인수가 문자열이 아니면 문자열로 변환됩니다. 값이 비어 있을 수 있는 변수를 넣으면 `encodeURIComponent(undefined)`는 `'undefined'`, `encodeURIComponent(null)`은 `'null'`이 되어 그대로 URL에 들어갑니다.
+- `escape`와 `unescape`는 Annex B의 옛 함수입니다. 비ASCII 문자를 UTF-8이 아니라 `%XX`(Latin-1 범위, `escape('é')`는 `'%E9'`)나 `%uXXXX`(`escape('한')`은 `'%uD55C'`) 형식으로 만들어 URI 인코딩과 호환되지 않으므로 쓰지 않습니다.
+- 쿼리를 객체에서 만들 때는 호스트 API인 `URL`과 `URLSearchParams`가 인코딩을 대신합니다. ECMAScript 표준은 아니며, 공백을 `+`로 인코딩하는 점이 다릅니다.
+
+## decodeURI·decodeURIComponent
+
+퍼센트 인코딩된 문자열을 UTF-8로 해석해 원래 문자열로 되돌립니다. `decodeURIComponent`는 모든 시퀀스를 복원하고, `decodeURI`는 `encodeURI`가 변환하지 않는 예약 문자(`; , / ? : @ & = + $ #`)에 해당하는 시퀀스를 복원하지 않고 `%XX` 그대로 둡니다.
+
+```js
+decodeURIComponent('a%20b%26c')  // 'a b&c'
+decodeURI('a%20b%26c')           // 'a b%26c' (%26은 유지)
+decodeURI('%2F%3F%23')           // '%2F%3F%23' (예약 문자는 유지)
+decodeURIComponent('%2F%3F%23')  // '/?#'
+```
+
+- 16진수는 소문자(`%2f`)도 읽습니다. 유지되는 시퀀스는 입력한 모양 그대로 남습니다.
+- `+`를 공백으로 바꾸지 않습니다. `decodeURIComponent('a+b')`는 `'a+b'`입니다. 폼 형식 쿼리의 `+`를 공백으로 읽으려면 먼저 `+`를 공백으로 치환하거나 `URLSearchParams`를 씁니다.
+- 다음 경우에는 URIError가 납니다.
+  - `%` 뒤에 16진수 두 자리가 없을 때(`'%'`, `'%zz'`)
+  - UTF-8로 유효하지 않은 바이트 열일 때(`'%E9'`, 중간에 끊긴 `'%ED%95'`, 가장 짧은 형태가 아닌 `'%C0%80'`)
+- EUC-KR 같은 옛 인코딩으로 만든 `%C7%D1`은 UTF-8로 해석할 수 없어 URIError입니다. 외부에서 들어온 문자열은 `try...catch`로 감쌉니다.
+
+```js
+function safeDecode(s) {
+  try { return decodeURIComponent(s) }
+  catch (e) { return s }  // URIError
+}
+safeDecode('%E9')         // '%E9' (잘못된 UTF-8)
+safeDecode('%ED%95%9C')   // '한'
+```
+
+## 암묵적 전역
+
+선언 키워드(`var`, `let`, `const`) 없이 식별자에 값을 대입하면, 일반 모드에서 엔진이 그 이름의 프로퍼티를 전역 객체에 만듭니다. 이것이 암묵적 전역(implicit global)입니다.
+
+```js
+function setup() {
+  count = 1          // 선언 없이 대입
+}
+setup()
+count                // 1
+globalThis.count     // 1 (전역 객체의 프로퍼티가 되었다)
+```
+
+- 대입만 전역을 만듭니다. 선언되지 않은 식별자를 읽으면 ReferenceError입니다(`typeof`만 예외).
+- 암묵적 전역은 변수가 아니라 전역 객체의 프로퍼티입니다. 그래서 `var` 전역 변수와 다릅니다.
+
+| 비교 | `var x = 1` (전역) | `x = 1` (암묵적) |
+|------|--------------------|------------------|
+| 전역 객체 프로퍼티 | 됨 | 됨 |
+| 호이스팅 | 됨(값은 `undefined`) | 안 됨 |
+| configurable | false | true |
+| `delete` | `false`(삭제 불가) | `true`(삭제됨) |
+
+- 의도치 않게 만들어지는 흔한 경우는 체인 대입과 선언을 빠뜨린 반복 변수입니다.
+
+```js
+function f() {
+  let a = b = 1               // b만 암묵적 전역 (a는 지역)
+  for (i = 0; i < 3; i++) {}  // i 선언 누락
+}
+```
+
+- 전역 객체를 오염시켜 다른 스크립트와 이름이 충돌하고, 값이 함수 사이에서 몰래 공유되어 추적하기 어렵고, 전역에 영구히 남아 메모리가 회수되지 않습니다(자세히는 49편).
+- strict mode에서는 ReferenceError입니다. ES 모듈과 class 본문은 자동으로 strict mode이므로 같은 코드가 에러가 납니다(자세히는 19편). 린터의 `no-undef` 규칙으로도 잡을 수 있습니다.
+
+```js
+'use strict'
+function f() { undeclared = 1 }
+f()  // ReferenceError: undeclared is not defined
+```
+
+## 핵심 정리
+
+- 객체는 표준 빌트인(ECMA-262), 호스트(실행 환경), 사용자 정의로 나뉘며 `console`, `setTimeout`, `document`는 호스트입니다.
+- 정적 메서드는 생성자 자신에, 프로토타입 메서드는 `prototype`에 있어 인스턴스가 상속합니다.
+- 원시 값의 메서드 호출은 임시 래퍼 객체가 처리하고, `new`로 만든 래퍼는 `typeof`, 비교, 불리언 판정에서 원시 값과 달라 쓰지 않습니다.
+- 전역 객체는 `globalThis`로 접근하고, 전역 `var`와 함수 선언만 그 프로퍼티가 되며 `let`, `const`, `class`는 되지 않습니다.
+- 전역 함수는 변환에 관대합니다. `isNaN`은 Number로 변환한 뒤 판정하므로 `NaN` 확인은 `Number.isNaN`, `parseInt`는 radix를 명시하고, URL의 값은 `encodeURIComponent`로 인코딩합니다.
+- `eval`은 쓰지 않고, 선언 없는 대입은 일반 모드에서 암묵적 전역이 되므로 strict mode로 막습니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="isNaN('abc')와 Number.isNaN('abc')의 결과를 차례로 나열한 것은?"
+  options={['true, true', 'true, false', 'false, true', 'false, false']}
+  correctAnswer={2}
+  explanation="전역 isNaN은 인수를 Number로 변환하므로 'abc'가 NaN이 되어 true입니다. Number.isNaN은 변환 없이 값이 number 타입의 NaN인지만 판정하는데 'abc'는 문자열이므로 false입니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="['1', '2', '3'].map(parseInt)의 결과는?"
+  options={['[1, 2, 3]', '[1, 2, NaN]', '[NaN, NaN, NaN]', '[1, NaN, NaN]']}
+  correctAnswer={4}
+  explanation="map은 콜백에 (값, 인덱스, 배열)을 넘기므로 인덱스가 radix로 전달됩니다. parseInt('1', 0)은 radix 0을 10진수로 취급해 1이고, parseInt('2', 1)은 radix 1이 허용 범위 2에서 36을 벗어나 NaN이며, parseInt('3', 2)는 2진수에 숫자 3이 없어 NaN입니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="new Boolean(false)를 if 문의 조건으로 쓰면 어떻게 되는가?"
+  options={['else 블록이 실행된다', 'TypeError가 발생한다', 'if 블록이 실행된다', '아무 블록도 실행되지 않는다']}
+  correctAnswer={3}
+  explanation="new로 만든 Boolean은 false를 담고 있어도 객체이고, 객체는 항상 참으로 평가됩니다. 그래서 if 블록이 실행됩니다. new 없이 Boolean(false)를 호출하면 원시 값 false가 반환됩니다."
+/>
+
+## 참고 자료
+
+- [ECMA-262 — The Global Object](https://tc39.es/ecma262/#sec-global-object)
+- [ECMA-262 — ECMAScript Language Specification](https://tc39.es/ecma262/)
+- [MDN — Standard built-in objects](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_objects)
+- [MDN — globalThis](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_objects/globalThis)
+- [MDN — Number](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_objects/Number)
+- [MDN — undefined](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_objects/undefined)
+- [MDN — eval()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_objects/eval)
+- [MDN — isNaN()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_objects/isNaN)
+- [MDN — Number.isNaN()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_objects/Number/isNaN)
+- [MDN — isFinite()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_objects/isFinite)
+- [MDN — parseInt()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_objects/parseInt)
+- [MDN — parseFloat()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_objects/parseFloat)
+- [MDN — encodeURI()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_objects/encodeURI)
+- [MDN — encodeURIComponent()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_objects/encodeURIComponent)
+- [MDN — decodeURI()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_objects/decodeURI)
+- [MDN — decodeURIComponent()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_objects/decodeURIComponent)
+- [MDN — escape()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_objects/escape)
+- [MDN — Strict mode](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Strict_mode)
+- [TC39 Finished Proposals](https://github.com/tc39/proposals/blob/main/finished-proposals.md)
+- [TC39 — Array.prototype.flat 제안 (flatten에서 개명)](https://github.com/tc39/proposal-flatMap)
+- [TC39 — Redeclarable global eval-introduced vars](https://github.com/tc39/proposal-redeclarable-global-eval-vars)

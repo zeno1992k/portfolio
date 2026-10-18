@@ -1,0 +1,420 @@
+---
+title: '47. View Transitions와 레이아웃 애니메이션'
+description: 'View Transitions API의 동작과 startViewTransition 콜백·Promise, view-transition-name·class·types, 동일 문서·교차 문서·요소 범위 전환, skip과 상호작용, FLIP 레이아웃 애니메이션, 컴포넌트 전환 패턴을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** View Transitions API가 상태 변경 앞뒤를 어떻게 스냅샷으로 잇는지 설명하고, 이름·class·types로 전환을 제어하며, 건너뛰는 조건과 상호작용 제약을 알고 FLIP과 비교해 컴포넌트 전환을 설계할 수 있습니다.
+</Callout>
+
+## View Transitions API
+
+View Transitions API는 DOM을 바꾸는 코드를 감싸 "바꾸기 전 화면"과 "바꾼 뒤 화면"을 이미지로 찍어 그 사이를 애니메이션으로 잇는 API입니다. 요소를 직접 움직이는 코드를 쓰지 않고도 화면 전체나 이름 붙인 요소의 변화가 부드럽게 이어집니다.
+
+```js
+function update() { list.append(newItem) }
+if (document.startViewTransition) {
+  document.startViewTransition(update)
+} else {
+  update()
+}
+```
+
+동작 순서는 다음과 같습니다.
+
+1. 현재 화면(옛 상태)을 스냅샷으로 캡처합니다.
+2. 콜백을 실행해 DOM을 바꿉니다.
+3. 바뀐 화면(새 상태)을 캡처합니다.
+4. 의사 요소 트리를 만들고 애니메이션을 실행합니다.
+5. 끝나면 트리를 제거하고 실제 DOM이 보입니다.
+
+전환 중에는 아래 의사 요소 트리가 문서 위에 그려집니다.
+
+```
+::view-transition
+└─ ::view-transition-group(이름)
+   └─ ::view-transition-image-pair(이름)
+      ├─ ::view-transition-old(이름)   옛 상태 (정지 이미지)
+      └─ ::view-transition-new(이름)   새 상태 (실제 모습)
+```
+
+- 이름은 `view-transition-name`으로 붙입니다. 이름마다 그룹이 하나씩 생기고 `*`로 전부 선택할 수 있습니다.
+- 문서 루트에는 UA 스타일이 `root`라는 이름을 줍니다. 이름을 따로 붙이지 않아도 화면 전체가 `root` 그룹으로 전환됩니다.
+- 기본 애니메이션은 그룹이 옛 위치·크기에서 새 위치·크기로 이동하고, 옛 이미지는 사라지며 새 이미지가 나타나는 0.25초 교차 페이드입니다(CSS View Transitions 표준의 UA 스타일).
+- 그룹의 `animation-duration` 같은 타이밍은 하위 의사 요소가 상속합니다.
+- 전환 레이어는 top layer를 포함한 모든 콘텐츠 위에 그려집니다.
+
+```css
+.hero { view-transition-name: hero; }
+::view-transition-group(hero) {
+  animation-duration: 0.4s;
+  animation-timing-function: ease-in-out;
+}
+```
+
+기본 애니메이션을 바꾸려면 위처럼 CSS로 의사 요소를 선택하거나, 전환이 준비된 뒤 Web Animations API로 의사 요소에 직접 애니메이션을 붙입니다.
+
+```js
+await transition.ready
+document.documentElement.animate(
+  { clipPath: ['inset(0 0 100% 0)', 'inset(0)'] },
+  {
+    duration: 400,
+    pseudoElement: '::view-transition-new(root)',
+  },
+)
+```
+
+핵심 설계 원칙은 전환이 상태 변경에 대한 시각적 개선이라는 점입니다. 전환을 만들지 못해도 DOM 갱신은 반드시 일어납니다(아래 절).
+
+## startViewTransition()과 ViewTransition
+
+`document.startViewTransition()`은 세 가지 형태로 부릅니다.
+
+```js
+document.startViewTransition()               // 콜백 없이
+document.startViewTransition(update)         // 콜백
+document.startViewTransition({ update, types: ['slide'] })
+```
+
+반환값 `ViewTransition`이 전환의 진행을 알려 줍니다.
+
+| 멤버 | 이행·거부 |
+|------|-----------|
+| `updateCallbackDone` | 콜백이 돌려준 Promise가 이행되면 이행, 거부되면 거부 |
+| `ready` | 의사 요소 트리가 만들어지고 애니메이션이 곧 시작될 때 이행. 전환이 시작되지 못하면 거부 |
+| `finished` | 새 상태가 완전히 보이고 상호작용할 수 있을 때 이행. 콜백이 거부된 경우에만 거부 |
+| `types` | 전환의 type 집합(아래 절) |
+| `skipTransition()` | 애니메이션을 건너뜀(아래 절) |
+
+순서는 `updateCallbackDone`, `ready`, `finished`입니다.
+
+```js
+const t = document.startViewTransition(update)
+await t.updateCallbackDone // DOM이 바뀜
+await t.ready              // 의사 요소가 준비됨. 커스텀 애니메이션 시점
+await t.finished           // 끝. 정리 시점
+```
+
+- 콜백은 옛 상태를 캡처한 직후 호출됩니다. 비동기 함수여도 되고, 반환한 Promise가 이행되면 새 상태를 캡처해 다음 프레임에 애니메이션을 시작합니다. 콜백이 거부되면 전환을 건너뜁니다.
+- 콜백은 전환이 일어나지 못하는 경우에도 항상 호출됩니다. 전환이 막혀도 상태 변경은 막히지 않습니다.
+- 옛 상태 캡처 뒤 새 상태 캡처 전까지 화면은 갱신되지 않고(렌더링 억제), 이 동안 포인터 입력은 문서 요소로만 전달됩니다. 콜백 안에서 느린 `fetch`를 기다리면 그만큼 화면이 멈추므로 데이터는 콜백 전에 준비해 두고 콜백은 DOM 갱신만 합니다.
+- `ready`와 `updateCallbackDone`은 거부되었을 때 아무도 처리하지 않으면 `unhandledrejection`이 됩니다. 쓰지 않더라도 `.catch(() => {})`로 받습니다. `finished`는 같은 이유의 중복 보고를 막도록 이미 처리된 것으로 표시되어 있습니다.
+- 콜백이 던진 예외나 DOM 갱신 실패는 `updateCallbackDone`이 거부되어 알려 줍니다.
+
+**흔한 실수:** 지원하지 않는 브라우저에서 `document.startViewTransition`이 없어 `TypeError`가 나는 것입니다. 존재를 확인하고 없으면 `update()`를 바로 호출합니다.
+
+## view-transition-name, view-transition-class, 전환 types
+
+`view-transition-name`은 요소를 독립된 전환 단위로 만들고, `view-transition-class`는 이름 없이 여러 그룹에 같은 스타일을 입히며, types는 전환의 종류(앞으로, 뒤로)를 구분해 스타일을 고르는 장치입니다.
+
+### view-transition-name
+
+- 값은 `none`(기본) 또는 식별자입니다. 이름이 붙은 요소는 별도 그룹으로 캡처되어 나머지 화면과 독립적으로 이동·크기 변화합니다.
+- 한 전환 안에서 이름은 유일해야 합니다. 같은 이름이 한 상태에 둘 이상이면 전환이 중단됩니다(`ready` 거부, 콜백은 호출됨). 옛 상태의 요소와 새 상태의 요소가 같은 이름이면 같은 요소의 이전·이후 모습으로 짝지어집니다. 이것이 공유 요소 전환의 원리입니다.
+- `none`, `auto`, `match-element`는 이름으로 쓸 수 없는 키워드입니다.
+- `view-transition-name: match-element`는 요소 정체성에 따라 이름을 자동으로 붙입니다. 목록 항목마다 이름을 짓지 않아도 재정렬이 추적됩니다(Chrome·Edge 137, Firefox 144, Safari 18.4부터).
+- 전환이 애니메이션 중인 동안 이름 붙은 요소는 원래 DOM 위치에서 그려지지 않고, 이미지가 `::view-transition-new()`에서 그려집니다.
+- 이름은 트리 범위를 가지며, 현재 문서 범위 전환에서는 문서에 속한 이름만 반영됩니다(표준 노트). 이름은 문서 CSS로 지정하는 쪽이 안전합니다.
+
+```css
+.card { view-transition-name: match-element; }
+```
+
+### view-transition-class
+
+이름은 요소마다 달라야 하지만 스타일은 같게 주고 싶을 때 쓰는 속성입니다. 그룹을 `*.클래스`로 선택합니다.
+
+```css
+.card { view-transition-class: card; }
+::view-transition-group(*.card) {
+  animation-duration: 0.3s;
+}
+```
+
+Baseline 2025입니다.
+
+### 전환 types
+
+type은 전환에 붙이는 문자열 꼬리표입니다. 같은 요소 구성이어도 앞으로 이동과 뒤로 이동의 애니메이션을 다르게 할 때 씁니다.
+
+```js
+document.startViewTransition({
+  update: () => render(next),
+  types: ['forward'],
+})
+// 도중에도: transition.types.add('slow')
+```
+
+```css
+html:active-view-transition-type(forward) {
+  &::view-transition-old(root) {
+    animation-name: slide-out-left;
+  }
+}
+```
+
+- `types`는 문자열 배열이고, `transition.types`는 `Set`처럼 `add`·`delete`·`has`로 다루는 집합입니다.
+- `:active-view-transition`은 전환 중인 문서를 고르는 의사 클래스입니다. `:active-view-transition-type()`은 특정 type일 때만 매치됩니다.
+- 교차 문서 전환에서는 `@view-transition` 규칙의 `types` 서술자나 `pageswap`·`pagereveal`에서 지정합니다.
+
+| 기능 | 지원 |
+|------|------|
+| 기본 API, `view-transition-name` | Baseline 2025 (Chrome·Edge 111, Firefox 144, Safari 18) |
+| `view-transition-class`, `match-element` | Baseline 2025 |
+| `types`와 `:active-view-transition-type()` | Baseline 2026 (Chrome·Edge 125, Firefox 147, Safari 18.2) |
+
+## 동일 문서 전환
+
+동일 문서 전환은 한 문서 안에서 `startViewTransition()`으로 DOM을 바꿀 때 일어나는 전환입니다. 단일 페이지 앱의 화면 전환, 목록 갱신, 테마 변경에 쓰고 Baseline 2025입니다. 한 번에 하나의 전환만 활성화됩니다.
+
+- 호출 한 줄로 감싸는 것이 전부이므로 점진적 향상에 알맞습니다. 미지원이면 `update()`를 그대로 실행합니다.
+- 프레임워크와 라우터는 상태를 바꾸는 부분(렌더링, DOM 패치)을 콜백으로 넘깁니다. 콜백이 끝났을 때 DOM이 새 상태여야 하므로 비동기 렌더링이면 완료된 뒤에 Promise를 이행시킵니다(렌더링 구조는 30편).
+- 라우터가 Navigation API를 쓰면 `navigate` 이벤트의 `intercept()` 핸들러 안에서 전환을 시작합니다(자세히는 35편).
+- 한 상태 변경에 전환이 하나입니다. 새 `startViewTransition()`을 부르면 진행 중이던 전환은 `AbortError`로 건너뛰어집니다(아래 "skipTransition()과 전환 중 상호작용").
+
+```js
+function withTransition(update) {
+  if (!document.startViewTransition) {
+    return Promise.resolve(update())
+  }
+  const t = document.startViewTransition(update)
+  t.ready.catch(() => {})
+  return t.updateCallbackDone
+}
+```
+
+## 교차 문서 전환
+
+교차 문서 전환은 서로 다른 문서(다중 페이지) 사이의 이동을 전환으로 잇는 기능입니다. JS 없이 CSS 한 줄로 켭니다.
+
+```css
+/* 이동 전·후 두 문서 모두에 */
+@view-transition {
+  navigation: auto;
+}
+```
+
+전환이 일어나는 조건은 다음과 같습니다.
+
+- 두 문서가 같은 출처이고 교차 출처 리다이렉트가 없습니다.
+- 탐색이 끝날 때까지 페이지가 보이는 상태입니다.
+- 사용자가 링크 클릭·폼 제출, 또는 브라우저의 뒤로·앞으로로 이동합니다. 주소창 입력은 제외됩니다.
+- 두 문서 모두 `@view-transition`으로 선택했습니다.
+
+두 문서에는 각각 `ViewTransition` 객체가 있고 이벤트로 접근합니다.
+
+| 이벤트 | 문서 | 시점 |
+|--------|------|------|
+| `pageswap` | 떠나는 문서 | 문서가 교체되기 직전. `viewTransition`(전환 대상이면 null이 아님)과 `activation`(리다이렉트 후 URL 등 탐색 정보) |
+| `pagereveal` | 도착한 문서 | 첫 프레임을 그리기 직전. `viewTransition`을 받고, 그때 `updateCallbackDone`은 이미 이행된 상태 |
+
+```js
+window.addEventListener('pagereveal', (e) => {
+  if (!e.viewTransition) return          // 전환 대상이 아님
+  e.viewTransition.types.add('forward')  // type 지정
+  // e.viewTransition.skipTransition()   // 건너뛰기
+})
+```
+
+- 두 이벤트에서 type을 정하고, 캡처된 요소를 마지막으로 손보고, 전환을 건너뛸 수 있습니다.
+- `pageswap`의 `finished`는 문서가 BFCache에서 복원될 때의 정리에 쓸 수 있습니다.
+- `link rel="expect"`로 중요한 콘텐츠가 파싱될 때까지 렌더링을 막아 두 브라우저의 첫 프레임을 맞출 수 있습니다(MDN).
+- 지원은 Baseline이 아닙니다. `@view-transition`은 Chrome·Edge 126, Safari 18.2부터이고 Firefox는 지원하지 않습니다. `pagereveal` 이벤트는 Chrome·Edge 123, Safari 18.2, `pageswap` 이벤트는 Chrome·Edge 124 이상입니다(web-features 3.40.1 기준).
+- 미지원 브라우저에서는 전환 없이 평범한 페이지 이동이 일어나므로 점진적 향상으로 켭니다.
+
+## 요소 범위 전환
+
+요소 범위 전환은 문서 전체가 아니라 한 요소가 자기 하위 트리에 대해 여는 전환입니다. 문서 단위 전환은 한 문서에 하나만 활성화되지만, 요소 범위 전환은 여러 영역이 동시에 각자 전환할 수 있습니다. 하위 트리의 스크롤·필터·`z-index`의 영향을 받는다는 점도 다릅니다. 문서 단위 전환은 항상 다른 콘텐츠 위의 별도 레이어에 그려집니다.
+
+```js
+// 지원 시: 요소가 자기 하위 트리의 전환을 시작
+if ('startViewTransition' in Element.prototype) {
+  panel.startViewTransition(() => {
+    panel.replaceChildren(next)
+  })
+}
+```
+
+- API: `Element.startViewTransition()`, `Element.activeViewTransition`, `ViewTransition.transitionRoot`(전환 범위의 루트 요소), CSS `view-transition-scope`(`all`, `none`)로 이름의 범위를 나눕니다.
+- 전환을 여는 요소는 레이아웃 격리(layout containment)를 자동으로 적용받습니다. 그 결과가 한 덩어리로 캡처되어야 하기 때문입니다.
+- Baseline이 아닙니다. Chrome·Edge 147에서만 지원합니다(web-features 3.40.1 기준). 컴포넌트가 의존하지 말고 기능 감지로 쓰며, 없으면 문서 단위 전환이나 FLIP, 전환 없는 갱신으로 대체합니다.
+
+## skipTransition()과 전환 중 상호작용
+
+`skipTransition()`은 전환의 애니메이션 부분만 건너뜁니다. DOM을 바꾸는 콜백은 그대로 호출되고 새 상태가 즉시 보입니다. 시각 전환만 건너뛰는 것이며 상태 변경을 되돌리거나 막지 않습니다. 전환이 끝난 뒤에 호출하면 아무 일도 없습니다.
+
+```js
+const t = document.startViewTransition(update)
+skipBtn.onclick = () => t.skipTransition()
+t.ready.catch(() => {}) // 건너뛰면 ready는 거부됨
+```
+
+건너뛰어진 전환에서 Promise는 다음과 같습니다.
+
+- `updateCallbackDone`: 콜백 결과를 따릅니다.
+- `ready`: 거부됩니다. 의사 요소 애니메이션이 시작되지 않았기 때문입니다.
+- `finished`: 이행됩니다. 새 상태에는 도달했기 때문입니다. 콜백이 거부된 경우에만 거부됩니다.
+
+브라우저가 스스로 건너뛰는 경우도 있습니다.
+
+- 문서가 숨겨진 상태에서 시작하면 `InvalidStateError`로 건너뜁니다.
+- 새 `startViewTransition()`을 호출하면 이전 전환이 `AbortError`로 건너뛰어집니다. 이때 두 콜백이 동시에 돌며 순서가 뒤바뀔 수 있어, 갱신 순서는 호출자가 관리해야 합니다.
+- 같은 `view-transition-name`이 한 상태에 둘 이상이거나 전환 중 뷰포트 크기가 바뀌어도 건너뜁니다.
+
+전환 중 상호작용에는 제약이 있습니다.
+
+- 새 상태 캡처 전까지는 포인터 입력이 문서 요소로만 전달됩니다(렌더링 억제).
+- 애니메이션이 진행되는 동안 이름이 붙은 요소는 원래 위치에서 그려지지도 클릭을 받지도 않습니다(표준). 루트 요소도 이름이 `root`로 캡처되므로 문서 단위 전환 중에는 화면이 사실상 입력에 반응하지 않습니다. 전환은 짧게 유지합니다(기본값은 0.25초).
+- 접근성 트리는 바뀌지 않습니다. 옛 화면과 새 화면이 겹쳐 있는 동안 포커스·라이브 리전이 혼동될 수 있다고 MDN이 경고합니다.
+- 모션 줄이기를 요청한 사용자에게는 전환 애니메이션을 끕니다.
+
+```css
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) { animation: none; }
+}
+```
+
+## Layout Animation
+
+레이아웃 애니메이션은 요소의 위치·크기·순서가 바뀔 때 그 변화를 부드럽게 보여 주는 일입니다. `top`, `left`, `width`, `height`를 직접 전환하면 매 프레임 레이아웃을 다시 계산해 비용이 큽니다. 그래서 레이아웃은 한 번만 바꾸고 `transform` 같은 값으로 변화를 연출합니다.
+
+- 높이가 `auto`인 영역은 보간되지 않습니다. 감싸는 그리드의 행 크기를 `grid-template-rows`로 `0fr`에서 `1fr`로 전환하는 방법이 널리 쓰입니다(그리드 트랙 애니메이션은 Baseline 2022부터). 이 방법은 매 프레임 레이아웃을 계산하므로 작은 영역에 씁니다.
+- 레이아웃 변경 후 요소가 이동한 거리를 연출하려면 FLIP이나 View Transitions를 씁니다.
+
+### FLIP 기법
+
+FLIP은 First, Last, Invert, Play의 약자로, 변화의 앞뒤 위치를 측정한 뒤 차이만큼 거꾸로 이동시켜 놓고 원래 자리로 풀어 주는 기법입니다.
+
+| 단계 | 하는 일 |
+|------|---------|
+| First | 변경 전 위치를 `getBoundingClientRect()`로 측정 |
+| Last | DOM을 바꾸고 변경 후 위치를 측정 |
+| Invert | 두 위치의 차이만큼 반대로 이동하는 `transform`을 적용해 눈에는 처음 자리로 보이게 함 |
+| Play | `transform`을 제거하며 애니메이션 |
+
+측정 결과가 한 번 나오면 애니메이션은 `transform`만 쓰므로 레이아웃을 일으키지 않습니다. WAAPI로 쓰면 Invert와 Play가 `animate()` 한 번으로 끝납니다.
+
+```js
+const rect = (el) => el.getBoundingClientRect()
+function flip(items, update) {
+  const first = new Map(items.map((el) => [el, rect(el)]))
+  update() // DOM 순서·위치 변경
+  for (const el of items) {
+    const dx = first.get(el).left - rect(el).left
+    const dy = first.get(el).top - rect(el).top
+    if (dx || dy) el.animate(
+      { transform: [`translate(${dx}px,${dy}px)`, 'none'] },
+      { duration: 250, easing: 'ease-out' },
+    )
+  }
+}
+```
+
+- 읽기(First)를 모두 끝낸 뒤에 쓰기(`update`)를 하고, 다시 읽기(Last)를 합니다. 읽기와 쓰기를 섞으면 레이아웃이 반복 계산됩니다(자세히는 6편).
+- 측정값은 현재 `transform`을 포함합니다. First는 진행 중 애니메이션의 현재 화면 위치를 그대로 써서 중단에도 끊김 없이 이어지지만, 이미 돌고 있던 애니메이션은 Last를 재기 전에 `cancel()`해야 값이 정확합니다.
+- 크기가 바뀌는 요소에 `scale`을 쓰면 안의 내용이 일그러집니다. 이동만 연출하거나 자식에 역 스케일을 줍니다.
+- 새로 생긴 요소(First 없음)와 사라질 요소는 FLIP 대상이 아닙니다. 진입·퇴장 효과를 따로 줍니다(자세히는 46편).
+
+| 비교 | FLIP | View Transitions |
+|------|------|------------------|
+| 대상 | 실제 요소 | 캡처된 이미지 |
+| 상호작용 | 애니메이션 중에도 가능 | 전환 중에는 사실상 불가 |
+| 범위 | 요소별 코드 필요 | 이름만 붙이면 자동 추적, 화면 전체 교차 페이드도 가능 |
+| 문서 간 이동 | 불가 | 교차 문서 전환 가능 |
+| 지원 | 모든 WAAPI 지원 환경 | 기능 감지 필요(Baseline 2025) |
+| 모양 | 내용이 왜곡될 수 있음 | 크기 변화는 이미지 보간 |
+
+**흔한 실수:** 매 프레임 `width`·`height`·`top`·`left`를 직접 바꿔 애니메이션하는 것, 이미지 로드나 폰트 교체로 `update()` 직후에도 위치가 계속 바뀌는 상태에서 Last를 측정하는 것입니다.
+
+## 컴포넌트 전환 애니메이션 패턴
+
+컴포넌트의 상태 변화에 전환을 붙이는 패턴은 변화의 종류별로 고르는 도구가 다릅니다.
+
+| 패턴 | 도구 | 요점 |
+|------|------|------|
+| 탭·화면 전환 | `startViewTransition` + types | type으로 방향별 애니메이션 |
+| 목록 재정렬·추가·삭제 | `match-element` 전환 또는 FLIP | 항목에 이름 자동 부여 |
+| 공유 요소(썸네일에서 상세로) | `view-transition-name` | 전환 직전 한 요소에만 이름을 붙임 |
+| 접기·펴기(아코디언) | `grid-template-rows` 전환 또는 WAAPI | 레이아웃 비용에 유의 |
+| 오버레이 진입·퇴장 | `@starting-style`, `allow-discrete` | 자세히는 46편 |
+| 라우트 변경 | Navigation API 핸들러 + `startViewTransition` | 갱신 완료 후 Promise 이행 |
+
+공유 요소 전환은 이름이 한 상태에 하나여야 한다는 규칙을 이용합니다. 옛 요소에 이름을 붙이고, 콜백 안에서 이름을 새 요소로 옮깁니다.
+
+```js
+async function openDetail(card, id) {
+  card.style.viewTransitionName = 'hero'
+  const t = document.startViewTransition(() => {
+    card.style.viewTransitionName = '' // 옛 요소에서 제거
+    showDetail(id)                     // 새 요소에 hero 부여
+  })
+  await t.finished.catch(() => {})
+}
+```
+
+- 항목마다 이름을 미리 붙여 두면 같은 이름이 한 화면에 여러 개가 되어 전환이 중단됩니다. 전환 직전에 필요한 요소에만 붙이거나 `match-element`를 씁니다.
+- 한 문서에 활성 전환은 하나뿐입니다. 컴포넌트마다 제각각 `startViewTransition()`을 호출하면 서로를 건너뛰게 만듭니다. 전환 호출은 애플리케이션 쪽 한 곳(라우터, 상태 저장소)에서 맡고, 컴포넌트는 이벤트로 "바뀐다"를 알립니다(컴포넌트 통신은 25편, 앱 구조는 33편).
+- Shadow DOM 안의 요소에 shadow 스타일로 이름을 붙이면 문서 범위 전환에 반영되지 않습니다. 이름은 문서 CSS가 닿는 호스트 요소나 슬롯으로 들어온 light DOM 요소에 붙입니다(자세히는 21편, 22편).
+- 컴포넌트 라이브러리는 전환을 필수 의존으로 만들지 않고, 미지원 환경에서도 상태 변경 자체는 동작해야 합니다. 전환 여부를 호출자가 정할 수 있게 옵션이나 이벤트를 제공합니다.
+- 모션 줄이기를 지킵니다(46편). 라우트 전환은 갱신 렌더링이 끝났을 때 Promise를 이행시켜야 새 상태가 제대로 캡처됩니다.
+
+```js
+navigation.addEventListener('navigate', (e) => {
+  if (!e.canIntercept) return
+  const url = e.destination.url
+  e.intercept({
+    handler: () => withTransition(() => render(url)),
+  })
+})
+```
+
+## 핵심 정리
+
+- View Transitions API는 상태 변경 앞뒤를 스냅샷으로 캡처해 의사 요소 트리로 잇고, 콜백은 전환이 불가능해도 항상 호출됩니다.
+- `ready`는 커스텀 애니메이션 시점, `finished`는 정리 시점이며, 건너뛰면 `ready`는 거부되고 `finished`는 이행되므로 `ready`·`updateCallbackDone`의 거부를 처리합니다.
+- 이름은 한 전환 안에서 유일해야 하고 같은 이름의 옛·새 요소가 짝지어지며, `view-transition-class`는 스타일 공유, types는 전환 종류별 스타일 선택에 씁니다.
+- 동일 문서 전환은 Baseline 2025, 교차 문서 전환(`@view-transition`, `pageswap`, `pagereveal`)은 미Baseline, 요소 범위 전환은 Chromium 전용입니다.
+- 전환 중 이름 붙은 요소는 입력을 받지 못하므로 짧게 유지하고 모션 줄이기에서는 끕니다.
+- FLIP은 앞뒤 위치를 측정해 `transform`으로 연출하는 실제 요소 방식이고, 컴포넌트 전환은 호출을 한 곳에 모아 중복 호출과 이름 충돌을 피합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="같은 view-transition-name을 가진 요소가 한 상태에 둘 있어 전환이 만들어지지 못했을 때 startViewTransition에 넘긴 콜백은?"
+  options={['호출되지 않는다', '호출되지만 ready와 finished가 모두 거부된다', '호출되고 DOM 갱신은 일어나며 ready는 거부된다', '첫 번째 요소만 갱신된다']}
+  correctAnswer={3}
+  explanation="전환은 상태 변경에 대한 시각적 개선이라서 전환이 시작되지 못해도 콜백은 항상 호출되어 DOM이 갱신됩니다. 이름 중복처럼 전환이 시작되지 못하면 ready가 거부됩니다. finished는 콜백이 거부된 경우에만 거부되므로 이 경우에는 이행됩니다."
+  optionExplanations={['콜백은 전환 가능 여부와 상관없이 항상 호출됩니다.', 'finished는 콜백이 거부된 경우에만 거부되며 이름 중복으로는 이행됩니다.', '콜백은 호출되어 DOM이 갱신되고, 전환이 시작되지 못했으므로 ready만 거부됩니다.', '요소별 갱신 개념이 아니며 콜백이 DOM 전체 갱신을 수행합니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="교차 문서 전환을 켜기 위해 필요한 조건으로 올바른 것은?"
+  options={['떠나는 문서에서만 @view-transition을 선언하면 된다', '서로 다른 출처의 문서 사이에서도 동작한다', '주소창에 URL을 입력해 이동할 때도 전환이 일어난다', '두 문서가 같은 출처이고 둘 다 navigation auto로 선택해야 한다']}
+  correctAnswer={4}
+  explanation="교차 문서 전환은 같은 출처의 두 문서가 모두 @view-transition 규칙의 navigation 서술자를 auto로 선택해야 하고, 링크 클릭이나 폼 제출, 뒤로 가기 같은 사용자 탐색일 때 일어납니다. 주소창 입력은 제외되고 교차 출처 리다이렉트가 있어도 안 됩니다."
+  optionExplanations={['이동 전과 후 두 문서 모두에 선언해야 합니다.', '같은 출처만 지원하며 교차 출처에서는 전환이 일어나지 않습니다.', '주소창에서 입력한 이동은 전환 대상에서 제외됩니다.', '같은 출처이고 두 문서 모두 선택했을 때 전환 조건을 충족합니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="FLIP 기법에서 Invert 단계가 하는 일은?"
+  options={['변경 전 위치를 측정한다', 'DOM을 바꾸고 변경 후 위치를 측정한다', '변경 전후 위치의 차이만큼 반대로 이동하는 transform을 적용한다', 'transform을 제거하며 원래 자리로 애니메이션한다']}
+  correctAnswer={3}
+  explanation="FLIP은 First(변경 전 측정), Last(변경 후 측정), Invert(차이만큼 반대로 이동시켜 눈에는 처음 자리로 보이게 함), Play(transform을 풀며 애니메이션)의 순서입니다. Invert는 이미 새 자리에 있는 요소를 transform으로 옛 자리에 되돌려 놓는 단계입니다."
+  optionExplanations={['변경 전 위치를 측정하는 것은 First 단계입니다.', '변경 후 위치를 측정하는 것은 Last 단계입니다.', 'Invert 단계는 위치 차이의 반대 방향 transform을 적용합니다.', 'transform을 제거하며 애니메이션하는 것은 Play 단계입니다.']}
+/>
+
+## 참고 자료
+
+- [CSS View Transitions Module Level 1](https://drafts.csswg.org/css-view-transitions-1/)
+- [CSS View Transitions Module Level 2](https://drafts.csswg.org/css-view-transitions-2/)
+- [MDN — View Transition API](https://developer.mozilla.org/en-US/docs/Web/API/View_Transition_API)
+- [MDN — Document.startViewTransition()](https://developer.mozilla.org/en-US/docs/Web/API/Document/startViewTransition)
+- [MDN — ViewTransition](https://developer.mozilla.org/en-US/docs/Web/API/ViewTransition)
+- [Paul Lewis — FLIP Your Animations](https://aerotwist.com/blog/flip-your-animations/)
+- [web-features 데이터 패키지 (Baseline 상태)](https://cdn.jsdelivr.net/npm/web-features/data.json)

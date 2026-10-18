@@ -1,0 +1,462 @@
+---
+title: '38. Streams와 인코딩·압축'
+description: 'ReadableStream·WritableStream·TransformStream, 파이프와 백프레셔, 바이트 스트림, 취소, 텍스트 인코딩과 압축 스트림, 업로드·전송 가능한 스트림, NDJSON 파싱을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 스트림으로 데이터를 청크 단위로 읽고 변환하고 쓰는 방법을 알고, 백프레셔·취소·지원 상태를 고려해 응답 본문 처리, 텍스트 변환, 압축, NDJSON 파싱을 설계할 수 있습니다.
+</Callout>
+
+## ReadableStream과 청크·리더
+
+ReadableStream은 데이터를 한꺼번에 가져오지 않고 청크(chunk)라는 조각으로 순서대로 내어 주는 읽기 스트림입니다. 청크는 바이트 한 개일 수도 있고 타입이 있는 배열이나 객체일 수도 있습니다. 읽는 쪽이 가져가기 전까지 청크는 스트림 내부 큐에 쌓입니다. 스트림 API 전체는 Baseline 2022로 널리 지원됩니다.
+
+```js
+const stream = new ReadableStream({
+  start(controller) {
+    controller.enqueue('a') // 청크를 큐에 넣음
+    controller.enqueue('b')
+    controller.close()      // 더 넣을 청크가 없음
+  },
+})
+```
+
+생성자의 첫 인수(underlying source)는 스트림의 데이터를 만드는 쪽입니다.
+
+| 멤버 | 호출 시점 |
+|------|-----------|
+| `start(controller)` | 스트림을 만들 때 한 번 |
+| `pull(controller)` | 큐에 여유가 있을 때 반복해서(백프레셔 절) |
+| `cancel(reason)` | 읽는 쪽이 스트림을 취소했을 때 |
+
+컨트롤러의 `enqueue(chunk)`는 청크를 넣고, `close()`는 입력을 끝내며, `error(e)`는 스트림을 오류 상태로 만듭니다.
+
+스트림을 읽으려면 리더를 얻습니다. `getReader()`는 스트림을 리더에 잠그고(lock), 잠긴 동안 다른 리더나 `pipeTo()`가 쓸 수 없게 합니다.
+
+```js
+const reader = stream.getReader()
+console.log(stream.locked)       // true
+await reader.read() // { done: false, value: 'a' }
+await reader.read() // { done: false, value: 'b' }
+await reader.read() // { done: true, value: undefined }
+reader.releaseLock()
+```
+
+- `read()`는 `{ done, value }`로 이행하는 프라미스를 돌려줍니다. `done`이 `true`이면 끝이고 이때 `value`는 `undefined`입니다.
+- `releaseLock()`은 잠금을 풀어 다른 리더를 얻을 수 있게 합니다. 읽지 않은 청크는 큐에 남아 있다가 새 리더가 읽습니다. 아직 끝나지 않은 `read()` 프라미스는 `TypeError`로 거부됩니다.
+- `reader.closed`는 스트림이 닫히면 이행하고 오류가 나면 거부되는 프라미스입니다. `reader.cancel(reason)`은 스트림을 취소합니다.
+- 스트림이 잠겨 있으면 `stream.cancel()`은 `TypeError`로 거부됩니다. 취소는 리더를 통해 합니다.
+- 청크를 한 번 읽으면 스트림에서 사라집니다. 같은 데이터를 두 번 읽으려면 `tee()`로 나눕니다(아래 pipe 절).
+
+## 응답 본문 점진 읽기와 다운로드 진행률
+
+`fetch()`가 돌려주는 `Response`의 `body`는 ReadableStream이고, 청크는 `Uint8Array`입니다. `await res.json()`은 본문이 끝까지 올 때까지 기다리지만, 스트림으로 읽으면 도착하는 대로 처리할 수 있습니다. 본문이 없는 응답에서는 `body`가 `null`입니다.
+
+```js
+const res = await fetch('/big.bin')
+const reader = res.body.getReader()
+let received = 0
+while (true) {
+  const { done, value } = await reader.read()
+  if (done) break
+  received += value.byteLength
+}
+```
+
+- 이미 `body`를 리더로 잠갔거나 읽기 시작했다면 `res.json()`이나 `res.text()`는 `TypeError`가 납니다. 본문은 한 번만 소비할 수 있습니다(자세히는 36편).
+- 진행률은 받은 바이트를 `Content-Length` 헤더 값으로 나눠 구합니다.
+
+```js
+const total = Number(res.headers.get('Content-Length'))
+const pct = total ? received / total : null // 0–1 또는 null
+```
+
+- `Content-Length`가 없으면 전체 크기를 모르므로 진행률 대신 받은 바이트만 보여 줍니다.
+- 응답이 압축(`Content-Encoding`)되어 있으면 청크는 압축을 푼 뒤의 바이트이고 `Content-Length`는 압축된 크기입니다. Fetch 표준도 압축 해제 때문에 이 헤더를 신뢰하기 어렵다고 적고 있으며, 받은 양이 100퍼센트를 넘을 수 있습니다.
+- 교차 출처 응답에서도 `Content-Length`는 CORS 안전 응답 헤더라서 읽을 수 있습니다(CORS는 62편).
+- 업로드 진행률은 fetch로는 얻을 수 없고 XMLHttpRequest나 업로드 스트림이 필요합니다(36편, 아래 업로드 스트림 절).
+
+## 스트림 비동기 반복
+
+ReadableStream은 비동기 이터러블이어서 `for await...of`로 청크를 읽을 수 있습니다. 리더를 직접 다루는 코드보다 짧습니다. Baseline 2026(Chrome 124, Firefox 110, Safari 27)입니다.
+
+```js
+const res = await fetch('/big.bin')
+let received = 0
+for await (const chunk of res.body) {
+  received += chunk.byteLength
+}
+```
+
+- 루프가 리더를 얻어 스트림을 잠급니다. 루프가 끝나면 잠금이 풀립니다.
+- 기본 동작은 `break`·`return`·`throw`로 루프를 빠져나갈 때 스트림을 취소(`cancel`)하는 것입니다. 스트림을 이어서 쓰려면 `stream.values({ preventCancel: true })`로 이터레이터를 얻어 순회합니다.
+- 아직 지원하지 않는 환경에서는 `getReader()`와 `read()` 반복문을 씁니다.
+
+## ReadableStream.from()
+
+`ReadableStream.from(iterable)`은 이터러블이나 비동기 이터러블(배열, `Set`, 비동기 제너레이터 등)을 읽기 스트림으로 바꿉니다. 이터러블이 아니면 `TypeError`입니다.
+
+```js
+async function* ticks() {
+  yield 1
+  yield 2
+}
+const stream = ReadableStream.from(ticks())
+// 청크: 1, 2 (이후 close)
+```
+
+미Baseline입니다. Firefox 117과 Safari 27이 지원하고 Chromium 계열은 지원하지 않는 상태로 확인했습니다. 지원하지 않는 곳에서는 `new ReadableStream`의 `start`나 `pull`에서 `enqueue`로 대신 만듭니다.
+
+## WritableStream과 writer
+
+WritableStream은 청크를 받아 어딘가에 쓰는 도착지(sink)를 감싼 스트림입니다. 쓰는 쪽은 `getWriter()`로 writer를 얻어 `write()`로 청크를 넣습니다. 쓰는 속도가 도착지보다 빠르면 내부 큐에 쌓이며 속도 조절이 일어납니다(백프레셔 절).
+
+```js
+const out = new WritableStream({
+  write(chunk) { log.textContent += chunk },
+  close() { console.log('done') },
+  abort(reason) { console.log('abort', reason) },
+})
+const writer = out.getWriter()
+await writer.write('hello')
+await writer.close()
+```
+
+| writer 멤버 | 설명 |
+|-------------|------|
+| `write(chunk)` | 청크를 큐에 넣고, 도착지가 처리하면 이행하는 프라미스 |
+| `ready` | 큐에 여유가 생기면 이행하는 프라미스 |
+| `desiredSize` | 큐에 더 넣을 수 있는 양. 0 이하이면 쉬어야 함 |
+| `close()` | 큐에 쌓인 쓰기를 마친 뒤 닫음 |
+| `abort(reason)` | 큐의 쓰기를 버리고 오류 상태로 만듦 |
+| `closed` | 닫히면 이행, 오류면 거부되는 프라미스 |
+| `releaseLock()` | writer 잠금 해제 |
+
+- 도착지의 `write(chunk)`가 프라미스를 반환하면, 그 프라미스가 끝나기 전까지 다음 청크의 `write`를 부르지 않습니다. 쓰기 순서가 보장됩니다.
+- 쓰기 중 `write()`가 던지면 스트림이 오류 상태가 되고 이후 쓰기는 모두 거부됩니다.
+- `WritableStream`도 잠금 개념이 있어서 writer를 가진 동안에는 `pipeTo()`의 도착지로 쓸 수 없습니다.
+
+## TransformStream
+
+TransformStream은 쓰기 쪽(`writable`)으로 받은 청크를 변환해서 읽기 쪽(`readable`)으로 내보내는 스트림 쌍입니다. 변환 로직은 생성자의 transformer 객체에 둡니다.
+
+```js
+const upper = new TransformStream({
+  transform(chunk, controller) {
+    controller.enqueue(chunk.toUpperCase())
+  },
+  flush(controller) {
+    controller.enqueue('!') // 입력이 끝났을 때 한 번
+  },
+})
+```
+
+| transformer 멤버 | 호출 시점 |
+|------------------|-----------|
+| `start(controller)` | 만들 때 한 번 |
+| `transform(chunk, controller)` | 청크가 들어올 때마다 |
+| `flush(controller)` | 쓰기 쪽이 닫힐 때(남은 데이터를 마저 내보낼 때) |
+
+- 컨트롤러의 `enqueue()`는 한 청크 입력에 대해 0번도, 여러 번도 부를 수 있습니다. 청크를 거르거나 쪼개거나 늘릴 수 있습니다.
+- `controller.terminate()`는 읽기 쪽을 닫고 쓰기 쪽을 오류 상태로 만들어 입력을 끊습니다. `controller.error(e)`는 양쪽을 오류로 만듭니다.
+- `transform`이 프라미스를 반환하면 끝날 때까지 다음 청크를 받지 않습니다.
+- 쓰기 쪽 기본 큐 한도는 청크 1개, 읽기 쪽은 0개입니다. 읽는 쪽이 요청해야 변환이 진행됩니다.
+- 서브클래스로 감싸 `new CsvParseStream()`처럼 재사용 가능한 변환기를 만들 수 있습니다.
+
+## pipeTo·pipeThrough·tee
+
+스트림은 이어 붙여서(pipe chain) 원본 → 변환 → 도착지로 데이터를 흘립니다. 파이프는 청크 이동, 백프레셔, 닫힘·오류 전파를 자동으로 처리합니다.
+
+```js
+await res.body
+  .pipeThrough(new TextDecoderStream())
+  .pipeThrough(upper)
+  .pipeTo(out)
+```
+
+| 메서드 | 설명 |
+|--------|------|
+| `pipeThrough(transform, options)` | `readable`과 `writable`을 가진 쌍을 통과시키고 `readable`을 돌려줌. 체이닝에 씀 |
+| `pipeTo(dest, options)` | 쓰기 스트림으로 보내고, 끝나면 이행(오류면 거부)하는 프라미스를 돌려줌 |
+| `tee()` | 같은 데이터를 받는 스트림 둘을 만듦 |
+
+- 파이프하는 동안 원본과 도착지는 잠깁니다. 이미 잠겼으면 `TypeError`입니다.
+- 원본이 닫히면 도착지도 닫고, 원본이 오류 나면 도착지를 `abort`하며, 도착지가 오류 나면 원본을 `cancel`합니다.
+- 이 전파는 `pipeTo`의 옵션으로 끌 수 있습니다.
+
+| 옵션 | `true`일 때 |
+|------|-------------|
+| `preventClose` | 원본이 닫혀도 도착지를 닫지 않음(여러 원본을 한 도착지에 차례로 연결할 때) |
+| `preventAbort` | 원본이 오류 나도 도착지를 abort하지 않음 |
+| `preventCancel` | 도착지가 오류 나도 원본을 cancel하지 않음 |
+| `signal` | AbortSignal로 파이프를 중단(취소 절) |
+
+### tee
+
+`tee()`는 읽기 스트림 하나를 같은 청크를 받는 두 브랜치로 나눕니다. 응답 본문처럼 한 번만 읽을 수 있는 스트림을 두 곳(예: 화면 표시와 저장)에서 쓸 때 씁니다.
+
+```js
+const [forUi, forCache] = res.body.tee()
+```
+
+- 원본은 잠기고 이후 직접 읽을 수 없습니다.
+- 두 브랜치 중 느린 쪽의 읽지 않은 청크는 한도 없이 메모리에 쌓입니다. 속도 차이가 큰 대용량 스트림에는 부적합합니다.
+- 원본 스트림이 취소되려면 두 브랜치를 모두 취소해야 합니다. 오류는 양쪽에 전파됩니다.
+- 일반 스트림은 청크 객체를 복제하지 않고 같은 참조를 두 브랜치에 줍니다. 한쪽이 청크를 수정하면 다른 쪽에도 보입니다. 바이트 스트림은 두 번째 브랜치의 청크를 복제합니다.
+
+## 백프레셔와 큐 전략
+
+백프레셔(backpressure)는 느린 소비자가 빠른 생산자에게 속도를 줄이라고 알리는 장치입니다. 소비가 생산을 따라가지 못하면 청크가 큐에 무한히 쌓여 메모리를 먹기 때문에 필요합니다. 파이프 체인에서는 도착지가 막히면 신호가 변환 스트림을 거쳐 원본까지 거슬러 올라갑니다.
+
+```text
+desiredSize = highWaterMark - 큐에 쌓인 청크 크기의 합
+```
+
+- 큐 전략이 청크 크기를 재는 방법(`size`)과 한도(`highWaterMark`)를 정합니다.
+- `desiredSize`가 0보다 크면 큐에 여유가 있고, 0 이하이면 생산을 멈춰야 합니다.
+- 읽기 스트림은 `desiredSize`가 0보다 큰 동안 `pull()`을 부릅니다. `start()`에서 `enqueue`로 한꺼번에 밀어 넣는 방식은 백프레셔를 무시합니다.
+- 쓰기 쪽은 `writer.ready`를 기다리면 속도가 맞춰집니다.
+
+```js
+for (const chunk of chunks) {
+  await writer.ready      // 큐에 여유가 생길 때까지 대기
+  writer.write(chunk)
+}
+await writer.close()
+```
+
+### 큐 전략
+
+| 전략 | `size(chunk)` | `highWaterMark`의 의미 |
+|------|---------------|------------------------|
+| `CountQueuingStrategy` | 항상 1 | 청크 개수 |
+| `ByteLengthQueuingStrategy` | 청크의 `byteLength` | 바이트 수 |
+
+```js
+new ReadableStream(source, new CountQueuingStrategy({
+  highWaterMark: 4,
+}))
+```
+
+- 기본값은 일반 읽기·쓰기 스트림이 청크 1개(`highWaterMark` 1), 변환 스트림은 쓰기 쪽 1·읽기 쪽 0, 바이트 스트림은 0입니다. 청크 크기가 제각각이면 바이트 기준 전략이 맞습니다.
+- 사용자 정의 `size()` 함수를 넣어 다른 기준(예: 문자열 길이)으로 잴 수 있습니다.
+- 바이트 스트림에는 `size`를 줄 수 없고(RangeError), `highWaterMark`만 바이트 수로 쓰입니다.
+- 한도를 키우면 처리량은 늘 수 있지만 그만큼 메모리를 더 씁니다.
+
+## 바이트 스트림과 BYOB 리더
+
+바이트 스트림은 `type: 'bytes'`로 만든 ReadableStream으로, 바이트 데이터를 복사 없이 효율적으로 읽기 위한 스트림입니다. BYOB(Bring Your Own Buffer) 리더는 읽는 쪽이 버퍼를 직접 제공해 거기에 데이터를 받습니다. Baseline 2026(Chrome 89, Firefox 102, Safari 26.4)입니다.
+
+```js
+const reader = stream.getReader({ mode: 'byob' })
+let buf = new ArrayBuffer(1024)
+const view = new Uint8Array(buf)
+const { done, value } = await reader.read(view)
+// value: 채워진 길이만큼의 Uint8Array
+buf = value.buffer // 원래 buf는 전송되어 쓸 수 없음
+```
+
+- 바이트 스트림이어야 BYOB 리더를 얻을 수 있습니다. `Response.body`와 `Blob.stream()`은 표준상 바이트 스트림입니다.
+- `read(view)`에 넘긴 뷰의 버퍼는 전송(transfer)되어 원래 변수로는 더 못 씁니다. 반환된 `value.buffer`를 다음 읽기에 재사용해 버퍼 할당을 줄입니다.
+- 일반 리더로도 바이트 스트림을 읽을 수 있지만 그때는 스트림이 매번 새 버퍼를 할당합니다.
+- 직접 바이트 스트림을 만들 때는 컨트롤러가 `ReadableByteStreamController`이고, `enqueue()`에 ArrayBufferView를 넣으며 `byobRequest`로 소비자 버퍼에 바로 채울 수 있습니다.
+- `read(view, { min })` 옵션은 Baseline이 아닙니다(Chrome 140, Firefox 134).
+
+## 스트림 취소와 AbortSignal
+
+스트림을 도중에 그만 읽을 때는 취소하고, 원본이 자원을 정리하게 합니다. 취소하지 않고 방치하면 네트워크 연결과 메모리가 남습니다.
+
+| 방법 | 효과 |
+|------|------|
+| `reader.cancel(reason)` / `stream.cancel(reason)` | 스트림을 닫고 원본의 `cancel(reason)` 호출 |
+| `for await` 루프 탈출 | 기본으로 스트림 취소(위 절) |
+| `fetch(url, { signal })`의 신호 취소 | 요청이 끊기고 본문 스트림이 신호의 reason으로 오류 상태가 됨 |
+| `pipeTo(dest, { signal })`의 신호 취소 | 도착지를 abort하고 원본을 cancel(옵션으로 끌 수 있음) |
+
+```js
+const ac = new AbortController()
+const res = await fetch(url, { signal: ac.signal })
+const done = res.body.pipeTo(out, { signal: ac.signal })
+ac.abort() // 요청 중단 + 파이프 중단
+await done.catch((e) => console.log(e.name)) // 'AbortError'
+```
+
+- 읽는 도중 신호가 취소되면 `reader.read()`가 신호의 reason으로 거부됩니다. 루프에서 `AbortError`를 따로 처리합니다(신호 일반은 37편).
+- `pipeTo`의 프라미스는 취소되면 reason으로 거부되므로 `catch`가 필요합니다.
+- 변환기(transformer)의 `cancel()` 메서드는 Baseline이 아니므로, 변환기가 자원을 잡고 있으면 취소 때의 정리 방법을 따로 마련합니다.
+- 취소는 서버에 이미 보낸 요청을 되돌리지 않습니다.
+
+## TextDecoderStream·TextEncoderStream
+
+TextDecoderStream은 바이트 청크를 문자열 청크로, TextEncoderStream은 문자열 청크를 UTF-8 `Uint8Array` 청크로 바꾸는 변환 스트림입니다. 각각 `TextDecoder`·`TextEncoder`의 스트리밍 버전이고 Baseline 2022입니다.
+
+```js
+const text = res.body.pipeThrough(new TextDecoderStream())
+for await (const str of text) {
+  console.log(str) // 문자열 청크
+}
+```
+
+- `new TextDecoderStream(label, { fatal, ignoreBOM })`: `label`의 기본값은 `'utf-8'`, `fatal: true`이면 잘못된 바이트열에서 `TypeError`가 나고 아니면 대체 문자로 바꿉니다.
+- 멀티바이트 문자가 청크 경계에서 잘려도 앞 조각을 보관했다가 다음 청크와 합쳐 정확히 디코딩합니다. 청크마다 `TextDecoder`로 따로 디코딩하면 한글이 깨집니다.
+- 청크의 경계는 문자열의 의미 단위(줄, JSON 객체)와 일치하지 않으므로 줄 단위 처리는 따로 버퍼링해야 합니다(NDJSON 절).
+- `TextEncoderStream`은 항상 UTF-8로 인코딩합니다. 업로드나 압축 전에 문자열 스트림을 바이트로 바꿀 때 씁니다.
+- 한 번에 디코딩해도 되는 작은 데이터는 `TextDecoder`로 충분합니다(자세히는 48편).
+
+## CompressionStream·DecompressionStream
+
+CompressionStream은 바이트 청크를 압축하고 DecompressionStream은 푸는 변환 스트림입니다. Baseline 2023(Chrome 80, Firefox 113, Safari 16.4)입니다.
+
+```js
+const input = new Blob([text]).stream()
+const gz = input.pipeThrough(new CompressionStream('gzip'))
+const blob = await new Response(gz).blob() // 압축된 Blob
+const back = blob.stream()
+  .pipeThrough(new DecompressionStream('gzip'))
+const restored = await new Response(back).text()
+```
+
+| 형식 | 의미 | 지원 |
+|------|------|------|
+| `gzip` | gzip 형식 | Baseline 2023 |
+| `deflate` | zlib 형식(HTTP의 deflate) | Baseline 2023 |
+| `deflate-raw` | 헤더 없는 원시 deflate | Baseline 2023 |
+| `brotli` | 표준에 포함된 형식 | 미Baseline(Firefox 147, Safari 18.4) |
+
+- 입력 청크는 `BufferSource`(ArrayBuffer와 그 뷰)여야 합니다. 문자열을 넣으면 `TypeError`이므로 `TextEncoderStream`을 앞에 둡니다.
+- 출력 청크는 `Uint8Array`입니다.
+- 지원하지 않는 형식을 넘기면 `TypeError`입니다. Baseline이 아닌 형식은 지원을 검사하고 씁니다.
+- 압축 해제 스트림은 형식에 맞지 않거나 손상된 입력을 만나면 `TypeError`로 오류 상태가 됩니다.
+- 결과 스트림을 `new Response(stream)`에 넣으면 `blob()`·`arrayBuffer()` 같은 메서드로 한 번에 모을 수 있습니다.
+- 서버 응답에 `Content-Encoding: gzip`이 있으면 브라우저가 자동으로 압축을 풉니다. `DecompressionStream`은 `.gz` 파일을 직접 열거나 업로드 전에 직접 압축할 때 씁니다.
+
+## 업로드 스트림
+
+fetch의 요청 본문(`body`)에 ReadableStream을 넣으면 데이터를 만들면서 동시에 업로드할 수 있습니다. `duplex: 'half'` 옵션이 필수입니다. 미Baseline이며 Chromium 계열(105부터)에서만 확인되고, Safari는 `fetch()`에서 허용하지 않습니다.
+
+```js
+const body = ReadableStream.from(parts) // 또는 직접 만든 스트림
+await fetch('/upload', {
+  method: 'POST',
+  body: body.pipeThrough(new TextEncoderStream()),
+  duplex: 'half',
+})
+```
+
+- 청크는 `Uint8Array`여야 해서 문자열은 `TextEncoderStream`을 거칩니다.
+- `duplex: 'half'`는 요청 본문을 모두 보낸 뒤에야 응답을 처리한다는 뜻입니다. 표준의 다른 값 `'full'`은 아직 쓸 수 없습니다.
+- 본문 길이를 알 수 없어 `Content-Length`가 붙지 않고, 이 때문에 항상 CORS 프리플라이트가 일어납니다.
+- HTTP/2나 HTTP/3 연결이 필요하고 HTTP/1.x에서는 요청이 거부됩니다.
+- 303 외의 리다이렉트는 막혀 있고, 본문이 스트림이면 재전송할 수 없어 재시도도 불가능합니다(37편).
+- 기능 감지는 `duplex` 옵션을 인식하는지 확인하는 방식으로 합니다. 확인되지 않으면 `Blob`으로 모아서 보내는 방식으로 되돌립니다.
+
+## 전송 가능한 스트림
+
+ReadableStream·WritableStream·TransformStream은 전송 가능한(transferable) 객체여서 `postMessage`로 워커나 다른 창에 옮길 수 있습니다. 미Baseline입니다(Chrome 87, Firefox 103 지원, Safari는 없음으로 확인).
+
+```js
+const worker = new Worker('./parse.js', { type: 'module' })
+worker.postMessage({ stream }, [stream])
+// stream은 이제 쓸 수 없고, 워커가 받은 사본이 읽음
+```
+
+- 전송 목록(두 번째 인수)에 넣어야 합니다. 이미 잠긴 스트림을 전송하면 `DataCloneError`입니다.
+- 전송 후 원래 스트림은 잠겨서 직접 쓸 수 없습니다. 내부는 메시지 포트로 연결되어 청크가 포트를 통해 이동합니다.
+- 큰 데이터를 메인 스레드를 거치지 않고 워커에서 파싱·압축하는 데 씁니다(워커는 54편).
+- 지원하지 않는 환경에서는 워커 쪽에서 직접 `fetch()`하거나 청크를 `postMessage`로 나눠 보냅니다.
+
+## NDJSON 줄 단위 파싱
+
+NDJSON(줄바꿈으로 구분한 JSON)은 한 줄에 JSON 값 하나를 쓰는 형식입니다. 서버가 레코드를 하나씩 흘려 보내고 클라이언트가 도착하는 대로 처리할 수 있어서, 로그나 AI 응답 스트리밍에서 씁니다. 청크 경계가 줄 경계와 맞지 않으므로 나머지(tail)를 보관하며 줄 단위로 끊는 변환기가 필요합니다.
+
+```js
+function splitLines() {
+  let tail = ''
+  return new TransformStream({
+    transform(chunk, controller) {
+      const parts = (tail + chunk).split('\n')
+      tail = parts.pop() // 아직 끝나지 않은 줄
+      for (const line of parts) controller.enqueue(line)
+    },
+    flush(controller) {
+      if (tail) controller.enqueue(tail)
+    },
+  })
+}
+```
+
+이 변환기를 디코더 뒤에 이어 붙입니다.
+
+```js
+const lines = res.body
+  .pipeThrough(new TextDecoderStream())
+  .pipeThrough(splitLines())
+for await (const line of lines) {
+  if (line.trim()) render(JSON.parse(line))
+}
+```
+
+- `flush`에서 마지막 줄을 내보냅니다. 마지막 줄 끝에 줄바꿈이 없는 경우를 처리하기 위해서입니다.
+- 빈 줄은 건너뜁니다. `\r\n`을 쓰는 서버라면 `trim()`으로 `\r`을 제거합니다.
+- `JSON.parse`는 줄 하나 단위로 실패할 수 있으므로 줄마다 `try`로 감싸 잘못된 줄을 격리합니다.
+- 한 청크에 여러 줄이 올 수도 있고 한 줄이 여러 청크에 걸칠 수도 있다는 점을 `tail`이 처리합니다.
+- 서버가 보내는 이벤트를 브라우저가 파싱해 주는 Server-Sent Events와는 다릅니다(58편).
+
+**흔한 실수:** 청크를 그대로 `JSON.parse`하는 것입니다. 청크는 JSON의 경계와 무관하게 잘리므로 잘린 JSON에서 `SyntaxError`가 납니다.
+
+## 핵심 정리
+
+- ReadableStream은 청크를 내부 큐에 두고 리더가 `read()`로 하나씩 꺼내며, 리더가 있는 동안 스트림은 잠기고 청크는 한 번만 읽힙니다.
+- 응답 `body`를 스트림으로 읽으면 점진 처리와 진행률 계산이 되지만, 압축 응답에서는 `Content-Length`와 받은 양이 맞지 않을 수 있습니다.
+- `pipeThrough`·`pipeTo`로 원본 → 변환 → 도착지를 잇고, 백프레셔는 `desiredSize`와 `highWaterMark`로 조절되며 `tee()`는 느린 쪽 메모리를 무한정 씁니다.
+- 취소는 리더·`for await` 탈출·`fetch`와 `pipeTo`의 `AbortSignal`로 하며, 취소하지 않으면 연결과 메모리가 남습니다.
+- 텍스트 변환(`TextDecoderStream`)과 압축(`CompressionStream`, gzip·deflate)은 Baseline이고, `ReadableStream.from()`, 업로드 스트림, 전송 가능한 스트림은 아직 일부 엔진만 지원합니다.
+- 청크 경계는 줄이나 JSON과 무관하므로 NDJSON은 `tail`을 보관하는 변환기로 줄을 끊어 파싱합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="reader = stream.getReader() 로 스트림을 잠근 상태에서 stream.cancel() 을 호출하면 어떻게 되는가?"
+  options={['스트림이 즉시 취소되고 리더도 해제된다', 'TypeError로 거부된다', '읽지 않은 청크만 버려지고 스트림은 계속 열려 있다', 'tee 처럼 두 개의 스트림으로 나뉜다']}
+  correctAnswer={2}
+  explanation="스트림이 리더에 잠겨 있으면 stream.cancel()은 TypeError로 거부되는 프라미스를 돌려줍니다. 잠긴 스트림은 reader.cancel(reason)으로 취소해야 하며, 이는 원본의 cancel 콜백까지 호출합니다. 청크를 일부만 버리거나 스트림을 나누는 동작은 없습니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="WritableStream에 청크를 빠르게 쓰면서 메모리 사용을 억제하려는 코드로 가장 알맞은 것은?"
+  options={['write를 await 없이 반복 호출하고 마지막에 close만 기다린다', '각 write 전에 await writer.ready 로 큐에 여유가 생기길 기다린다', 'highWaterMark를 0으로 두고 desiredSize를 무시한다', 'tee()로 스트림을 나눠 두 곳에 동시에 쓴다']}
+  correctAnswer={2}
+  explanation="writer.ready는 큐에 여유가 있을 때 이행되므로 이를 기다리면 도착지의 처리 속도에 쓰는 속도가 맞춰져 큐가 무한히 커지지 않습니다. await 없이 반복 호출하면 모든 청크가 큐에 쌓이고, desiredSize를 무시하면 백프레셔가 작동하지 않으며, tee는 원본을 나눌 뿐 쓰기 속도 조절과 무관합니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="NDJSON 응답을 청크마다 곧바로 JSON.parse 하면 안 되는 가장 근본적인 이유는?"
+  options={['JSON.parse가 Uint8Array를 받지 못하기 때문이다', '청크 경계가 줄 경계와 무관해서 한 줄이 두 청크에 걸쳐 잘릴 수 있기 때문이다', 'ReadableStream은 항상 한 번에 한 글자씩 청크를 내보내기 때문이다', 'TextDecoderStream은 줄바꿈 문자를 모두 제거하기 때문이다']}
+  correctAnswer={2}
+  explanation="네트워크 청크는 데이터 의미와 무관하게 잘리므로 한 JSON 줄이 여러 청크에 나뉘거나 한 청크에 여러 줄이 들어올 수 있습니다. 그래서 끝나지 않은 줄(tail)을 보관했다가 다음 청크와 합쳐 줄 단위로 끊어야 합니다. 청크 크기는 일정하지 않고, TextDecoderStream은 줄바꿈을 제거하지 않으며, 디코딩은 문자열 변환일 뿐 근본 원인이 아닙니다."
+/>
+
+## 참고 자료
+
+- [Streams Standard](https://streams.spec.whatwg.org/)
+- [MDN — Streams API concepts](https://developer.mozilla.org/en-US/docs/Web/API/Streams_API/Concepts)
+- [MDN — ReadableStream](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream)
+- [MDN — ReadableStream.from()](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream/from_static)
+- [MDN — Using readable streams](https://developer.mozilla.org/en-US/docs/Web/API/Streams_API/Using_readable_streams)
+- [MDN — ReadableStreamDefaultReader.releaseLock()](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStreamDefaultReader/releaseLock)
+- [MDN — ReadableStreamBYOBReader](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStreamBYOBReader)
+- [MDN — WritableStream](https://developer.mozilla.org/en-US/docs/Web/API/WritableStream)
+- [MDN — TransformStream](https://developer.mozilla.org/en-US/docs/Web/API/TransformStream)
+- [MDN — ReadableStream.pipeTo()](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream/pipeTo)
+- [MDN — ReadableStream.tee()](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream/tee)
+- [MDN — CountQueuingStrategy](https://developer.mozilla.org/en-US/docs/Web/API/CountQueuingStrategy)
+- [MDN — ByteLengthQueuingStrategy](https://developer.mozilla.org/en-US/docs/Web/API/ByteLengthQueuingStrategy)
+- [MDN — TextDecoderStream](https://developer.mozilla.org/en-US/docs/Web/API/TextDecoderStream)
+- [MDN — CompressionStream](https://developer.mozilla.org/en-US/docs/Web/API/CompressionStream)
+- [Compression Standard](https://compression.spec.whatwg.org/)
+- [Fetch Standard](https://fetch.spec.whatwg.org/)
+- [Chrome for Developers — Streaming requests with the fetch API](https://developer.chrome.com/docs/capabilities/web-apis/fetch-streaming-requests)
+- [web-features — Baseline 데이터](https://cdn.jsdelivr.net/npm/web-features/data.json)

@@ -1,0 +1,98 @@
+---
+title: '13. zod로 런타임 검증과 타입 단일화하기'
+description: 'zod 스키마 하나로 Transaction 타입과 런타임 검증을 통합하고, 12편의 수동 타입 가드를 대체합니다.'
+---
+
+## 개념 정리
+
+### 12편까지의 한계
+
+참고로 12편의 수동 가드는 이런 모습이었습니다.
+
+```ts
+// (12편, 참고용 — 이번 편에서 삭제)
+function isTransaction(value: unknown): value is Transaction {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  if (typeof record.id !== 'string' || typeof record.date !== 'string') return false
+  if (typeof record.amount !== 'number' || typeof record.memo !== 'string') return false
+  if (record.type === 'expense') return EXPENSE_CATEGORIES.includes(record.category as never)
+  if (record.type === 'income') return INCOME_CATEGORIES.includes(record.category as never)
+  return false
+}
+```
+
+필드 다섯 개짜리 타입인데도 이미 여덟 줄입니다. 필드가 늘어나면 `Transaction` 인터페이스와 `isTransaction` 함수를 매번 같이 고쳐야 하고, 둘 중 하나만 고치면 타입과 실제 검증이 어긋납니다.
+
+### zod 스키마 — 선언 한 번으로 타입과 검증을 함께
+
+zod는 스키마를 값으로 선언하면 그 스키마로 값을 검증할 수도 있고, `z.infer`로 정적 타입을 뽑아낼 수도 있습니다.
+
+| 함수 | 역할 |
+|---|---|
+| `z.object({...})` | 프로퍼티 이름과 각각의 zod 스키마로 객체 모양을 정의 |
+| `.extend({...})` | 기존 객체 스키마에 프로퍼티를 추가하거나 덮어씀 |
+| `z.literal(값)` | 정확히 그 값 하나만 허용 |
+| `z.enum(배열)` | 배열에 담긴 문자열 중 하나만 허용(리터럴 유니온으로 추론됨) |
+| `z.discriminatedUnion(태그, [스키마...])` | 태그 프로퍼티 값으로 여러 객체 스키마 중 하나를 고름 |
+| `z.infer<typeof 스키마>` | 스키마가 통과시키는 값의 정적 타입을 뽑아냄 |
+
+`z.enum`이 리터럴 유니온으로 추론되려면 넘기는 배열이 길이가 고정된 튜플이어야 합니다. 지금까지 `models/expense.ts`의 카테고리 배열은 `readonly ExpenseCategory[]`처럼 일반 배열 타입이었으므로, 이 편에서 `as const`로 튜플로 정리합니다.
+
+### brand로 타입 수준 구분 만들기
+
+`id`처럼 문자열이지만 다른 문자열과 섞이면 안 되는 값에는 `.brand()`를 붙입니다. `.brand()`는 런타임에는 아무 검사도 추가하지 않고, 컴파일 타임에만 "이 문자열은 평범한 `string`이 아니라 브랜드가 찍힌 값"이라고 구분합니다.
+
+```ts
+const TransactionIdSchema = z.string().brand<'TransactionId'>()
+```
+
+이 앱은 `crypto.randomUUID()`가 항상 표준 형식의 문자열을 만들어 주므로, 형식 검사(`uuid` 형식 제한)는 따로 붙이지 않고 브랜드만 적용합니다.
+
+### parse와 safeParse
+
+| 메서드 | 검증 실패 시 |
+|---|---|
+| `.parse(값)` | `ZodError`를 던짐(throw) |
+| `.safeParse(값)` | 예외 없이 `{ success: false, error }`를 반환 |
+
+앱 시작 시 시드 데이터처럼 "여기서 실패하면 바로 알아야 하는" 곳에는 `parse`를, 사용자 입력처럼 "실패해도 화면에 에러만 보여주면 되는" 곳에는 `safeParse`를 씁니다. 폼 입력 검증은 다음 편에서 `safeParse`로 다룹니다.
+
+## 자주 하는 실수
+
+| 증상 | 원인 | 고치는 법 |
+|------|------|-----------|
+| `z.enum`에 배열을 넘겼는데 타입이 `string`으로만 추론됨 | 배열이 `as const` 튜플이 아니라 일반 배열 타입임 | 카테고리 배열을 `as const`로 선언한다 |
+| 시드 데이터가 틀렸는데도 앱이 조용히 깨짐 | `parse` 대신 아무 검증 없이 값을 그대로 사용 | 실패를 바로 알아야 하는 곳은 `parse`, 화면에만 보여주면 되는 곳은 `safeParse`를 쓴다 |
+| `models/index.ts`에서 `Transaction`을 찾을 수 없다는 오류 | 배럴에서 `schemas/transaction.ts`로부터 재노출하는 줄을 빠뜨림 | `export type { Transaction, ... } from '../schemas/transaction.ts'`를 추가한다 |
+
+## 확인 문제
+
+<Quiz
+  questionNumber={1}
+  question={"zod 스키마 하나로 타입과 런타임 검증을 함께 얻을 수 있는 이유는"}
+  options={["스키마 선언과 별도로 인터페이스를 항상 다시 써야 하기 때문에","z.infer가 스키마 정의로부터 정적 타입을 뽑아내고, 같은 스키마의 parse가 실제 값도 검사하기 때문에","zod가 컴파일 시점에 모든 타입 오류를 자동으로 고쳐주기 때문에","zod 스키마는 런타임에는 아무 동작도 하지 않기 때문에"]}
+  correctAnswer={2}
+  explanation={"스키마 선언 하나에서 z.infer로 타입을 뽑고, 같은 스키마의 parse/safeParse로 실제 값도 검사하므로 타입과 검증이 이중 관리되지 않습니다."}
+/>
+
+<Quiz
+  questionNumber={2}
+  question={"brand를 적용한 TransactionId 타입에 대한 설명으로 옳은 것은"}
+  options={["런타임에 문자열 형식을 추가로 검사한다","컴파일 타임에만 다른 문자열과 구분되고 런타임 검사는 추가하지 않는다","문자열이 아니라 숫자로 저장된다","JSON으로 직렬화할 수 없게 만든다"]}
+  correctAnswer={2}
+  explanation={"brand는 타입 수준의 표시일 뿐이며, 실제 값 검사는 밑에 깔린 스키마(여기서는 일반 문자열 검사)가 담당합니다."}
+/>
+
+<Quiz
+  questionNumber={3}
+  question={"parse와 safeParse의 차이는"}
+  options={["parse는 항상 성공하고 safeParse만 실패할 수 있다","parse는 실패 시 예외를 던지고 safeParse는 성공 여부를 담은 객체를 반환한다","safeParse는 비동기이고 parse는 동기다","둘 다 완전히 동일하게 동작한다"]}
+  correctAnswer={2}
+  explanation={"parse는 검증 실패 시 ZodError를 던지고, safeParse는 예외 없이 success 여부와 결과를 담은 객체를 돌려줍니다."}
+/>
+
+## 참고 자료
+
+- [Zod — 공식 문서](https://zod.dev/)
+- [Zod — API 레퍼런스](https://zod.dev/api)

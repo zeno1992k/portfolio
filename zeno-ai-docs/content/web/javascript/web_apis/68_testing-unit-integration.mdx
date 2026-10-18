@@ -1,0 +1,328 @@
+---
+title: '68. 테스트 아키텍처 — 단위·통합'
+description: '테스트하기 쉬운 컴포넌트 API와 로직 분리, 단위·DOM 통합 테스트, 커스텀 요소 등록·속성·프로퍼티·CustomEvent 검증, jsdom·happy-dom의 한계와 브라우저 러너, 비동기 완료 대기와 레지스트리 격리를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 테스트하기 쉬운 컴포넌트 구조를 설계하고, 단위 테스트와 DOM 통합 테스트로 등록·속성·프로퍼티·이벤트를 검증하며, 실행 환경(가짜 DOM과 실제 브라우저)과 비동기 대기·레지스트리 격리 문제를 다룰 수 있습니다.
+</Callout>
+
+## 테스트 가능한 컴포넌트 API
+
+테스트 가능한 컴포넌트는 입력과 출력이 공개 API에 모두 드러나는 컴포넌트입니다. 테스트는 그 API만 두드리면 되고, 내부 구현을 몰라도 동작을 확인할 수 있어야 합니다(공개 API 설계는 19편, 통신은 25편).
+
+| 입력 | 출력 |
+|------|------|
+| 속성(attribute), 프로퍼티, 메서드 호출, 슬롯 콘텐츠, 사용자 입력 | DOM 변화, 반영된 속성, `CustomEvent`, 메서드 반환값, 폼 값 |
+
+- 컴포넌트가 읽고 쓰는 것을 모두 공개 입출력으로 만듭니다. 전역 변수, 싱글턴, `Date.now()`, `fetch`를 컴포넌트 안에서 바로 부르면 테스트가 환경에 묶입니다.
+- 외부 의존(데이터 소스, 시계, 서비스)은 프로퍼티나 생성자 인수로 주입받게 해서 테스트에서 대체합니다.
+- 내부 상태는 직접 읽지 않고 공개 결과(렌더링된 텍스트, 이벤트)로 확인합니다. `#private` 필드와 닫힌 Shadow DOM은 외부에서 읽을 수 없으므로 이 원칙이 자연스럽게 강제됩니다(자세히는 20편).
+- 이벤트는 어떤 상황에 어떤 `detail`로 발생하는지 문서화된 계약으로 둡니다. 계약이 곧 테스트 케이스 목록입니다.
+
+**흔한 실수:** 구현 세부(내부 `div`의 클래스 이름, 호출 순서)를 단언하는 것입니다. 리팩터링할 때마다 깨지는 테스트가 됩니다.
+
+## Pure Logic과 DOM Logic 분리
+
+순수 로직(pure logic)은 입력이 같으면 출력이 같고 DOM·네트워크·시간을 모르는 함수입니다. DOM 로직(DOM logic)은 요소를 만들고 이벤트를 연결하며 화면에 반영하는 코드입니다. 둘을 따로 파일로 나누면 순수 로직은 브라우저 없이 빠르게 테스트하고, 얇은 DOM 로직만 브라우저에서 확인할 수 있습니다.
+
+```js
+// counter-logic.js — 순수 로직
+export const next = (n, step, max) => Math.min(n + step, max)
+
+// ui-counter.js — DOM 로직
+import { next } from './counter-logic.js'
+class UiCounter extends HTMLElement {
+  inc() {
+    this.value = next(this.value, this.step, this.max)
+    this.render()
+  }
+}
+```
+
+- 분리 대상: 값 계산, 검증, 상태 전이(리듀서), 포맷팅, 정렬·필터링, 키 입력을 동작으로 번역하는 매핑 같은 규칙입니다(Reactive State 설계는 31편).
+- DOM 로직에는 판단을 넣지 않습니다. 순수 함수의 결과를 DOM에 옮기는 일만 합니다.
+- 분리하면 같은 로직을 서버, 워커, 다른 컴포넌트에서 재사용할 수도 있습니다.
+
+## Unit Test
+
+단위 테스트(unit test)는 가장 작은 단위 하나를 격리해서 검증하는 테스트입니다. 여기서는 순수 로직 함수와 DOM에 닿지 않는 클래스입니다.
+
+```js
+import { test, expect } from 'vitest'
+import { next } from './counter-logic.js'
+
+test('상한을 넘지 않는다', () => {
+  expect(next(9, 2, 10)).toBe(10)
+})
+test('상한 아래에서는 더한다', () => {
+  expect(next(3, 2, 10)).toBe(5)
+})
+```
+
+- 한 테스트는 한 가지 동작만 검증하고, 이름에 동작과 조건을 씁니다. 경계값(0, 상한, 빈 입력)과 잘못된 입력을 포함합니다.
+- 외부 의존은 가짜(fake)나 스파이(spy)로 대체합니다. 시간이 필요하면 가짜 타이머를, 네트워크가 필요하면 가짜 함수를 주입합니다.
+- 실행 환경이 Node.js여도 되므로 가장 빠릅니다. 이 단계가 테스트 수의 대부분을 차지하는 편이 좋습니다.
+- 테스트 러너(Vitest, Jest 등)와 단언 문법은 러너마다 다르므로 해당 문서를 따릅니다. 이 문서의 코드는 Vitest 문법입니다.
+
+## DOM Integration Test
+
+DOM 통합 테스트는 컴포넌트를 실제 DOM에 붙여서, 렌더링·속성·이벤트가 함께 맞물려 동작하는지 검증합니다. 사용자가 하는 방식으로 조작하고 보이는 결과를 단언합니다.
+
+```js
+import { test, expect, afterEach } from 'vitest'
+import './ui-counter.js'
+
+afterEach(() => { document.body.replaceChildren() })
+
+test('버튼을 누르면 값이 오른다', async () => {
+  const el = document.createElement('ui-counter')
+  document.body.append(el)
+  el.shadowRoot.querySelector('button').click()
+  expect(el.value).toBe(1)
+})
+```
+
+- 구조: 준비(요소 생성과 연결), 실행(클릭·입력·속성 변경), 단언(DOM·이벤트), 정리(요소 제거)입니다. 정리를 `afterEach`에 두어 다음 테스트가 오염되지 않게 합니다.
+- 찾기와 조작은 접근성 의미(역할, 레이블, 텍스트)를 기준으로 하면 구현이 바뀌어도 덜 깨집니다. 클래스 이름이나 내부 구조에 기대지 않습니다(Shadow DOM 쿼리는 69편).
+- 요소를 문서에 붙이는 일(`append`)이 `connectedCallback`을 호출하므로, 붙인 뒤에 결과를 확인합니다(생명주기는 18편).
+- 만들기, 붙이기, 정리를 반복하는 코드는 `fixture` 같은 도우미 함수 하나로 묶습니다.
+- 단위 테스트와 달리 느리고 환경 영향을 받으므로, 화면 흐름과 컴포넌트 간 연결처럼 단위로 확인할 수 없는 것만 맡깁니다.
+
+## Custom Element 등록 테스트
+
+등록 테스트는 `customElements.define`이 올바르게 되었는지와 정의 이후 요소가 기대한 클래스로 만들어지는지를 확인합니다.
+
+```js
+test('ui-counter가 등록된다', () => {
+  expect(customElements.get('ui-counter')).toBe(UiCounter)
+})
+test('만든 요소가 정의된 클래스다', () => {
+  const el = document.createElement('ui-counter')
+  expect(el).toBeInstanceOf(UiCounter)
+  expect(el.matches(':defined')).toBe(true)
+})
+```
+
+- `customElements.get(name)`은 등록된 생성자를 돌려주고 없으면 `undefined`입니다.
+- `define()`은 이름이 이미 쓰였거나 같은 생성자가 이미 등록되어 있으면 `NotSupportedError`를, 유효하지 않은 이름(하이픈 없음, 대문자 포함)이면 `SyntaxError`를 던집니다. 이 예외도 테스트할 수 있습니다.
+- 정의되기 전에 만든 요소는 일반 `HTMLElement`이고, 정의 뒤에 업그레이드되어 클래스가 바뀝니다. 업그레이드가 일어나는지는 `:defined` 일치와 `instanceof`로 확인합니다(업그레이드는 17편).
+- 생성자는 속성·자식 접근과 `connectedCallback` 같은 일이 안 되는 시점에 호출되므로, 생성자가 외부에 의존하지 않는지(예외 없이 만들어지는지)를 `document.createElement`로 검사합니다.
+
+## Attribute와 Property 테스트
+
+속성(attribute)은 HTML 마크업 쪽 문자열 값이고, 프로퍼티(property)는 JavaScript 객체 쪽 값입니다. 둘의 동기화 규칙은 컴포넌트마다 다르므로(반영, 변환, 기본값) 규칙을 계약으로 테스트합니다(자세히는 19편).
+
+```js
+test('속성 값이 프로퍼티에 반영된다', () => {
+  const el = document.createElement('ui-counter')
+  el.setAttribute('step', '5')
+  expect(el.step).toBe(5)           // 숫자로 변환
+})
+test('프로퍼티가 속성으로 반영된다', () => {
+  const el = document.createElement('ui-counter')
+  el.step = 2
+  expect(el.getAttribute('step')).toBe('2')
+})
+```
+
+확인할 항목입니다.
+
+| 항목 | 검증 내용 |
+|------|-----------|
+| 속성에서 프로퍼티로 | `setAttribute`, `removeAttribute` 뒤의 프로퍼티 값, 타입 변환(문자열을 숫자·불리언으로) |
+| 프로퍼티에서 속성으로 | 반영(reflect) 대상인지, 불리언 속성은 존재 여부로 반영되는지 |
+| 기본값 | 속성이 없을 때의 프로퍼티 값 |
+| 잘못된 값 | 범위 밖·형식 오류를 어떻게 처리하는지 |
+| `observedAttributes` | 선언된 속성만 `attributeChangedCallback`을 일으키는지 |
+| 업그레이드 전 설정 | 정의 전에 요소에 대입한 프로퍼티가 업그레이드 뒤에도 유지되는지 |
+
+- `attributeChangedCallback`은 `static observedAttributes`에 나열한 속성만 호출합니다. 목록에 없는 속성을 바꿔도 호출되지 않는 것도 검증합니다.
+- 속성 변경에 대한 반응은 동기일 수도 있고 비동기 렌더링 뒤일 수도 있으므로, 완료 시점을 기다린 뒤 DOM을 확인합니다(아래 "정의·업그레이드·렌더 완료를 기다리는 방법").
+- 불리언 속성은 값이 아니라 존재 여부로 읽고, 반영할 때는 `toggleAttribute`로 추가·제거합니다.
+
+## CustomEvent 테스트
+
+컴포넌트가 내보내는 이벤트는 공개 출력입니다. 이벤트 이름, `detail`, 전파 옵션(`bubbles`, `composed`, `cancelable`)을 검증합니다.
+
+```js
+test('값이 바뀌면 change 이벤트를 낸다', () => {
+  const el = document.createElement('ui-counter')
+  document.body.append(el)
+  const handler = vi.fn()
+  el.addEventListener('change', handler)
+  el.inc()
+  expect(handler).toHaveBeenCalledOnce()
+  expect(handler.mock.calls[0][0].detail).toEqual({ value: 1 })
+})
+```
+
+- 이벤트 디스패치는 동기입니다. `dispatchEvent`가 끝나면 모든 리스너가 이미 실행됐으므로 기다릴 필요 없이 바로 단언합니다. 이벤트가 비동기 작업 뒤에 나오는 컴포넌트만 기다립니다.
+- 호출 횟수와 `detail`을 모두 확인합니다. 값이 안 바뀌었을 때 이벤트가 나오지 않는 것(0회)도 검증 대상입니다.
+- 전파 옵션도 계약입니다. Shadow DOM 밖에서 받아야 하는 이벤트는 `composed: true`이고, 조상에서 위임해 받으려면 `bubbles: true`입니다(전파는 7편). 이벤트를 호스트에서 받는 테스트를 만들어 확인합니다.
+- 취소 가능한 이벤트는 리스너에서 `preventDefault()`를 호출한 뒤 컴포넌트의 후속 동작이 멈추는지, 그리고 `dispatchEvent`가 `false`를 돌려주는지 확인합니다.
+- 입력으로 쓰는 이벤트는 테스트에서 직접 만들어 보냅니다. 리스너가 받는 `detail`이 바뀌어도 형식이 지켜지는지 검증합니다.
+
+```js
+const e = new CustomEvent('select', {
+  detail: { id: 3 }, bubbles: true, composed: true,
+})
+el.dispatchEvent(e)
+```
+
+## jsdom·happy-dom의 한계와 실제 브라우저 테스트
+
+jsdom과 happy-dom은 Node.js 안에서 DOM을 흉내 내는 구현입니다. 브라우저를 띄우지 않아 빠르고 설정이 단순하지만, 진짜 브라우저가 아니라서 동작이 다를 수 있습니다.
+
+| 항목 | jsdom | happy-dom |
+|------|-------|-----------|
+| 성격 | 브라우저 없는 DOM 구현(Node.js) | 같음. Custom Elements, Declarative Shadow DOM 등을 지원한다고 소개 |
+| 레이아웃 | 엔진이 없어 `getBoundingClientRect` 등이 0을 돌려줌 | 그래픽 인터페이스 없는 구현이므로 지원 범위를 문서로 확인 |
+| 내비게이션 | 링크 이동·`location.href` 변경 불가 | 지원 범위를 문서로 확인 |
+| 렌더링 | `pretendToBeVisual` 옵션으로 `requestAnimationFrame` 등을 흉내만 냄 | 실제 그리기 없음 |
+
+- 레이아웃 엔진이 없으므로 크기·위치에 의존하는 코드(`IntersectionObserver`, `ResizeObserver`, 스크롤, `getBoundingClientRect`)는 의미 있는 값을 얻지 못합니다. 가짜 값을 주입해야 하고, 그 테스트는 실제 동작을 증명하지 못합니다.
+- CSS가 실제로 적용되는지, 포커스 이동, 실제 입력 이벤트 순서, Shadow DOM·ElementInternals·폼 연동 같은 최신 표준의 지원 범위는 도구마다 다르고 실제 브라우저와 어긋날 수 있습니다. 쓰는 기능이 지원되는지 도구 문서로 확인합니다.
+- 구현이 흉내라서 통과해도 실제 브라우저에서 깨질 수 있고, 반대 경우도 있습니다.
+
+판단 기준은 이렇습니다.
+
+| 테스트 대상 | 권장 환경 |
+|-------------|-----------|
+| 순수 로직 | Node.js |
+| 렌더링 결과, 속성·프로퍼티·이벤트 같은 DOM 계약 | jsdom·happy-dom 또는 실제 브라우저 |
+| 레이아웃, 스타일, 포커스, 옵저버, 폼·ElementInternals, 접근성 | 실제 브라우저 |
+
+컴포넌트 라이브러리의 목표가 브라우저 표준 동작에 얹히는 것이므로, DOM 통합 테스트는 실제 브라우저에서 돌리는 편이 안전합니다(E2E와 접근성 테스트는 69편).
+
+### 브라우저 테스트 러너의 구조
+
+브라우저 테스트 러너는 Node.js 프로세스가 브라우저를 띄우고 테스트 파일을 페이지에 로드해 실행한 뒤 결과를 받아 보고하는 구조입니다.
+
+| 러너 | 특징 |
+|------|------|
+| Vitest 브라우저 모드 | Playwright·WebdriverIO·preview 중 하나를 제공자(provider)로 쓴다. 테스트가 iframe 안에서 실제 브라우저의 `window`·`document`로 실행된다. 텍스트·레이블·역할 기반 로케이터와 `userEvent`를 제공한다 |
+| Web Test Runner | 헤드리스 브라우저(Puppeteer, Playwright, Selenium, WebdriverIO)에서 실행한다. 테스트를 병렬로 격리해 돌리고, 감시 모드와 디버그 모드(실제 창과 DevTools)를 제공한다 |
+
+```ts
+// vitest.config.ts (일부)
+test: {
+  browser: {
+    enabled: true,
+    provider: playwright(),
+    instances: [{ browser: 'chromium' }],
+  },
+}
+```
+
+- 구성: 러너(Node.js) 프로세스, 브라우저 제어 도구(제공자), 실제 브라우저, 테스트 파일을 번들·서빙하는 개발 서버입니다. 브라우저 안에서 네이티브 ES 모듈로 테스트를 실행합니다.
+- 제공자나 브라우저를 여러 개 지정하면 같은 테스트를 Chromium, Firefox, WebKit에서 돌려 엔진별 차이를 잡을 수 있습니다.
+- 브라우저 모드는 `alert`·`confirm` 같은 스레드를 막는 대화상자를 자동으로 모의 처리합니다.
+- 개발 중에는 브라우저 창과 DevTools로 직접 확인하고, CI에서는 헤드리스로 돌립니다.
+
+## 정의·업그레이드·렌더 완료를 기다리는 방법
+
+테스트에서 가장 흔한 실패 원인은 아직 안 끝난 것을 단언하는 것입니다. 기다려야 하는 시점은 세 가지입니다.
+
+| 시점 | 기다리는 방법 |
+|------|---------------|
+| 요소 정의 | `await customElements.whenDefined('ui-counter')` |
+| 업그레이드 | 정의 뒤 `customElements.upgrade(root)`, 또는 문서에 연결 |
+| 렌더 완료 | 컴포넌트가 제공하는 완료 Promise, 또는 한 프레임·마이크로태스크 대기 |
+
+```js
+await import('./ui-counter.js')              // 정의 등록
+await customElements.whenDefined('ui-counter')
+const el = document.createElement('ui-counter')
+document.body.append(el)
+await new Promise((r) => requestAnimationFrame(r))
+```
+
+- `whenDefined(name)`은 정의되면 생성자를 담아 이행하는 Promise이고, 이미 정의됐으면 즉시 이행됩니다. 이름이 유효하지 않으면 `SyntaxError`를 던집니다. 정의가 동적 `import()`로 늦게 오는 경우(66편의 Lazy Component)를 테스트할 때 씁니다.
+- `customElements.upgrade(root)`는 문서에 연결되지 않은 서브트리의 요소를 업그레이드합니다. 정의 전에 `createElement`나 `DocumentFragment`로 만든 요소를 문서에 붙이기 전에 정의된 클래스로 바꿔 확인합니다.
+- 렌더링이 비동기인 컴포넌트는 값을 바꾼 뒤 렌더링이 끝날 때까지 기다려야 합니다. 컴포넌트가 완료 Promise를 공개하면 그것을 기다리고, 없으면 마이크로태스크(`await Promise.resolve()`)나 한 프레임(`requestAnimationFrame`)을 기다립니다. 마이크로태스크와 프레임의 차이는 8편입니다.
+- 고정 시간 `setTimeout(100)` 대기는 느리고 불안정하므로 쓰지 않습니다. 조건이 맞을 때까지 반복해서 확인(폴링)하는 단언 기능을 쓰거나, 끝났다는 신호를 기다립니다.
+- 비동기 이벤트는 이벤트를 받는 Promise를 만들어서 기다립니다.
+
+```js
+const done = new Promise((r) =>
+  el.addEventListener('loaded', r, { once: true }),
+)
+el.load()
+await done
+```
+
+## 테스트 간 레지스트리 격리 문제
+
+`customElements.define`은 한 번 하면 되돌릴 수 없고(정의를 지우는 API가 없음), 이름과 생성자는 한 `window`에서 하나에 하나만 대응합니다. 그래서 같은 페이지에서 테스트가 여러 개 돌 때 정의가 계속 남아 서로 영향을 줍니다.
+
+| 문제 | 원인 | 대처 |
+|------|------|------|
+| `NotSupportedError`로 실패 | 같은 이름이나 같은 생성자를 두 번 `define` | 정의 전에 `customElements.get(name)`으로 확인 |
+| 이전 테스트의 정의가 남음 | 정의는 지워지지 않음 | 정의는 모듈 수준에서 한 번만. 테스트마다 정의를 만드는 구조를 피함 |
+| 테스트마다 다른 구현이 필요함 | 같은 이름에 다른 클래스를 못 씀 | 고유한 태그 이름(`ui-counter-1`, `ui-counter-2`)을 매번 생성 |
+| 문서 상태가 누적됨 | 이전 테스트의 요소가 `body`에 남음 | `afterEach`에서 요소를 제거 |
+| 전역 상태가 새어 나옴 | 모듈의 싱글턴, 전역 리스너 | 각 테스트 파일이 별도 페이지에서 실행되게 격리 |
+
+```js
+let seq = 0
+function defineFresh(Base) {
+  const name = `test-el-${seq++}`
+  customElements.define(name, class extends Base {})
+  return name
+}
+```
+
+- Web Test Runner는 테스트를 격리해 병렬로 실행하고 Vitest 브라우저 모드는 테스트를 iframe 안에서 실행합니다. 파일 사이의 오염은 러너의 격리 설정에 따라 줄어들고, 같은 페이지 안에서는 위 대처가 필요합니다.
+- 확장 클래스를 쓰는 테스트에서는 기본 클래스를 등록하지 않고, 테스트마다 서브클래스를 만들어 고유한 이름으로 등록하는 방식이 단순합니다.
+- 정의 등록이 모듈 평가의 부수 효과이면 같은 모듈을 여러 번 가져와도 한 번만 평가되므로 문제없습니다. 모듈을 다시 평가하게 만들면 `define`이 다시 실행되어 `NotSupportedError`가 날 수 있으니 `customElements.get`으로 막습니다.
+
+## 핵심 정리
+
+- 테스트 가능한 컴포넌트는 속성, 프로퍼티, 메서드, 이벤트로 입출력이 모두 드러나고 외부 의존을 주입받으며, 구현 세부가 아니라 공개 결과를 검증합니다.
+- 순수 로직은 DOM에서 분리해 Node.js 단위 테스트로 빠르게 검증하고, DOM 통합 테스트는 컴포넌트를 실제로 붙여 렌더링·속성·이벤트가 맞물리는지 확인합니다.
+- 등록은 `customElements.get`과 `:defined`로, 속성과 프로퍼티는 변환·반영·기본값·`observedAttributes` 계약으로, 이벤트는 호출 횟수·`detail`·전파 옵션으로 검증합니다.
+- jsdom·happy-dom은 레이아웃·내비게이션 같은 한계가 있어 레이아웃·포커스·옵저버·폼 연동은 Vitest 브라우저 모드나 Web Test Runner 같은 실제 브라우저에서 확인합니다.
+- 정의·업그레이드·렌더 완료를 `whenDefined`, `upgrade`, 완료 신호로 기다리고, `define`은 되돌릴 수 없으므로 고유한 태그 이름과 한 번만 정의하는 구조로 격리합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="순수 로직과 DOM 로직을 분리하는 가장 큰 이점은?"
+  options={['컴포넌트가 Shadow DOM을 쓸 수 있게 된다', '순수 로직을 브라우저 없이 빠르게 단위 테스트하고 DOM 로직은 얇게 유지해 통합 테스트로 확인할 수 있다', '모든 테스트를 jsdom 하나로 대체할 수 있다', '이벤트가 동기로 발생한다']}
+  correctAnswer={2}
+  explanation="판단과 계산을 순수 함수로 빼면 Node.js에서 빠르게 반복해 검증할 수 있고, DOM 로직은 결과를 화면에 옮기는 일만 하게 되어 통합 테스트의 범위가 작아집니다. Shadow DOM 사용 여부, 테스트 환경 통일, 이벤트 발생 방식과는 관계가 없습니다."
+  optionExplanations={['Shadow DOM 사용 여부는 로직 분리와 무관하다', '순수 로직은 DOM 없이 빠르게 검증하고 DOM 로직은 통합 테스트로 확인한다', '레이아웃·포커스 같은 것은 실제 브라우저가 필요해 하나로 대체되지 않는다', '이벤트의 동기·비동기는 분리와 무관하다']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="같은 페이지에서 여러 테스트가 같은 태그 이름으로 customElements.define을 호출할 때 생기는 문제와 대처로 옳은 것은?"
+  options={['두 번째 호출이 이전 정의를 덮어쓰므로 문제가 없다', 'NotSupportedError가 발생하므로 customElements.get으로 확인해 한 번만 정의하거나 테스트마다 고유한 이름을 쓴다', 'undefine API로 매 테스트 후 정의를 지운다', 'SyntaxError가 발생하므로 이름에서 하이픈을 뺀다']}
+  correctAnswer={2}
+  explanation="define은 이미 쓰인 이름이나 생성자가 있으면 NotSupportedError를 던지고 덮어쓰지 않으며, 정의를 지우는 API도 없습니다. 그래서 한 번만 정의하거나 고유한 이름으로 서브클래스를 등록합니다. SyntaxError는 유효하지 않은 이름일 때이며 하이픈은 오히려 필수입니다."
+  optionExplanations={['정의는 덮어써지지 않고 예외가 발생한다', '중복 정의는 NotSupportedError이고 한 번만 정의하거나 고유한 이름으로 격리한다', '정의를 지우는 API는 없다', '커스텀 요소 이름에는 하이픈이 필수라 빼면 SyntaxError가 된다']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="레이아웃에 의존하는 코드(getBoundingClientRect, ResizeObserver)를 테스트할 때 jsdom의 한계에 대한 설명으로 옳은 것은?"
+  options={['jsdom은 실제 레이아웃을 계산하므로 값이 정확하다', 'jsdom에는 레이아웃 엔진이 없어 크기와 위치 값이 0으로 나오므로 실제 브라우저에서 테스트해야 의미가 있다', 'jsdom은 내비게이션을 완전히 지원한다', 'pretendToBeVisual 옵션으로 레이아웃이 계산된다']}
+  correctAnswer={2}
+  explanation="jsdom은 헤드리스 구현이고 레이아웃 엔진이 없어 getBoundingClientRect 같은 값이 0입니다. pretendToBeVisual은 visibilityState와 requestAnimationFrame을 흉내 낼 뿐 레이아웃을 계산하지 않고, 링크 이동 같은 내비게이션도 지원하지 않습니다. 그래서 레이아웃 의존 코드는 Vitest 브라우저 모드 같은 실제 브라우저에서 검증합니다."
+  optionExplanations={['레이아웃 엔진이 없어 값을 계산하지 못한다', '값이 0으로 나와 실제 브라우저에서 검증해야 의미가 있다', '내비게이션은 지원하지 않고 미구현 오류가 보고된다', '이 옵션은 가시성과 requestAnimationFrame만 흉내 낸다']}
+/>
+
+## 참고 자료
+
+- [MDN — CustomElementRegistry.define()](https://developer.mozilla.org/en-US/docs/Web/API/CustomElementRegistry/define)
+- [MDN — CustomElementRegistry.whenDefined()](https://developer.mozilla.org/en-US/docs/Web/API/CustomElementRegistry/whenDefined)
+- [MDN — CustomElementRegistry.upgrade()](https://developer.mozilla.org/en-US/docs/Web/API/CustomElementRegistry/upgrade)
+- [MDN — CustomEvent()](https://developer.mozilla.org/en-US/docs/Web/API/CustomEvent/CustomEvent)
+- [MDN — Using custom elements](https://developer.mozilla.org/en-US/docs/Web/API/Web_components/Using_custom_elements)
+- [HTML Standard — Custom elements](https://html.spec.whatwg.org/multipage/custom-elements.html)
+- [jsdom — README](https://github.com/jsdom/jsdom)
+- [happy-dom — README](https://github.com/capricorn86/happy-dom)
+- [Vitest — Browser Mode](https://vitest.dev/guide/browser/)
+- [Web Test Runner — Overview](https://modern-web.dev/docs/test-runner/overview/)

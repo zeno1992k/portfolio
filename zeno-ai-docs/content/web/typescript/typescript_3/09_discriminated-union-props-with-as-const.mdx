@@ -1,0 +1,77 @@
+---
+title: '09. 판별 유니온과 as const로 Props 설계하기'
+description: '책 상태 뱃지 컴포넌트를 판별 유니온 props로 재설계해 불가능한 상태를 컴파일 타임에 없앤다'
+---
+
+## 개념 정리
+
+04편에서 `types/book.ts`에 `BookStatus`를 정의할 때 값을 나열한 유니온 타입을 손으로 썼습니다.
+
+```ts
+export type BookStatus = 'wish' | 'reading' | 'done'
+```
+
+`BookCard.tsx`(04편)에는 이 값을 화면 문구 키로 바꾸는 `STATUS_KEY: Record<BookStatus, string>` 객체가 있었습니다. 상태가 하나 더 늘어나면 `BookStatus` 유니온과 `STATUS_KEY` 양쪽을 따로 고쳐야 합니다.
+
+### `as const`로 유니온 도출하기
+
+`typescript_2`에서 `as const`를 배웠습니다. 배열 리터럴 뒤에 붙이면 각 원소가 넓은 타입(`string`)이 아니라 그 값 자체의 리터럴 타입으로 좁혀지고, 배열도 읽기 전용 튜플이 됩니다.
+
+```ts
+const rawStatuses = ['wish', 'reading', 'done']
+// string[] — 원소가 무엇이든 될 수 있는 넓은 타입
+
+const constStatuses = ['wish', 'reading', 'done'] as const
+// readonly ['wish', 'reading', 'done'] — 원소 하나하나가 리터럴 타입
+```
+
+`typeof constStatuses[number]`로 튜플의 원소 타입만 뽑으면 `'wish' | 'reading' | 'done'` 유니온이 됩니다. 값과 타입을 같은 배열 하나에서 함께 관리하는 방법입니다.
+
+### 판별 유니온으로 불가능한 상태 없애기
+
+지금까지 컴포넌트 props를 설계할 때 관련 있는 필드를 전부 선택적(`?`)으로 늘어놓는 방식을 썼을 수 있습니다.
+
+| 방식 | 문제 |
+|---|---|
+| `{ status: BookStatus; rating?: number; startedAt?: string }` | `status`가 `'wish'`인데 `rating`을 같이 넘기는 조합도 타입으로는 허용됨 |
+| `{ status: 'wish' } \| { status: 'reading'; startedAt: string } \| { status: 'done'; rating: number }` | `status`값에 따라 함께 있어야 할 필드가 정확히 정해짐 |
+
+두 번째 방식이 **판별 유니온**(discriminated union)입니다. `status` 필드가 **판별자**(discriminant) 역할을 해서, 그 값에 따라 나머지 필드의 존재 여부와 타입이 자동으로 좁혀집니다. 컴포넌트 props에 적용하면, 상태에 맞지 않는 조합 자체가 만들어지지 않습니다.
+
+## 자주 하는 실수
+
+| 증상 | 원인 | 고치는 법 |
+|---|---|---|
+| `as const`를 붙였는데도 원소가 `string`으로 추론됨 | 배열이 아니라 개별 변수 선언에 `as const`를 빠뜨림 | 배열 리터럴 전체(`['wish', 'reading', 'done'] as const`)에 붙였는지 확인 |
+| `StatusBadge`에 `status`만 넘겼는데 `rating`이 없다는 오류가 남 | `status: 'done'`인데 `rating`을 빠뜨림 | 판별 유니온의 해당 분기가 요구하는 필드를 모두 넘긴다 |
+| `props.startedAt`에 접근하는 곳에서 프로퍼티가 없다는 오류가 남 | `if (props.status === 'reading')` 같은 좁히기 없이 바로 접근 | 판별자로 먼저 좁힌 블록 안에서만 해당 필드에 접근한다 |
+
+## 확인 문제
+
+<Quiz
+  questionNumber={1}
+  question={"다음 두 선언의 차이를 설명한 것으로 옳은 것은\\n\\n```ts\\nconst a = ['wish', 'reading', 'done']\\nconst b = ['wish', 'reading', 'done'] as const\\n```"}
+  options={["둘 다 정확히 같은 타입으로 추론된다","a는 원소가 string으로 넓게 추론되고, b는 as const 덕분에 원소가 리터럴 타입으로 좁게 추론된다","b는 배열이 아니라 객체로 바뀐다","a만 런타임 값으로 사용할 수 있다"]}
+  correctAnswer={2}
+  explanation={"as const가 없으면 배열 원소 타입이 string처럼 넓게 추론되고, as const를 붙이면 각 원소가 그 값 자체의 리터럴 타입으로, 배열 전체는 읽기 전용 튜플로 추론됩니다."}
+/>
+
+<Quiz
+  questionNumber={2}
+  question={"StatusBadgeProps 판별 유니온에서 status 필드가 하는 역할은"}
+  options={["컴포넌트 이름을 정하는 값","어떤 분기인지 구분해 나머지 필드의 존재 여부와 타입을 결정하는 판별자","CSS 클래스 이름과 항상 동일한 값","뱃지 색상만 결정하고 다른 필드와는 무관한 값"]}
+  correctAnswer={2}
+  explanation={"status는 판별 유니온의 판별자로, 이 값에 따라 함께 존재해야 하는 다른 필드(startedAt, rating)가 정확히 정해집니다."}
+/>
+
+<Quiz
+  questionNumber={3}
+  question={"status를 reading, rating을 5로 함께 넘겨 StatusBadge를 호출하면 어떤 일이 일어나는가"}
+  options={["정상 동작하며 rating은 무시된다","reading 분기에는 rating이라는 필드가 없어 컴파일 에러가 난다","TypeScript가 자동으로 status를 done으로 바꾼다","런타임에만 경고가 출력되고 컴파일은 통과한다"]}
+  correctAnswer={2}
+  explanation={"StatusBadgeProps에서 status가 reading인 분기는 startedAt만 요구하고 rating 필드를 정의하지 않으므로, 존재하지 않는 프로퍼티를 넘긴 것이 되어 컴파일 에러가 납니다."}
+/>
+
+## 참고 자료
+
+- [TypeScript Handbook — Narrowing(Discriminated Unions)](https://www.typescriptlang.org/docs/handbook/2/narrowing.html#discriminated-unions)

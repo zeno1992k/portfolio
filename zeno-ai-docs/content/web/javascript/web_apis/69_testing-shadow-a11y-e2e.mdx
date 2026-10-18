@@ -1,0 +1,350 @@
+---
+title: '69. 테스트 아키텍처 — Shadow DOM·접근성·E2E'
+description: 'Shadow DOM·슬롯·접근성·키보드·폼 연동 컴포넌트를 어떻게 검증하는지, fetch·Worker·Service Worker 모킹, E2E와 시각 회귀 테스트의 범위를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 캡슐화된 컴포넌트를 공개 계약 기준으로 검증하는 방법과 자동 검사·합성 이벤트·모킹의 한계를 구분하고, 단위·통합·E2E 테스트에 각각 무엇을 맡길지 정할 수 있습니다.
+</Callout>
+
+## Shadow DOM 테스트
+
+Shadow DOM 테스트의 기준은 내부 DOM 구조가 아니라 공개 계약입니다. 공개 계약은 속성·프로퍼티, 발생시키는 이벤트, 슬롯, `::part()`, CSS 변수입니다. 내부 구조에 묶인 테스트는 리팩터링할 때마다 깨집니다.
+
+`mode: 'open'`이면 `el.shadowRoot`로 내부에 접근합니다. `mode: 'closed'`이면 `el.shadowRoot`가 `null`입니다. 테스트 때문에 `closed`를 `open`으로 바꾸지 말고, 닫힌 컴포넌트는 공개 계약과 렌더링 결과로만 검증합니다.
+
+```js
+const el = document.createElement('x-counter')
+document.body.append(el)
+el.shadowRoot.querySelector('button').click()
+el.shadowRoot.querySelector('output').textContent // '1'
+```
+
+- `shadowRoot.querySelector`는 그 루트 안만 찾습니다. 중첩된 Shadow 안쪽은 루트를 하나씩 따라 내려가야 합니다.
+- `document.querySelector`는 Shadow 안쪽을 찾지 못합니다.
+- 문서 수준 리스너가 받는 `event.target`은 리타깃팅 때문에 호스트입니다. 실제 발생 지점은 열린 트리에서 `event.composedPath()`로 확인합니다(자세히는 21편).
+- 렌더링이 비동기인 컴포넌트는 갱신이 끝날 때까지 기다린 뒤 단언합니다. 대기 방법은 컴포넌트가 정합니다(예: Lit의 `updateComplete`).
+- 테스트마다 만든 요소를 `afterEach`에서 `remove()`합니다. 남은 요소는 `document.body`를 공유하는 다른 테스트를 오염시킵니다.
+
+**흔한 실수:** 내부 `class` 이름이나 DOM 깊이를 단언하는 것입니다. 사용자가 보는 텍스트·역할·상태, 그리고 발생한 이벤트를 단언합니다.
+
+### Shadow DOM 관통 선택자
+
+브라우저에는 Shadow 경계를 넘는 표준 CSS 선택자가 없습니다. 도구가 대신 제공합니다.
+
+| 방법 | 동작 |
+|------|------|
+| Playwright 로케이터 | 기본으로 열린 Shadow 안쪽까지 찾음. XPath는 못 넘고 `closed`는 지원하지 않음 |
+| 직접 만든 헬퍼 | `shadowRoot`를 재귀로 따라 내려가며 `querySelector` |
+
+```js
+function deepQuery(root, selector) {
+  const hit = root.querySelector(selector)
+  if (hit) return hit
+  for (const host of root.querySelectorAll('*')) {
+    const inner = host.shadowRoot &&
+      deepQuery(host.shadowRoot, selector)
+    if (inner) return inner
+  }
+  return null
+}
+```
+
+역할·이름으로 찾는 `getByRole`, `getByText`, `getByLabel`도 Shadow 안쪽을 찾습니다. 구조가 아닌 사용자 관점으로 찾는 편이 경계 변경에 강합니다.
+
+## Slot 테스트
+
+슬롯 테스트는 어떤 노드가 어느 슬롯에 배정되는지, 폴백이 언제 보이는지, 배정이 바뀔 때 반응하는지를 검증합니다.
+
+- 슬롯에 배정된 요소는 `slot.assignedElements()`, 텍스트 노드까지 포함하려면 `slot.assignedNodes()`로 읽습니다.
+- `{ flatten: true }`를 주면 중첩된 슬롯까지 펼친 결과를 돌려줍니다. 배정된 노드가 없으면 폴백 콘텐츠를 돌려줍니다.
+- 슬롯된 노드는 Shadow 안이 아니라 호스트의 라이트 DOM 자식입니다. 라이트 DOM에서는 `el.querySelector`로 찾습니다.
+
+```js
+const root = el.shadowRoot
+const slot = root.querySelector('slot[name="title"]')
+slot.assignedElements()[0].textContent // 'Hi'
+```
+
+배정이 바뀌면 `slotchange`가 발생합니다. 자식을 추가한 직후가 아니라 이벤트를 기다린 뒤에 단언합니다.
+
+```js
+const changed = new Promise((resolve) =>
+  slot.addEventListener('slotchange', resolve,
+    { once: true }))
+el.append(extra)
+await changed
+slot.assignedElements().includes(extra) // true
+```
+
+기본 슬롯, 이름 있는 슬롯, 일치하는 `slot` 값이 없는 자식(어디에도 배정되지 않아 렌더링되지 않음), 폴백 네 경우를 각각 한 케이스로 둡니다(자세히는 22편).
+
+## 접근성 테스트
+
+접근성은 한 가지 도구로 끝나지 않으므로 층을 나눠 검증합니다.
+
+| 층 | 검증 대상 | 도구 |
+|----|-----------|------|
+| 규칙 검사 | 이름 누락, 잘못된 ARIA, 색 대비, 중복 id | axe-core |
+| 구조 검사 | 역할·이름·상태 트리가 의도와 같은지 | 접근성 트리 스냅샷 |
+| 상호작용 | 키보드로 조작되고 포커스가 맞는지 | 키보드 테스트 |
+| 수동 | 읽는 순서, 안내 문구의 적절성 | 스크린 리더, 사람 |
+
+- 역할로 찾는 로케이터(`getByRole('button', { name: '저장' })`) 자체가 접근성 테스트입니다. 역할이나 접근 가능한 이름이 잘못 계산되면 요소를 찾지 못합니다.
+- ARIA와 `ElementInternals`가 만드는 역할·이름·상태는 DOM 속성만 봐서는 알 수 없으므로 브라우저가 계산한 결과로 검증합니다(자세히는 27편).
+
+### axe-core 자동 검사의 범위와 한계
+
+axe-core는 접근성 규칙을 DOM에 적용하는 검사 엔진입니다. Shadow DOM을 지원하지만 폐기된 v0 Shadow DOM은 지원하지 않습니다.
+
+```js
+const results = await new AxeBuilder({ page })
+  .withTags(['wcag2a', 'wcag2aa'])
+  .analyze()
+expect(results.violations).toEqual([])
+```
+
+- 프로젝트가 밝힌 수치는 평균 57퍼센트의 WCAG 문제를 자동으로 찾는다는 것입니다. 나머지는 사람이 확인해야 합니다.
+- 결과는 `violations`(위반) 외에 `incomplete`(자동으로 판정하지 못해 수동 확인이 필요한 항목)를 돌려줍니다. `incomplete`를 무시하면 안 됩니다.
+- 자동으로 판정하지 못하는 것: 대체 텍스트의 적절성, 논리적 포커스 순서, 커스텀 위젯이 키보드로 실제 조작되는지, 스크린 리더의 안내 품질.
+- JSDOM에서는 `color-contrast` 규칙이 동작하지 않습니다. 대비 검사는 실제 브라우저에서 합니다.
+- `exclude()`와 `disableRules()`로 알려진 문제를 제외할 수 있지만 제외 사유와 기한을 코드에 남깁니다.
+
+**흔한 실수:** `violations`가 비었다는 것을 접근성이 충족됐다는 뜻으로 읽는 것입니다. 통과는 자동 검사 가능한 규칙 안에서 위반이 없다는 뜻입니다.
+
+### 접근성 트리 스냅샷
+
+접근성 트리 스냅샷은 접근성 트리를 텍스트(YAML)로 저장해 비교하는 방식입니다. Playwright는 `toMatchAriaSnapshot()`으로 제공합니다. 각 줄은 역할, 이름, 상태 순서입니다.
+
+```js
+await expect(page.locator('x-tabs')).toMatchAriaSnapshot(`
+  - tablist:
+    - tab "개요" [selected]
+    - tab "상세"
+  - tabpanel
+`)
+```
+
+- 기본은 포함 비교입니다. 적은 자식이 순서대로 있으면 통과하고 다른 요소가 더 있어도 허용합니다. `/children: equal`이면 정확히 일치해야 합니다.
+- 이름 자리에 `/정규식/`을 쓸 수 있고, 상태를 적지 않으면 그 상태를 검사하지 않습니다.
+- `locator.ariaSnapshot()`은 현재 트리를 YAML로 만들어 줍니다. 처음에는 이 출력으로 기대값을 만들고 사람이 검토합니다.
+- 픽셀이 아니라 의미를 비교하므로 스타일 변경에는 흔들리지 않고, 역할·이름·상태가 바뀌면 실패합니다.
+
+## Keyboard Interaction 테스트
+
+키보드 테스트는 위젯이 요구하는 키 조작, 포커스 이동, 포커스 복귀를 검증합니다(패턴은 27편, 28편).
+
+- 검증 항목: Tab으로 진입·이탈, 화살표 이동(roving tabindex), Enter·Space 활성화, Escape 닫기, 닫힌 뒤 트리거로 포커스 복귀.
+- Shadow DOM에서는 `document.activeElement`가 호스트이고 안쪽 요소는 `shadowRoot.activeElement`입니다. 포커스 단언은 로케이터의 `toBeFocused()`가 이 경계를 처리합니다.
+
+```js
+const tab = (name) => page.getByRole('tab', { name })
+await page.keyboard.press('Tab')
+await expect(tab('개요')).toBeFocused()
+await page.keyboard.press('ArrowRight')
+await expect(tab('상세')).toBeFocused()
+```
+
+단위 테스트에서 `dispatchEvent`로 키보드 이벤트를 만들 때는 두 가지를 지킵니다.
+
+- `new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, composed: true })`처럼 `bubbles`와 `composed`를 직접 줍니다. 생성자의 기본값은 둘 다 `false`라서 호스트까지 올라오지 못하고 Shadow 경계도 넘지 못합니다.
+- 합성 이벤트는 브라우저 기본 동작을 일으키지 않습니다. Tab 포커스 이동과 문자 입력은 실제 입력으로만 검증됩니다(아래 합성 이벤트 절).
+
+## 합성 이벤트와 실제 입력(WebDriver BiDi)의 차이
+
+`dispatchEvent`와 `element.click()`이 만든 이벤트는 `isTrusted`가 `false`입니다. 사용자·브라우저가 만든 이벤트는 `true`입니다. 같은 `click` 리스너가 불려도 브라우저는 둘을 다르게 취급합니다.
+
+| 방법 | isTrusted | 특징 |
+|------|-----------|------|
+| `dispatchEvent`, `element.click()` | `false` | 리스너만 실행. 기본 동작이 없고 가시성·가림 여부를 검사하지 않음 |
+| 브라우저 자동화의 입력(Playwright의 `click`·`press`, WebDriver BiDi의 `input.performActions`) | `true`(BiDi 표준) | 브라우저가 입력으로 처리 |
+
+- WebDriver BiDi는 브라우저와 자동화 도구가 양방향으로 통신하는 표준 프로토콜입니다. 이 프로토콜의 `input.performActions`가 만드는 입력은 `isTrusted`가 `true`이며 웹 페이지가 실제 사용자 입력과 구별할 수 없습니다.
+- Playwright의 `click`은 실행 전에 요소가 보이는지, 다른 요소에 가려지지 않았는지, 이동 중이 아닌지 확인합니다. `dispatchEvent`는 이런 검사를 하지 않아서 가려진 버튼도 눌립니다.
+- 사용자 활성화가 필요한 API(클립보드, 전체 화면, 팝업 등)는 신뢰된 입력으로만 검증됩니다(자세히는 10편).
+- 선택 기준: 컴포넌트 로직과 이벤트 흐름은 합성 이벤트로 빠르게, 포커스·기본 동작·가림·사용자 활성화는 실제 입력으로 검증합니다.
+
+**흔한 실수:** 합성 `click`이 통과했다고 사용자가 누를 수 있다고 믿는 것입니다. 투명한 오버레이가 버튼을 덮고 있어도 `element.click()`은 통과합니다.
+
+## Form-associated Component 테스트
+
+폼 연동 커스텀 요소(`static formAssociated = true`, 26편)는 폼과의 계약을 검증합니다.
+
+| 검증 항목 | 확인 방법 |
+|-----------|-----------|
+| 제출 값 | `new FormData(form).get(name)` |
+| 폼 연결 | `form.elements`에 포함, `internals.form` |
+| 리셋 | `form.reset()` 뒤 값 초기화(`formResetCallback`) |
+| 비활성화 | `fieldset`의 `disabled` 영향(`formDisabledCallback`) |
+| 유효성 | `form.checkValidity()`, `internals.validity`, `validationMessage` |
+| 레이블 | `internals.labels`, 레이블 클릭 시 포커스 |
+
+```js
+const form = document.createElement('form')
+form.innerHTML = '<x-rating name="score"></x-rating>'
+document.body.append(form)
+const rating = form.elements.namedItem('score')
+rating.value = '4'
+new FormData(form).get('score') // '4'
+form.reset()
+new FormData(form).get('score') // null (초기 상태)
+```
+
+- `internals`는 보통 비공개라서 공개된 동작(`FormData`, `form.checkValidity()`, `:invalid` 스타일, 제출 결과)으로 검증합니다.
+- 필수 값이 비었을 때 `form.checkValidity()`가 `false`이고 `requestSubmit()`이 제출 이벤트 없이 멈추는지도 확인합니다(자세히는 12편).
+- 실제 제출·자동 완성·상태 복원(`formStateRestoreCallback`)은 브라우저 동작이라 E2E에서 검증합니다.
+
+## Mock Fetch / Worker
+
+단위·통합 테스트에서 네트워크와 워커는 실제로 쓰지 않고 대체합니다. 대체가 쉽도록 컴포넌트가 `fetch`와 Worker 생성을 주입받게 설계합니다(자세히는 68편).
+
+```js
+const fetcher = vi.fn().mockResolvedValue(
+  new Response(JSON.stringify([{ id: 1 }]), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  }),
+)
+el.fetcher = fetcher
+await el.load()
+fetcher.mock.calls[0][0] // 요청 URL 단언
+```
+
+- 성공만 만들지 않습니다. 500 응답, 네트워크 오류(`fetch`는 `TypeError`로 거부), 취소(`AbortError`), 지연된 응답(경쟁 상태, 39편)을 각각 만듭니다.
+- 응답은 `new Response(body, init)`으로 만들면 실제와 같은 `ok`·`status`·`json()` 동작을 얻습니다.
+- 전역 `fetch`를 바꿨다면 `afterEach`에서 복원합니다.
+- 요청 자체도 단언합니다. 호출 URL, 메서드, 헤더, 본문, `signal` 전달 여부.
+
+Worker는 가짜 클래스로 바꿉니다. 메시지는 복제되므로 가짜도 `structuredClone`을 거치게 하면 복제할 수 없는 값을 넘기는 버그를 잡습니다(54편).
+
+```js
+class FakeWorker {
+  listeners = new Set()
+  postMessage(data) {
+    const copy = structuredClone(data)
+    queueMicrotask(() =>
+      this.listeners.forEach((fn) => fn({ data: copy })))
+  }
+  addEventListener(type, fn) { this.listeners.add(fn) }
+  terminate() { this.terminated = true }
+}
+```
+
+- 가짜 Worker는 연산 결과를 검증하지 않습니다. 워커 안의 로직은 별도의 순수 함수로 분리해 따로 테스트하고, 실제 워커 연결은 브라우저 테스트에서 확인합니다.
+- `terminate()`가 호출되는지로 정리 코드(67편)를 검증합니다.
+
+### Service Worker 기반 요청 모킹
+
+MSW(Mock Service Worker)는 브라우저에서 Service Worker API로 실제 네트워크 요청을 가로채 응답을 만듭니다. Node.js에는 Service Worker가 없어서 다른 방식으로 가로챕니다. 앱 코드를 바꾸지 않고 `fetch`·XHR 등 어떤 클라이언트든 같은 핸들러로 모킹할 수 있습니다.
+
+Playwright에서는 `page.route()`가 같은 역할을 합니다.
+
+```js
+await page.route('*/**/api/items', async (route) => {
+  await route.fulfill({ json: [{ id: 1, name: 'A' }] })
+})
+```
+
+- `route.fetch()`로 실제 응답을 받아 일부만 고쳐 `route.fulfill()`할 수도 있고, HAR 파일에 녹화해 재생할 수도 있습니다(`routeFromHAR`).
+- 앱에 자체 Service Worker(56편)가 있으면 상호작용을 주의합니다. fetch 핸들러가 있는 Service Worker가 가로챈 페이지 요청은 `page.route()`로 잡지 못합니다. 모킹 대상은 Service Worker 요청뿐입니다.
+- 테스트를 예측 가능하게 하려면 Playwright 설정의 `serviceWorkers: 'block'`으로 Service Worker를 끌 수 있습니다. 대신 운영과 동작이 달라지므로 Service Worker 자체를 검증하는 테스트에서는 켭니다.
+- 같은 스코프에는 활성 Service Worker가 하나뿐이라서, 앱의 Service Worker와 MSW의 워커를 한 스코프에 함께 등록하면 충돌합니다.
+
+## E2E 테스트
+
+E2E 테스트는 실제 브라우저로 사용자 시나리오 전체를 검증합니다. 컴포넌트 단위 테스트가 닿지 못하는 포커스, 레이아웃, 폼 제출, 라우팅, Service Worker, 브라우저별 차이가 대상입니다.
+
+- Shadow DOM 컴포넌트도 사용자 관점 로케이터(`getByRole`, `getByLabel`, `getByText`)로 찾으면 경계를 의식하지 않습니다.
+- Playwright는 동작 전에 요소가 존재하고, 보이고, 움직임이 멈추고, 가려지지 않았는지 기다립니다. 임의의 `sleep` 대신 조건을 기다리는 단언(`expect(...).toBeVisible()`)을 씁니다.
+- 외부 서비스와 불안정한 API는 `page.route()`로 대체하고, 핵심 경로만 실제 백엔드로 검증합니다.
+- 브라우저 엔진별 프로젝트(Chromium, Firefox, WebKit)를 설정해 호환성 차이를 잡습니다(자세히는 71편).
+
+```js
+test('탭을 키보드로 전환', async ({ page }) => {
+  await page.goto('/demo')
+  const tab = page.getByRole('tab', { name: '상세' })
+  await tab.click()
+  await expect(tab).toHaveAttribute('aria-selected', 'true')
+  const panel = page.getByRole('tabpanel')
+  await expect(panel).toContainText('상세')
+})
+```
+
+E2E는 느리고 실패 원인이 넓습니다. 많은 경우의 수는 단위·통합 테스트가 맡고, E2E는 핵심 사용자 경로와 브라우저에서만 확인되는 동작에 한정합니다.
+
+**흔한 실수:** 모든 케이스를 E2E로 쓰는 것입니다. 실행 시간이 늘고 불안정해져 결국 실패를 무시하게 됩니다.
+
+## 시각 회귀 테스트
+
+시각 회귀 테스트는 렌더링 결과를 기준 이미지와 비교합니다. Playwright에서는 `expect(page).toHaveScreenshot()`입니다. Shadow DOM 캡슐화와 관계없이 화면에 그려진 픽셀을 비교합니다.
+
+```js
+const card = page.locator('x-card')
+await expect(card).toHaveScreenshot('card.png', {
+  maxDiffPixels: 50,
+})
+```
+
+- 처음 실행하면 기준 이미지를 만듭니다. 의도한 변경은 `npx playwright test --update-snapshots`로 갱신하고, 갱신된 이미지를 사람이 검토합니다.
+- 파일 이름에 브라우저와 플랫폼이 들어갑니다. 렌더링은 OS, 버전, 설정, 하드웨어, 헤드리스 여부에 따라 달라서 기준 이미지를 만든 환경과 비교하는 환경을 같게 유지합니다. 보통 CI와 같은 컨테이너에서 기준을 만듭니다.
+- `maxDiffPixels` 같은 옵션으로 허용 오차를 정하고, `stylePath`로 지정한 CSS로 시계·광고 같은 변동 요소를 숨깁니다.
+- 검증할 상태를 요소 단위로 나눕니다. 기본, hover, focus, disabled, 오류, 어두운 테마, 좁은 폭.
+- 시각 테스트는 의미를 검증하지 못합니다. 같은 모양이라도 역할이 틀렸을 수 있으므로 접근성 검사와 함께 씁니다.
+
+**흔한 실수:** 전체 페이지를 비교하는 것입니다. 작은 변경에도 실패해 갱신이 습관이 됩니다. 컴포넌트 단위로 범위를 좁힙니다.
+
+## 핵심 정리
+
+- Shadow DOM 컴포넌트는 내부 구조가 아니라 공개 계약(속성, 이벤트, 슬롯, 역할·이름)으로 검증하고, `closed`를 테스트용으로 열지 않습니다.
+- 슬롯은 `assignedElements`·`assignedNodes`와 `slotchange`로, 폼 연동은 `FormData`·`checkValidity`·`reset`으로 검증합니다.
+- axe-core는 평균 57퍼센트의 문제만 찾으므로 접근성 트리 스냅샷, 키보드 테스트, 수동 확인과 함께 씁니다.
+- `dispatchEvent`는 `isTrusted`가 `false`이고 기본 동작이 없어서, 포커스·가림·사용자 활성화는 실제 입력(BiDi 입력, Playwright)으로 검증합니다.
+- `fetch`는 `Response` 객체로, Worker는 가짜 클래스로 대체하고, E2E에서는 `page.route()`나 MSW로 요청을 모킹하되 Service Worker와의 상호작용을 주의합니다.
+- E2E와 시각 회귀 테스트는 범위를 핵심 경로와 컴포넌트 단위로 좁히고 실행 환경을 고정합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="컴포넌트가 closed 모드 Shadow DOM을 쓸 때 테스트 방법으로 가장 알맞은 것은?"
+  options={['el.shadowRoot로 내부 요소를 직접 조회한다', '공개 속성, 이벤트, 역할·이름 같은 공개 계약으로 검증한다', '테스트를 위해 mode를 open으로 바꾼다', 'document.querySelector로 내부 요소를 조회한다']}
+  correctAnswer={2}
+  explanation="closed 모드에서는 el.shadowRoot가 null이고 document.querySelector도 Shadow 안쪽을 찾지 못합니다. 테스트 때문에 캡슐화 수준을 바꾸지 않고 속성, 이벤트, 렌더링 결과 같은 공개 계약으로 검증합니다."
+  optionExplanations={['closed 모드에서 shadowRoot는 null이라 내부에 접근할 수 없습니다.', '공개 계약은 내부 구조가 바뀌어도 유지되므로 closed 여부와 무관하게 안정적인 검증 기준입니다.', '구현을 테스트에 맞춰 바꾸는 것이라 컴포넌트의 캡슐화 설계를 해칩니다.', 'document 기준 조회는 Shadow 경계를 넘지 못합니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="axe-core 검사에서 violations 배열이 비어 있을 때 올바른 해석은?"
+  options={['접근성 요구 사항을 모두 충족했다', '자동 검사 가능한 규칙에서는 위반이 발견되지 않았다', '키보드 조작과 스크린 리더 안내도 검증되었다', 'incomplete 항목은 의미가 없으므로 무시해도 된다']}
+  correctAnswer={2}
+  explanation="axe-core는 평균 57퍼센트의 WCAG 문제를 자동으로 찾는다고 밝히고 있습니다. 빈 violations는 자동 검사 규칙 안에서 위반이 없다는 뜻이며, 포커스 순서나 안내 품질 같은 항목은 수동으로 확인해야 하고 incomplete는 수동 확인이 필요한 항목입니다."
+  optionExplanations={['자동 검사가 닿지 않는 영역이 남아 있어 충족을 보장하지 않습니다.', '검사 가능한 규칙 안에서 위반이 없다는 뜻으로 읽는 것이 정확합니다.', '키보드 조작과 스크린 리더 경험은 자동 규칙으로 판정하지 못하는 대표적인 영역입니다.', 'incomplete는 자동으로 판정하지 못해 사람이 확인해야 하는 항목입니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="버튼 위를 투명한 오버레이가 덮고 있는데도 단위 테스트의 button.click()은 통과했습니다. 원인으로 알맞은 것은?"
+  options={['click()이 만든 이벤트는 isTrusted가 true라서', 'click()은 요소가 가려졌는지 검사하지 않고 스크립트로 이벤트만 발생시켜서', 'Shadow DOM 안의 버튼은 항상 클릭되기 때문에', 'Playwright의 click()도 같은 방식으로 동작하기 때문에']}
+  correctAnswer={2}
+  explanation="HTMLElement.click()과 dispatchEvent로 만든 이벤트는 isTrusted가 false이고 가시성이나 가림 여부를 검사하지 않습니다. Playwright의 click은 실행 전에 요소가 보이는지, 다른 요소에 가려지지 않았는지 확인하므로 이 문제를 잡아냅니다."
+  optionExplanations={['click()이 만든 이벤트는 isTrusted가 false입니다.', '스크립트 호출은 실제 포인터 입력과 달리 가림 여부를 보지 않아서 통과합니다.', 'Shadow DOM과 가림 여부는 관계가 없습니다.', 'Playwright의 click은 가려진 요소를 기다리거나 실패시키는 검사를 거칩니다.']}
+/>
+
+## 참고 자료
+
+- [Playwright — Locators (Shadow DOM)](https://playwright.dev/docs/locators)
+- [Playwright — Aria snapshots](https://playwright.dev/docs/aria-snapshots)
+- [Playwright — Mock APIs](https://playwright.dev/docs/mock)
+- [Playwright — Network and Service Workers](https://playwright.dev/docs/service-workers)
+- [Playwright — Actions (입력 시뮬레이션)](https://playwright.dev/docs/input)
+- [Playwright — Accessibility testing](https://playwright.dev/docs/accessibility-testing)
+- [Playwright — Visual comparisons](https://playwright.dev/docs/test-snapshots)
+- [axe-core — GitHub](https://github.com/dequelabs/axe-core)
+- [Mock Service Worker 문서](https://mswjs.io/docs/)
+- [W3C — WebDriver BiDi](https://w3c.github.io/webdriver-bidi/)
+- [MDN — Event.isTrusted](https://developer.mozilla.org/en-US/docs/Web/API/Event/isTrusted)
+- [MDN — HTMLSlotElement.assignedElements()](https://developer.mozilla.org/en-US/docs/Web/API/HTMLSlotElement/assignedElements)
+- [MDN — Element.shadowRoot](https://developer.mozilla.org/en-US/docs/Web/API/Element/shadowRoot)
+- [MDN — ElementInternals](https://developer.mozilla.org/en-US/docs/Web/API/ElementInternals)
+- [Open Web Components — Testing](https://open-wc.org/docs/testing/testing-package/)

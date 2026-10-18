@@ -1,0 +1,22 @@
+/* 사이트 전체 기본 스타일: body, 기본 글꼴, 공통 button·img 규칙 */
+body {
+  font-family: system-ui, sans-serif;
+  line-height: 1.5;
+  color: var(--color-text);
+  background-color: var(--color-bg);
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+img {
+  display: block;
+  max-inline-size:100%;
+  block-size: auto;
+}
+
+h1 {
+  color: var(--color-brand);
+}

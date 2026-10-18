@@ -1,0 +1,334 @@
+---
+title: '16. Form 설계'
+description: '제어·비제어 선택 기준, 폼 State 구조, 검증·touched·dirty·에러·제출 상태의 설계, Field 컴포넌트, 브라우저 기본 검증, 접근성 있는 에러 표시, 검증 시점과 폼 라이브러리를 쓰는 기준을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 폼의 값, 오류, touched, dirty, 제출 상태를 구분해 최소한의 State로 설계하고, 접근성을 갖춘 Field 컴포넌트와 검증 시점을 정할 수 있습니다.
+</Callout>
+
+## Controlled vs Uncontrolled
+
+폼을 설계할 때 먼저 정할 것은 값을 State로 들고 있을지(제어), DOM에 맡길지(비제어)입니다. 기준은 입력 도중에 값이 필요한지입니다(방식 자체는 15편).
+
+| 필요한 것 | 선택 |
+|-----------|------|
+| 입력하는 동안 검증, 글자 수, 미리보기 | 제어 |
+| 한 입력이 다른 입력이나 UI를 바꿈 (조건부 필드, 연동) | 제어 |
+| 입력값을 강제로 바꿈 (형식 맞추기, 초기화) | 제어 |
+| 제출할 때만 값을 읽음 | 비제어와 `FormData` |
+| 파일 선택 | 비제어 (항상) |
+| 입력이 매우 많아 렌더 비용이 문제 | 비제어 기반 폼 라이브러리 |
+
+- 한 폼 안에서 입력마다 다르게 고를 수 있습니다. 요소 하나는 수명 동안 한 방식만 씁니다.
+- 이 편의 나머지는 검증과 상태가 필요한 폼이므로 제어 방식을 기준으로 합니다.
+
+## Form State
+
+폼 State는 사용자가 입력한 값입니다. 입력마다 `useState`를 두지 않고 값 객체 하나로 모아 `name`을 키로 씁니다(15편).
+
+```jsx
+const initial = { email: '', password: '' };
+const [values, setValues] = useState(initial);
+
+function handleChange(e) {
+  const { name, value } = e.target;
+  setValues(prev => ({ ...prev, [name]: value }));
+}
+```
+
+- 초기값 객체를 따로 두면 reset과 dirty 판정에 같은 기준을 쓸 수 있습니다.
+- State에는 원본 입력값을 그대로 둡니다. 숫자 변환, 공백 제거 같은 가공은 제출 때 하거나 렌더 중에 계산합니다.
+- 값 외에 폼에 필요한 정보는 아래처럼 종류별로 구분해 둡니다. 서로 계산할 수 있는 것은 State로 만들지 않습니다(12편).
+
+| 정보 | 종류 | 보관 |
+|------|------|------|
+| 입력값 `values` | State | `useState` |
+| 검증 결과 `errors` | 파생 값 | 렌더 중 계산 |
+| 방문 여부 `touched` | State | `useState` |
+| 변경 여부 `dirty` | 파생 값 | 렌더 중 계산 |
+| 제출 단계 `status` | State | `useState` |
+| 서버 오류 | State | `useState` |
+
+- 상태가 늘어 핸들러가 복잡해지면 `useReducer`로 모읍니다(25편).
+
+## Validation State
+
+검증 결과는 값에서 계산할 수 있으므로 State가 아니라 값에서 만드는 함수의 결과로 둡니다. 검증 함수는 값 객체를 받아 오류 객체를 돌려주는 순수 함수입니다.
+
+```jsx
+function validate(values) {
+  const errors = {};
+  if (!values.email) errors.email = '이메일을 입력하세요';
+  else if (!values.email.includes('@'))
+    errors.email = '형식이 다릅니다';
+  if (values.password.length < 8)
+    errors.password = '8자 이상입니다';
+  return errors;
+}
+
+const errors = validate(values); // 렌더마다 계산
+const isValid = Object.keys(errors).length === 0;
+```
+
+- 오류를 State로 저장하면 값과 어긋날 수 있습니다. 매 렌더에서 값으로부터 계산하면 항상 맞습니다.
+- 필드 한 칸에는 가장 먼저 걸린 오류 하나만 보여 줍니다. 위 `else if`처럼 순서를 정합니다.
+- 검증 함수를 컴포넌트 밖에 두면 테스트하기 쉽고 서버와 규칙을 맞추기 쉽습니다.
+- 서버에서만 알 수 있는 오류(이미 있는 이메일)는 값에서 계산할 수 없으므로 별도 State에 둡니다("Submit State").
+
+## Touched
+
+touched는 사용자가 그 필드를 한 번이라도 방문했는지(포커스했다가 벗어났는지)를 나타냅니다. 아직 입력하지 않은 필드에 처음부터 오류가 보이는 것을 막는 데 씁니다.
+
+```jsx
+const [touched, setTouched] = useState({});
+
+function handleBlur(e) {
+  const { name } = e.target;
+  setTouched(prev => ({ ...prev, [name]: true }));
+}
+// <input name="email" onBlur={handleBlur} ... />
+```
+
+- `onBlur`는 포커스를 잃을 때 호출됩니다(08편). 필드별로 불리언을 저장합니다.
+- 제출을 시도하면 모든 필드를 touched로 만들어 남은 오류를 한꺼번에 보여 줍니다.
+- 오류를 보여 줄 조건은 "오류가 있고, 해당 필드가 touched"입니다.
+
+```jsx
+const showError = name => touched[name] && errors[name];
+```
+
+## Dirty
+
+dirty는 값이 초기값에서 바뀌었는지를 나타냅니다. 초기값과 현재 값을 비교해 얻으므로 State를 따로 두지 않습니다.
+
+```jsx
+const isDirty = Object.keys(initial).some(
+  key => values[key] !== initial[key]
+);
+```
+
+- 쓰임새: 저장 버튼을 변경이 있을 때만 활성화, 작성 중 이탈을 확인, 바뀐 필드만 서버에 전송.
+- 값을 바꿨다가 원래대로 되돌리면 dirty는 다시 `false`가 됩니다. "한 번이라도 입력했는지"를 뜻하는 touched와 다릅니다.
+
+| 구분 | 의미 | 입력 후 원래 값으로 되돌리면 |
+|------|------|------------------------------|
+| touched | 포커스했다가 벗어났는가 | 그대로 `true` |
+| dirty | 초기값과 다른가 | `false`로 돌아감 |
+
+- 중첩 객체나 배열 값은 `!==`로 비교하면 참조가 달라 항상 dirty가 됩니다. 값을 필드 단위의 원시 값으로 유지하거나 항목별로 비교합니다.
+
+## Error State
+
+오류 State는 사용자에게 보여 줄 오류 메시지 전체를 가리키며 두 가지 출처가 있습니다.
+
+- 검증 오류: `validate(values)`가 돌려준 객체. 값에서 계산합니다.
+- 제출 오류: 서버 응답이나 네트워크 실패. 제출이 끝나야 알 수 있어서 State로 둡니다.
+
+```jsx
+const [submitError, setSubmitError] = useState(null);
+```
+
+- 필드 오류는 해당 필드 근처에, 폼 전체의 오류(서버 오류, 네트워크 실패)는 폼 상단이나 제출 버튼 근처에 따로 보여 줍니다.
+- 사용자가 값을 고치기 시작하면 이전 제출 오류를 지웁니다. 남겨 두면 고친 뒤에도 오류가 보입니다.
+- 오류 메시지는 무엇이 잘못되었는지와 어떻게 고치는지를 말합니다. "잘못된 값" 대신 "8자 이상 입력하세요".
+- 오류를 문자열 하나가 아니라 필드 키를 가진 객체로 두면 여러 필드의 오류를 동시에 다룰 수 있습니다.
+
+## Submit State
+
+제출 상태는 제출 과정의 단계입니다. 불리언 여러 개(`isSubmitting`, `isSuccess`)가 아니라 단계 하나를 가리키는 `status`로 둡니다. 동시에 참일 수 없는 값이 모순된 조합을 만들기 때문입니다.
+
+```jsx
+const [status, setStatus] = useState('idle');
+// 'idle' -> 'submitting' -> 'success'
+```
+
+```jsx
+async function handleSubmit(e) {
+  e.preventDefault();
+  setTouched({ email: true, password: true });
+  if (!isValid) return;
+  setStatus('submitting');
+  try {
+    await send(values);
+    setStatus('success');
+  } catch (err) {
+    setSubmitError(err.message);
+    setStatus('idle');
+  }
+}
+```
+
+- 검증에 실패하면 서버로 보내지 않고 오류를 보여 줍니다.
+- `submitting` 동안 제출 버튼과 입력을 `disabled`로 만들어 중복 제출을 막습니다.
+
+```jsx
+<button disabled={status === 'submitting'}>
+  {status === 'submitting' ? '전송 중' : '가입'}
+</button>
+```
+
+- 실패하면 `idle`로 돌려 사용자가 고쳐서 다시 제출할 수 있게 합니다. 성공하면 완료 화면을 보여 주거나 폼을 초기화합니다.
+- 서버가 필드별 오류를 돌려주면 그것을 오류 State에 합쳐서 해당 필드에 보여 줍니다.
+- `async` 코드 안의 State는 스냅샷이므로, 제출 도중의 값을 다시 읽을 때 주의합니다(10편).
+
+## Field Component
+
+Field 컴포넌트는 레이블, 입력, 오류 메시지를 묶은 재사용 단위입니다. 폼마다 같은 마크업과 접근성 연결을 반복하지 않게 한 곳에 모읍니다.
+
+```jsx
+function Field({ label, error, ...inputProps }) {
+  const id = useId();
+  const errorId = id + '-error';
+  return (
+    <div>
+      <label htmlFor={id}>{label}</label>
+      <input
+        id={id} aria-invalid={error ? 'true' : 'false'}
+        aria-describedby={errorId}
+        {...inputProps}
+      />
+      <p id={errorId} role="alert">{error}</p>
+    </div>
+  );
+}
+```
+
+```jsx
+<Field
+  label="Email"
+  name="email"
+  value={values.email}
+  onChange={handleChange}
+  onBlur={handleBlur}
+  error={showError('email')}
+/>
+```
+
+- `useId`로 컴포넌트 인스턴스마다 겹치지 않는 `id`를 만들어 `label`과 오류 메시지를 연결합니다.
+- 나머지 props는 `...inputProps`로 `input`에 그대로 넘깁니다(Props Spread는 05편). `type`, `name`, `value` 등을 바깥에서 정합니다.
+- 필드 종류가 다양하면 `textarea`, `select`용 Field를 따로 만들거나 `as` 같은 prop으로 바꿀 수 있게 합니다.
+- Field는 값을 소유하지 않습니다. 값과 오류, 핸들러를 모두 props로 받는 제어 컴포넌트입니다(14편).
+
+## Native Validation
+
+브라우저 기본 검증은 HTML 속성만으로 하는 검증입니다. 속성을 붙이면 제출 시 브라우저가 검사하고, 실패하면 제출을 막으며 오류 말풍선을 보여 줍니다.
+
+| 속성 | 검사 | 위반 시 `validity` |
+|------|------|--------------------|
+| `required` | 값이 있어야 함 | `valueMissing` |
+| `type` (email, url, number 등) | 형식 | `typeMismatch` |
+| `pattern` | 정규식과 일치 | `patternMismatch` |
+| `minLength` / `maxLength` | 글자 수 | `tooShort` / `tooLong` |
+| `min` / `max` | 숫자·날짜 범위 | `rangeUnderflow` / `rangeOverflow` |
+| `step` | 단계 배수 | `stepMismatch` |
+
+```jsx
+<input type="email" name="email" required />
+<input name="pw" minLength={8} required />
+```
+
+- JSX 속성 이름은 camelCase(`minLength`, `maxLength`)입니다. 폼의 `novalidate`는 `noValidate`로 씁니다.
+- 폼에 `noValidate`를 주면 브라우저 기본 검증을 끄고 직접 만든 검증만 씁니다. 메시지 모양과 시점을 직접 정할 때 씁니다.
+- 제약 검증 API로 코드에서 직접 호출할 수 있습니다: `checkValidity()`(결과만 반환), `reportValidity()`(결과와 함께 사용자에게 표시), `setCustomValidity(message)`(사용자 정의 메시지, 빈 문자열이면 해제).
+- CSS의 `:invalid`는 입력 전부터 적용되어 처음부터 빨갛게 보일 수 있습니다. 보여 줄 시점을 정하려면 touched를 쓰는 직접 검증이 낫습니다.
+- 기본 메시지의 모양은 브라우저가 정해 바꾸기 어렵습니다(문구는 `setCustomValidity`로 바꿉니다). 일관된 디자인이 필요하면 `noValidate`와 직접 검증을 씁니다.
+- 클라이언트 검증은 개발자 도구나 직접 만든 요청으로 우회할 수 있으므로 서버에서도 반드시 검증합니다.
+
+## 접근성 있는 Error
+
+접근성 있는 오류는 시각이 아니라 보조 기술(스크린 리더)로도 어느 필드가 무슨 이유로 틀렸는지 알 수 있는 오류입니다. 세 가지를 연결합니다.
+
+- 레이블: 모든 입력에 `label`을 연결합니다(`htmlFor`와 `id`). 오류 메시지가 레이블을 대신하지 않습니다.
+- `aria-invalid`: 검증에 실패한 필드에 `true`를 줍니다. 사용자가 아직 입력하지 않은 필드를 제출 전에 `true`로 표시하지 않습니다. 앞의 touched 조건이 그 용도입니다.
+- `aria-describedby`: 오류 메시지 요소의 `id`를 가리켜 필드와 메시지를 연결합니다. 필드를 읽을 때 레이블에 이어 메시지가 함께 읽힙니다. `id`는 위의 `useId`로 만듭니다.
+
+```jsx
+<input aria-invalid="true" aria-describedby={errorId} />
+<p id={errorId} role="alert">8자 이상 입력하세요</p>
+```
+
+- `role="alert"`는 내용이 바뀔 때 스크린 리더가 즉시 읽는 영역(`aria-live="assertive"`)을 만듭니다. 시급한 내용에만 쓰고, 급하지 않으면 `role="status"`나 `aria-live="polite"`를 씁니다.
+- 알림 영역은 처음부터 DOM에 있어야 변화가 읽힙니다. 이미 내용이 찬 채로 새로 만들면 읽히지 않을 수 있습니다. 그래서 위 Field는 오류가 없어도 빈 `p`를 렌더합니다.
+
+## 검증 시점
+
+검증을 언제 실행할지는 오류가 언제 보이는지를 정합니다. 검증 함수가 순수 함수라 계산은 매 렌더마다 되고, 시점은 "오류를 보여 줄 조건"으로 정합니다.
+
+| 시점 | 오류 표시 | 특징 |
+|------|-----------|------|
+| change (키 입력마다) | 입력하는 동안 | 즉각적이지만 입력 중에 오류가 깜박여 거슬림 |
+| blur (포커스 이탈) | 필드를 벗어난 뒤 | 입력을 끝낸 뒤 알려 줘 부담이 적음 |
+| submit (제출) | 제출을 시도한 뒤 | 오류가 늦게 보임. 모든 필드를 한 번에 확인 |
+
+- 흔한 조합은 처음에는 blur(touched)로 보여 주고, 오류가 나타난 필드는 change마다 다시 검사해 고치는 즉시 사라지게 하는 것입니다. 제출하면 남은 필드를 모두 보여 줍니다.
+- 위에서 만든 구조(값에서 오류를 계산, touched로 노출 제어, 제출 시 모두 touched)가 이 조합입니다.
+- React Hook Form은 같은 선택지를 `mode` 옵션으로 제공합니다. `onSubmit`(기본값), `onBlur`, `onChange`, `onTouched`(첫 blur 이후 change마다), `all`이 있고, 제출 이후의 재검증은 `reValidateMode`(기본값 `onChange`)로 정합니다.
+- 비밀번호 규칙처럼 입력 중 안내가 도움이 되는 항목은 change 시점에 힌트를 보여 주되, 오류 표시와 구분합니다.
+
+## 폼 라이브러리를 쓰는 기준
+
+위 구조(값, 오류, touched, dirty, status)는 필드마다 State와 핸들러를 직접 관리해야 해서 폼이 커질수록 코드와 렌더 비용이 늘어납니다. 아래 상황에서 폼 라이브러리를 검토합니다.
+
+| 상황 | 직접 구현 | 라이브러리 |
+|------|-----------|-------------|
+| 필드가 적은 단순 폼 | 적합 | 불필요 |
+| 필드가 많고 키 입력마다 렌더가 느림 | 부담 | 적합 (비제어 기반) |
+| 필드를 동적으로 추가·삭제 (배열) | 복잡 | 적합 |
+| 검증 규칙이 복잡하거나 서버와 스키마를 공유 | 중복 | 스키마 검증과 연결 |
+| 여러 단계의 폼, 중첩 객체 | 복잡 | 적합 |
+| 비슷한 폼이 앱에 여러 개 | 중복 | 적합 |
+
+- 라이브러리는 touched, dirty, errors, isSubmitting 같은 상태를 `formState`로 제공하고 `register`로 입력을 연결하는 식으로 이 편의 구조를 대신합니다.
+- 이 편의 개념(제어와 비제어, touched와 dirty, 상태 설계, 접근성 연결)을 알면 라이브러리의 옵션과 `formState` 항목을 그대로 이해할 수 있습니다.
+- React Hook Form과 Zod는 React 중급 과목의 React Hook Form과 Zod 편에서 다룹니다.
+
+## 핵심 정리
+
+- 입력 도중에 값이 필요하면 제어, 제출할 때만 필요하면 비제어와 `FormData`로 고르며 요소 하나는 한 방식만 씁니다.
+- 값은 객체 하나의 State로 두고, 오류와 dirty는 값에서 계산하며, touched와 제출 상태는 State로 둡니다.
+- touched는 방문 여부(되돌려도 유지), dirty는 초기값과의 차이입니다. 오류는 "오류가 있고 touched일 때" 보여 줍니다.
+- 제출 상태는 불리언 여러 개 대신 `status` 하나로 두고, 제출 중에는 버튼을 막아 중복 제출을 방지합니다.
+- 브라우저 기본 검증은 속성과 `noValidate`, 제약 검증 API로 쓰되 서버 검증은 반드시 따로 합니다.
+- 오류는 `label`, `aria-invalid`, `aria-describedby`로 필드와 연결하고, 검증 시점은 blur 후 change 재검증을 기본 조합으로 삼습니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="폼의 검증 오류 객체를 설계하는 가장 알맞은 방법은?"
+  options={['값이 바뀔 때마다 useEffect에서 오류 State를 갱신한다', '검증 함수를 만들어 렌더마다 값에서 오류를 계산한다', '입력마다 오류 State를 따로 선언한다', '제출 시점에만 한 번 오류를 계산해 State에 저장한다']}
+  correctAnswer={2}
+  explanation="오류는 값에서 계산할 수 있는 파생 값이므로 State로 저장하지 않고 렌더마다 순수 함수로 계산하면 값과 항상 일치합니다. Effect로 동기화하거나 따로 저장하면 값과 어긋날 수 있습니다."
+  optionExplanations={['Effect로 State를 맞추는 방식은 값과 어긋나기 쉬운 불필요한 동기화입니다.', '렌더마다 값에서 계산하면 항상 최신 값과 일치합니다.', '입력마다 따로 두면 State가 늘고 값과 어긋날 위험이 큽니다.', '제출 전에는 오류를 알 수 없어 blur와 change 시점의 안내가 불가능합니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="사용자가 이메일 필드에 입력했다가 처음 값으로 되돌렸을 때 touched와 dirty의 값은?"
+  options={['touched는 true, dirty는 false', 'touched는 false, dirty는 true', '둘 다 true', '둘 다 false']}
+  correctAnswer={1}
+  explanation="touched는 필드를 방문한 적이 있는지를 나타내므로 값을 되돌려도 true로 남습니다. dirty는 초기값과 현재 값의 차이이므로 되돌리면 false가 됩니다."
+  optionExplanations={['방문 기록은 남고 초기값과 같아졌으므로 맞습니다.', 'touched는 되돌려도 false로 돌아가지 않고 dirty는 같아지면 false입니다.', 'dirty는 초기값과 같아졌으므로 false입니다.', 'touched는 방문 이력이라 true로 남습니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="오류 메시지를 스크린 리더가 해당 필드와 함께 읽도록 연결하는 방법으로 알맞은 것은?"
+  options={['오류 메시지를 빨간색으로 표시한다', '입력에 aria-describedby로 메시지 요소의 id를 지정한다', '메시지를 placeholder에 넣는다', '메시지에 className을 지정한다']}
+  correctAnswer={2}
+  explanation="aria-describedby에 메시지 요소의 id를 지정하면 필드의 레이블에 이어 설명으로 읽힙니다. 색이나 className은 시각 표현일 뿐이고, placeholder는 입력하면 사라져 오류 전달 수단으로 적합하지 않습니다."
+  optionExplanations={['색만으로는 보조 기술에 전달되지 않습니다.', 'id로 연결해야 스크린 리더가 필드와 메시지를 함께 읽습니다.', 'placeholder는 입력하면 사라지고 오류 연결 수단이 아닙니다.', 'className은 스타일 지정일 뿐 접근성 연결이 아닙니다.']}
+/>
+
+## 참고 자료
+
+- [React — Reacting to Input with State](https://react.dev/learn/reacting-to-input-with-state)
+- [React — input](https://react.dev/reference/react-dom/components/input)
+- [React — useId](https://react.dev/reference/react/useId)
+- [MDN — Client-side form validation (Constraint validation)](https://developer.mozilla.org/en-US/docs/Web/HTML/Guides/Constraint_validation)
+- [MDN — aria-invalid](https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Reference/Attributes/aria-invalid)
+- [MDN — aria-describedby](https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Reference/Attributes/aria-describedby)
+- [MDN — ARIA alert role](https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Reference/Roles/alert_role)
+- [React Hook Form — formState](https://react-hook-form.com/docs/useform/formstate)
+- [React Hook Form — useForm (mode, reValidateMode)](https://react-hook-form.com/docs/useform)

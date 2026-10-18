@@ -1,0 +1,361 @@
+---
+title: '06. 문자열 기초'
+description: '문자열 순회·자르기·분리·치환·검색, 대소문자와 문자 코드 변환, 불변성과 누적, 사전순 비교, 정규 표현식 기초를 코딩테스트 관점에서 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 문자열 메서드가 새 문자열을 반환한다는 점과 UTF-16 코드 유닛 기준의 동작을 이해하고, 순회·자르기·분리·치환·검색·문자 코드 변환·비교를 정확하게 쓸 수 있습니다.
+</Callout>
+
+## 문자열 불변성
+
+문자열은 원시 값이고 만든 뒤에는 바꿀 수 없습니다. 모든 문자열 메서드는 원본을 두고 새 문자열(또는 배열)을 반환합니다.
+
+```js
+const s = 'hello'
+s[0] = 'H'               // 무시됨 (strict 모드에서는 TypeError)
+console.log(s)           // 'hello'
+const t = s.toUpperCase() // 'HELLO' (s는 그대로)
+```
+
+- 문자를 바꾸려면 새 문자열을 만듭니다. 한 글자 교체는 `s.slice(0, i) + ch + s.slice(i + 1)`이고, 여러 글자를 바꾸면 `[...s]`나 `s.split('')`으로 배열을 만들어 고친 뒤 `join('')`합니다.
+- `length`는 글자 수가 아니라 UTF-16 코드 유닛 수입니다. `'😄'.length`는 2입니다(아래 "문자 코드").
+- 메서드 호출 결과를 변수에 받지 않고 버리는 것이 가장 흔한 실수입니다. `s.trim()`만 쓰고 `s`를 그대로 쓰면 아무 일도 일어나지 않습니다.
+
+## 문자열 순회
+
+인덱스로 읽는 방법은 `s[i]`와 `s.charAt(i)`입니다. 범위를 벗어나면 `s[i]`는 `undefined`, `charAt(i)`는 빈 문자열을 반환합니다. 끝에서 세려면 `s.at(-1)`(ES2022)이고, 구형 대체는 `s[s.length - 1]`입니다.
+
+```js
+const s = 'abc'
+for (let i = 0; i < s.length; i++) console.log(s[i])
+for (const ch of s) console.log(ch)
+const chars = [...s] // ['a', 'b', 'c']
+```
+
+| 방법 | 단위 | 인덱스 | 용도 |
+|------|------|--------|------|
+| `for` + `s[i]` | 코드 유닛 | 있음 | 위치가 필요하거나 일부 구간만 순회 |
+| `for...of` | 코드 포인트 | 없음 | 모든 글자를 순서대로 처리 |
+| `[...s]`, `Array.from(s)` | 코드 포인트 | 배열로 변환 | 배열 메서드를 쓰고 싶을 때 |
+
+- 영문과 숫자만 나오는 문제에서는 세 방법의 결과가 같습니다. 이모지처럼 코드 유닛이 둘인 글자가 섞이면 `for`는 글자 하나를 두 번 방문하고 `for...of`는 한 번 방문합니다.
+- 인덱스와 글자를 함께 쓰려면 `for (const [i, ch] of [...s].entries())`도 되지만, 인덱스가 중요하면 `for` 문이 더 단순합니다.
+
+## 문자열 자르기
+
+`slice(start, end)`는 `start`부터 `end` 직전까지를 새 문자열로 반환합니다. `end`를 생략하면 끝까지입니다.
+
+```js
+const s = 'abcdef'
+s.slice(1, 4)  // 'bcd'
+s.slice(2)     // 'cdef'
+s.slice(-2)    // 'ef' (음수는 끝에서부터)
+s.slice(4, 2)  // '' (end가 start 이하이면 빈 문자열)
+```
+
+| 메서드 | 음수 인덱스 | start가 end보다 클 때 | 상태 |
+|--------|-------------|----------------------|------|
+| `slice(s, e)` | 끝에서부터 | 빈 문자열 | 권장 |
+| `substring(s, e)` | 0으로 처리 | 두 인수를 맞바꿈 | 사용 가능 |
+| `substr(s, len)` | start만 끝에서부터 | 해당 없음(두 번째 인수가 길이) | 사용 중단 |
+
+- 범위를 벗어난 인덱스는 에러 없이 맞춰집니다. `s.slice(10)`은 `''`입니다.
+- 두 번째 인수가 끝 인덱스인지 길이인지가 `slice`와 `substr`의 차이입니다. 코딩테스트에서는 `slice` 하나로 통일합니다.
+- 길이가 `k`인 부분 문자열은 `s.slice(i, i + k)`입니다.
+
+## split과 join
+
+`split(separator)`는 문자열을 구분자로 나눈 배열을, `join(separator)`는 배열을 구분자로 이은 문자열을 반환합니다. 둘은 서로 역연산입니다.
+
+```js
+'a,b,c'.split(',')           // ['a', 'b', 'c']
+'a b  c'.split(' ')          // ['a', 'b', '', 'c']
+'abc'.split('')              // ['a', 'b', 'c']
+['a', 'b', 'c'].join('-')    // 'a-b-c'
+['a', 'b'].join('')          // 'ab'
+['a', 'b'].join()            // 'a,b' (기본 구분자는 쉼표)
+```
+
+- 구분자가 끝에 있으면 마지막에 빈 문자열이 생깁니다. `'a,b,'.split(',')`는 `['a', 'b', '']`입니다.
+- 연속 공백은 빈 문자열 요소를 만듭니다. 공백이 여러 개일 수 있으면 `split(/\s+/)`를 쓰되 앞뒤 공백이 있으면 앞이나 끝에 빈 문자열이 남으므로 먼저 `trim()`합니다.
+- 빈 문자열을 구분자로 쓰면 코드 유닛 단위로 쪼개져서 이모지가 깨집니다. 코드 포인트 단위는 `[...s]`입니다.
+- 못 찾으면 전체가 한 요소인 배열이고, `''.split(',')`는 `['']`, `''.split('')`는 `[]`입니다.
+- `split(sep, limit)`의 `limit`는 결과 요소 수의 상한이고 남는 부분은 버려집니다.
+- `join`은 `null`과 `undefined` 요소를 빈 문자열로 바꿉니다. 숫자 배열은 숫자가 문자열로 바뀌어 이어집니다.
+- 숫자 배열이 필요하면 `line.split(' ').map(Number)`입니다(자세히는 05편).
+
+## replace와 replaceAll
+
+`replace(pattern, replacement)`는 첫 번째 일치만, `replaceAll`은 모든 일치를 바꾼 새 문자열을 반환합니다. 문자열 패턴으로 `replace`를 쓰면 하나만 바뀝니다.
+
+```js
+const s = 'a-b-c'
+s.replace('-', '+')      // 'a+b-c' (첫 번째만)
+s.replaceAll('-', '+')   // 'a+b+c'
+s.replace(/-/g, '+')     // 'a+b+c' (g 플래그 정규식)
+s.split('-').join('+')   // 'a+b+c' (구형 대체)
+```
+
+- `replaceAll`에 정규식을 주려면 `g` 플래그가 필수입니다. 없으면 TypeError입니다.
+- `replaceAll`은 ES2021에 추가되어 Node.js 24에서 바로 씁니다. 구형 환경이면 `split().join()`이나 `g` 플래그 정규식입니다.
+- 치환 문자열에서 `$&`는 일치한 부분, `$1`은 첫 번째 캡처 그룹, `$$`는 `$` 자신을 뜻합니다. 사용자 입력을 그대로 넣을 때 `$`가 있으면 의도와 다르게 바뀝니다.
+- 치환 자리에 함수를 주면 일치한 부분과 캡처 그룹, 위치, 원본 문자열을 인수로 받아 그 반환값으로 바꿉니다.
+
+```js
+'a1b22'.replace(/\d+/g, (m) => `[${m}]`) // 'a[1]b[22]'
+```
+
+- 빈 문자열 패턴은 모든 코드 유닛 사이에 끼워 넣습니다. `'xx'.replaceAll('', '_')`는 `'_x_x_'`입니다.
+
+## includes와 indexOf
+
+`includes(sub)`는 부분 문자열이 있는지를 불리언으로, `indexOf(sub)`는 처음 나타나는 위치를 반환합니다. 못 찾으면 `-1`입니다. 대소문자를 구분합니다.
+
+```js
+const s = 'Blue Whale'
+s.includes('Whale')   // true
+s.indexOf('Whale')    // 5
+s.indexOf('whale')    // -1 (대소문자 구분)
+s.indexOf('e', 4)     // 9 (4번부터 검색)
+```
+
+- 두 번째 인수는 검색을 시작할 위치입니다. 음수이면 0으로 취급합니다.
+- 두 번째 일치를 찾으려면 앞 결과 + 1을 시작 위치로 넘기는 반복입니다.
+- 빈 문자열은 시작 위치에서 바로 찾아져서 `indexOf('')`는 0입니다.
+- `lastIndexOf`는 뒤에서부터 찾고, `startsWith`와 `endsWith`는 앞뒤 일치를 불리언으로 반환합니다.
+- `includes`는 정규식을 받지 않고 TypeError를 던집니다. 패턴 검사는 `test`입니다(아래 "정규 표현식 기초").
+- `if (s.indexOf(x))`는 위치 0일 때 거짓이 되고 `-1`일 때 참이 됩니다. 항상 `!== -1`과 비교하거나 `includes`를 씁니다.
+
+## 대소문자 처리
+
+`toUpperCase()`와 `toLowerCase()`는 바꾼 새 문자열을 반환합니다. 영문자 외의 문자는 그대로 둡니다.
+
+```js
+'aBc1'.toUpperCase() // 'ABC1'
+'aBc1'.toLowerCase() // 'abc1'
+'Ab'.toLowerCase() === 'aB'.toLowerCase() // true
+```
+
+- 대소문자를 무시한 비교는 양쪽을 같은 쪽으로 바꾼 뒤 비교합니다.
+- 일부 문자는 변환하면 길이가 달라집니다. 독일어 `ß`의 대문자는 `SS`입니다. 영문 입력만 나오는 코딩테스트에서는 문제가 되지 않습니다.
+- 한 글자만 바꿀 때는 `s[0].toUpperCase() + s.slice(1)`처럼 앞부분만 바꿔 이어 붙입니다. `s[0] = ...`은 동작하지 않습니다.
+- 대문자인지 판별은 `ch === ch.toUpperCase()`로 하되 숫자와 기호도 참이 되므로 `ch >= 'A' && ch <= 'Z'`로 범위를 검사하는 편이 정확합니다.
+- 대소문자를 바꾸는 두 메서드는 로케일을 쓰는 `toLocaleUpperCase`·`toLocaleLowerCase`도 있지만 코딩테스트에서는 쓰지 않습니다.
+
+## 문자 코드
+
+문자 하나는 정수 코드에 대응합니다. `charCodeAt`은 문자 코드를 정수로, `String.fromCharCode`는 정수 코드를 문자로 바꿉니다. 알파벳과 숫자의 코드는 연속입니다.
+
+| 문자 | 코드 |
+|------|------|
+| `'0'`–`'9'` | 48–57 |
+| `'A'`–`'Z'` | 65–90 |
+| `'a'`–`'z'` | 97–122 |
+
+```js
+'a'.charCodeAt(0)         // 97
+'c'.charCodeAt(0) - 97    // 2 (알파벳 순번, 0부터)
+'7'.charCodeAt(0) - 48    // 7 (숫자 문자를 정수로)
+String.fromCharCode(97 + 2) // 'c'
+```
+
+- 소문자 `'a'`–`'z'`를 0–25로 바꾸는 `ch.charCodeAt(0) - 97`은 알파벳 빈도수 배열의 인덱스로 씁니다(자세히는 05편, 10편).
+- 대문자와 소문자의 코드 차이는 32입니다. `'A'.charCodeAt(0) + 32`가 `'a'`의 코드입니다.
+- 카이사르 암호처럼 순환하는 이동은 `(code - 97 + k) % 26 + 97`입니다. 0부터 센 순번에 이동량을 더해 26으로 나눈 나머지를 다시 코드로 바꿉니다.
+- `'a' < 'b'`처럼 단일 문자끼리 `<`, `>`로 비교하면 코드 순으로 비교됩니다. 범위 검사는 `ch >= '0' && ch <= '9'`로 쓸 수 있습니다.
+
+## charCodeAt과 fromCharCode의 한계
+
+`charCodeAt(i)`는 `i`번째 UTF-16 코드 유닛의 값(0–65535)을 반환하고, 범위를 벗어나면 `NaN`입니다. `String.fromCharCode`는 인수를 16비트로 잘라서 문자로 바꿉니다.
+
+```js
+'abc'.charCodeAt(5)             // NaN
+String.fromCharCode(65, 66)     // 'AB' (여러 개도 가능)
+String.fromCharCode(0x10041)    // 'A' (16비트로 잘림)
+```
+
+- 65535를 넘는 코드는 `fromCharCode`로 만들 수 없습니다. 코드 유닛 둘이 필요한 글자입니다.
+- 범위를 벗어난 `charCodeAt`의 `NaN`을 그대로 계산에 쓰면 결과가 조용히 `NaN`이 됩니다.
+
+## codePointAt과 fromCodePoint
+
+`codePointAt(i)`는 `i`번째 위치에서 시작하는 코드 포인트 전체(0–1114111)를 반환합니다. `String.fromCodePoint`는 코드 포인트를 문자열로 바꿉니다.
+
+```js
+const s = '😍'
+s.length                    // 2 (코드 유닛 둘)
+s.charCodeAt(0)             // 55357 (앞 서로게이트만)
+s.codePointAt(0)            // 128525
+String.fromCodePoint(128525) // '😍'
+'abc'.codePointAt(5)        // undefined (범위 밖)
+```
+
+- 범위를 벗어난 `codePointAt`은 `NaN`이 아니라 `undefined`입니다.
+- `fromCodePoint`는 0–1114111 밖의 값, 음수, 정수가 아닌 값에서 RangeError를 던집니다.
+- 인덱스로 순회하면서 `codePointAt`을 쓰면 서로게이트 쌍의 둘째 위치에서 한 번 더 호출되어 글자가 두 번 처리됩니다. 코드 포인트 순회는 `for...of`나 `[...s]`입니다.
+- 영문·숫자·한글 완성형(U+AC00–U+D7A3)은 모두 코드 유닛 하나입니다. 코딩테스트 입력의 대부분은 `charCodeAt`으로 충분합니다.
+
+## 문자열 누적과 배열 join
+
+문자열은 불변이라 `s += x`는 명세상 새 문자열을 만들어 `s`에 다시 담습니다. 많은 조각을 모을 때는 배열에 담아 마지막에 한 번 `join`하는 방식이 관행입니다.
+
+```js
+// 방법 1: 누적
+let out = ''
+for (let i = 0; i < n; i++) out += i + '\n'
+// 방법 2: 배열에 모아 한 번에 join
+const parts = []
+for (let i = 0; i < n; i++) parts.push(i)
+const out2 = parts.join('\n')
+```
+
+- 두 방법의 결과는 같습니다. 반복 횟수가 수십만 이상일 때 방법 2가 안전하다는 것이 일반적인 권장입니다.
+- 엔진이 `+=`의 비용을 줄이는지는 구현에 따라 다르고, 이 문서는 시간을 수치로 단정하지 않습니다.
+- 문자 하나씩 이어 붙이는 것도 같습니다. 글자를 배열에 `push`하고 마지막에 `join('')`합니다.
+- 앞에 붙이는 `s = x + s`를 반복하는 대신 배열에 모은 뒤 `reverse().join('')`합니다.
+- 출력 줄을 모아 한 번에 출력하는 방식은 08편에서 다룹니다.
+
+## trim, padStart, repeat
+
+`trim`은 양쪽 공백과 줄바꿈을 제거한 새 문자열을 반환합니다. `trimStart`는 앞만, `trimEnd`는 뒤만 제거합니다. 문자열 내부의 공백은 건드리지 않습니다.
+
+```js
+'  a b \n'.trim()      // 'a b'
+'  a'.trimStart()      // 'a'
+'7'.padStart(3, '0')   // '007'
+'7'.padEnd(3, '*')     // '7**'
+'ab'.repeat(3)         // 'ababab'
+'-'.repeat(0)          // ''
+```
+
+- `padStart(len, pad)`와 `padEnd`는 목표 길이 `len`이 될 때까지 `pad`를 앞이나 뒤에 채웁니다. `pad`가 길면 잘리고, `len`이 문자열 길이 이하이면 원본을 그대로 반환합니다. `pad`를 생략하면 공백입니다.
+- 숫자에는 메서드가 없어서 `String(n).padStart(2, '0')`처럼 문자열로 바꾼 뒤 씁니다(시각 `07:05` 형식 출력).
+- `repeat(count)`는 `count`가 음수이거나 무한대이면 RangeError이고, 0이면 빈 문자열이며, 소수는 버립니다. 반복 결과가 문자열 최대 길이를 넘어도 RangeError입니다.
+- 격자나 별 모양 출력에서 `' '.repeat(n - i) + '*'.repeat(2 * i - 1)`처럼 씁니다.
+
+## 사전순 비교와 localeCompare
+
+`<`, `>`, `===`로 문자열을 비교하면 UTF-16 코드 유닛 순서로 앞 글자부터 비교합니다. 앞 글자가 모두 같으면 짧은 문자열이 앞입니다.
+
+```js
+'apple' < 'banana' // true
+'Z' < 'a'          // true (대문자 코드가 더 작음)
+'ab' < 'abc'       // true (접두사가 더 앞)
+'10' < '9'         // true (숫자가 아니라 문자 비교)
+```
+
+- 사전순은 대문자가 소문자보다 앞입니다. 소문자만 나오는 문제에서는 영향이 없습니다.
+- 숫자 문자열을 `<`로 비교하면 자릿수가 달라서 틀립니다. 숫자는 `Number`로 바꿔 비교하고, 같은 자릿수일 때만 문자열 비교가 일치합니다.
+- 비교 함수 없는 `sort()`도 이 기준입니다. 사전순 오름차순 정렬은 `words.sort()`로 충분하고, 내림차순은 `words.sort().reverse()`나 `words.sort((a, b) => (a < b ? 1 : -1))`입니다.
+
+`a.localeCompare(b)`는 로케일 규칙으로 비교해 음수·0·양수를 반환합니다. 결과의 정확한 값은 `-1`과 `1`로 보장되지 않고 부호만 의미가 있습니다.
+
+```js
+'a'.localeCompare('b')     // 음수
+'b'.localeCompare('a')     // 양수
+'a'.localeCompare('a')     // 0
+'2'.localeCompare('10')    // 양수 (문자 순서)
+'2'.localeCompare('10', undefined, { numeric: true }) // 음수
+```
+
+- 로케일과 옵션에 따라 대소문자·악센트 처리가 달라집니다. 코드 유닛 순서와 결과가 다를 수 있어서 코딩테스트의 단순 사전순에는 `<`나 기본 `sort`를 씁니다.
+- 숫자가 섞인 문자열을 숫자 크기로 정렬하려면 `numeric: true` 옵션이 필요합니다.
+- 비교 횟수가 많을 때는 `Intl.Collator`를 한 번 만들어 `compare`를 재사용하라고 MDN이 안내합니다. 정렬 비교 함수 설계는 26편에서 다룹니다.
+
+## 정규 표현식 기초
+
+정규 표현식은 문자열 패턴을 `/패턴/플래그`로 쓰는 리터럴입니다. 코딩테스트에서는 숫자·단어 추출, 형식 검사, 일괄 치환에 씁니다.
+
+| 문법 | 의미 |
+|------|------|
+| `\d` | 숫자 한 글자 (0–9) |
+| `\w` | 영문·숫자·밑줄 한 글자 (ASCII만, 한글 제외) |
+| `\s` | 공백·탭·줄바꿈 한 글자 |
+| `.` | 줄바꿈을 제외한 아무 한 글자 |
+| `[abc]`, `[a-z]` | 나열하거나 범위로 쓴 문자 중 하나 |
+| `^`, `$` | 문자열의 시작, 끝 |
+| `+` | 앞 요소 1회 이상 |
+| `?` | 앞 요소 0회 또는 1회 |
+| `{n,m}` | 앞 요소 n회 이상 m회 이하 |
+| `(x)` | 캡처 그룹 |
+
+플래그는 `g`(모든 일치), `i`(대소문자 무시), `m`(여러 줄에서 `^`·`$`가 줄 단위)가 기본입니다.
+
+세 메서드가 기본입니다.
+
+```js
+/^\d+$/.test('123')          // true (숫자로만 구성)
+'a1b22c'.match(/\d+/g)       // ['1', '22']
+'a1b22c'.match(/x/g)         // null (일치 없음)
+'a1b22c'.replace(/\d/g, '#') // 'a#b##c'
+```
+
+- `test`는 불리언을 반환합니다. 전체가 패턴과 맞는지 검사하려면 `^`와 `$`로 양끝을 고정합니다.
+- `match`는 `g`가 없으면 첫 일치의 상세 정보 배열(캡처 그룹, `index` 포함)을, `g`가 있으면 일치한 문자열의 배열을 반환합니다. 일치가 없으면 두 경우 모두 `null`이라서 `?? []`로 받습니다.
+- `replace`는 정규식과 `g` 플래그를 같이 써야 모든 일치를 바꿉니다.
+- `g`나 `y` 플래그가 붙은 정규식 객체는 `lastIndex` 상태를 가집니다. 같은 객체로 `test`를 반복하면 결과가 번갈아 달라집니다.
+
+```js
+const re = /foo/g
+re.test('foo') // true  (lastIndex가 3으로 이동)
+re.test('foo') // false (lastIndex가 0으로 돌아옴)
+```
+
+- 일회성 검사에는 `g`를 빼거나 매번 새 리터럴을 씁니다.
+- 숫자 추출 `s.match(/\d+/g)`의 결과는 문자열 배열이므로 `.map(Number)`가 필요합니다.
+- 정규식은 읽기 어렵고 입력이 크면 느릴 수 있어서 `split`·`indexOf`로 풀 수 있으면 그쪽이 단순합니다.
+
+## 핵심 정리
+
+- 문자열은 불변이라 모든 메서드는 새 값을 반환합니다. 결과를 변수에 받아야 하고, 한 글자를 바꾸려면 배열로 바꿔 고친 뒤 `join`합니다.
+- `length`·`s[i]`·`charCodeAt`은 UTF-16 코드 유닛 기준이고, `for...of`·`[...s]`·`codePointAt`·`fromCodePoint`는 코드 포인트 기준입니다.
+- `slice`는 음수 인덱스와 끝 직전 규칙을 갖고, `split`은 연속·끝 구분자에서 빈 문자열을 만들며, `replace`는 하나만, `replaceAll`은 전부 바꿉니다.
+- `indexOf`는 못 찾으면 `-1`이므로 `!== -1`로 비교하고, 알파벳은 `charCodeAt(0) - 97`로 0–25 순번을 얻습니다.
+- 사전순은 코드 유닛 순서의 `<`와 기본 `sort`이고, `localeCompare`는 로케일 기준이며 부호만 믿습니다.
+- 정규식은 `test`·`match`·`replace`로 쓰고, 많은 조각은 배열에 모아 한 번에 `join`합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="'a-b-c'.replace('-', '+') 의 결과는?"
+  options={['a+b+c', 'a+b-c', 'a-b+c', 'TypeError가 발생한다']}
+  correctAnswer={2}
+  explanation="replace는 문자열 패턴이면 첫 번째 일치만 바꿉니다. 모든 일치를 바꾸려면 replaceAll이나 g 플래그가 붙은 정규식을 씁니다. 정규식이 아닌 문자열 패턴에서는 TypeError가 나지 않습니다."
+  optionExplanations={['모든 하이픈이 바뀐 결과입니다. replaceAll을 써야 나옵니다.', '첫 번째 하이픈만 바뀌므로 정답입니다.', '마지막 하이픈만 바뀌는 규칙은 없습니다.', 'TypeError는 g 플래그 없는 정규식을 replaceAll에 줄 때 발생합니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="소문자 문자 ch(a부터 z)를 0부터 25까지의 순번으로 바꾸는 올바른 식은?"
+  options={['ch - 97', 'ch.charCodeAt(0) - 97', 'ch.charCodeAt(0) - 65', 'ch.codePointAt(1) - 97']}
+  correctAnswer={2}
+  explanation="소문자 a의 문자 코드는 97이므로 charCodeAt(0)에서 97을 빼면 a는 0, z는 25가 됩니다. 문자열에서 직접 숫자를 빼면 NaN이 나오고, 65는 대문자 A의 코드이며, codePointAt(1)은 한 글자 문자열에서 undefined를 반환합니다."
+  optionExplanations={['문자열에서 숫자를 빼면 NaN입니다. 먼저 문자 코드로 바꿔야 합니다.', '문자 코드에서 a의 코드 97을 빼므로 정답입니다.', '65는 대문자 A의 코드라서 소문자에는 맞지 않습니다.', 'codePointAt(1)은 한 글자 문자열의 범위 밖이라 undefined가 됩니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="const re = /foo/g; 를 만든 뒤 re.test('foo') 를 연달아 두 번 호출한 결과는?"
+  options={['true, true', 'true, false', 'false, true', 'false, false']}
+  correctAnswer={2}
+  explanation="g 플래그가 붙은 정규식 객체는 lastIndex 상태를 가집니다. 첫 호출이 true를 반환하면 lastIndex가 3으로 이동하고, 둘째 호출은 3번 위치부터 찾아 실패해 false를 반환하며 lastIndex를 0으로 되돌립니다."
+  optionExplanations={['상태가 없는 정규식이라면 맞지만 g 플래그가 있어 lastIndex가 남습니다.', '첫 호출은 일치하고 둘째 호출은 lastIndex 3부터 찾아 실패하므로 정답입니다.', '첫 호출은 처음부터 찾으므로 true입니다.', '첫 호출은 foo가 있으므로 true입니다.']}
+/>
+
+## 참고 자료
+
+- [MDN — String](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String)
+- [MDN — String.prototype.slice()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/slice)
+- [MDN — String.prototype.split()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/split)
+- [MDN — String.prototype.replaceAll()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/replaceAll)
+- [MDN — String.prototype.indexOf()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/indexOf)
+- [MDN — String.prototype.toUpperCase()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/toUpperCase)
+- [MDN — String.prototype.codePointAt()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/codePointAt)
+- [MDN — String.prototype.trim()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/trim)
+- [MDN — String.prototype.padStart()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/padStart)
+- [MDN — String.prototype.repeat()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/repeat)
+- [MDN — String.prototype.localeCompare()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/localeCompare)
+- [MDN — RegExp.prototype.test()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp/test)
+- [MDN — 정규 표현식 치트시트](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Regular_expressions/Cheatsheet)

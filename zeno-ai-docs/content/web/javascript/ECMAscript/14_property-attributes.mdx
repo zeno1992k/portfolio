@@ -1,0 +1,643 @@
+---
+title: '14. 프로퍼티 어트리뷰트'
+description: '내부 슬롯과 내부 메서드, 데이터·접근자 프로퍼티의 어트리뷰트, defineProperty, 확장 금지·밀봉·동결과 깊은 동결을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 프로퍼티가 값 말고도 갖는 어트리뷰트(writable, enumerable, configurable)가 객체의 동작을 어떻게 바꾸는지 설명하고, 확장 금지·밀봉·동결의 차이와 한계를 구분할 수 있습니다.
+</Callout>
+
+## 내부 슬롯과 내부 메서드
+
+내부 슬롯(internal slot)은 객체가 가진 숨은 상태이고, 내부 메서드(internal method)는 객체에 대한 기본 연산의 동작을 정의한 알고리즘입니다. ECMAScript 명세가 객체의 동작을 설명하려고 만든 개념이며 이중 대괄호 `[[ ]]`로 표기합니다. 둘 다 프로퍼티가 아니고, 상속되지 않으며, 코드에서 이름으로 직접 접근할 수 없습니다.
+
+```js
+Date.prototype.getTime.call(new Date(0)) // 0
+Date.prototype.getTime.call({})          // TypeError
+```
+
+Date 객체는 내부 슬롯 `[[DateValue]]`에 시각을 저장합니다. `{}`에는 그 슬롯이 없어서 `getTime`이 TypeError를 냅니다. 슬롯은 프로퍼티가 아니므로 `Object.assign` 같은 프로퍼티 복사로는 옮겨지지 않습니다.
+
+| 내부 슬롯 | 가진 객체 | 코드에서 간접 확인하는 방법 |
+|-----------|-----------|-----------------------------|
+| `[[Prototype]]` | 모든 객체 | `Object.getPrototypeOf(obj)` (자세히는 17편) |
+| `[[Extensible]]` | 모든 객체 | `Object.isExtensible(obj)` |
+| `[[DateValue]]` | Date | `date.getTime()` |
+| `[[MapData]]` | Map | `map.get(key)`, `map.size` |
+| `[[PromiseState]]` | Promise | `then`으로 결과를 처리 |
+
+모든 객체는 필수 내부 메서드 11개를 가집니다. 함수 객체는 여기에 호출용 `[[Call]]`과 `new`용 `[[Construct]]`를 더 가집니다. 프로퍼티 읽기·쓰기, `in`, `delete`, `Object.keys` 같은 연산은 내부적으로 이 메서드를 호출합니다.
+
+| 내부 메서드 | 호출되는 연산 | 대응하는 Proxy 트랩 |
+|-------------|---------------|---------------------|
+| `[[GetPrototypeOf]]` | `Object.getPrototypeOf`, `instanceof` | `getPrototypeOf` |
+| `[[SetPrototypeOf]]` | `Object.setPrototypeOf`, `__proto__` 대입 | `setPrototypeOf` |
+| `[[IsExtensible]]` | `Object.isExtensible` | `isExtensible` |
+| `[[PreventExtensions]]` | `Object.preventExtensions` | `preventExtensions` |
+| `[[GetOwnProperty]]` | `Object.getOwnPropertyDescriptor` | `getOwnPropertyDescriptor` |
+| `[[DefineOwnProperty]]` | `Object.defineProperty` | `defineProperty` |
+| `[[HasProperty]]` | `in` 연산자 | `has` |
+| `[[Get]]` | `obj.x` 읽기 | `get` |
+| `[[Set]]` | `obj.x = v` 대입 | `set` |
+| `[[Delete]]` | `delete obj.x` | `deleteProperty` |
+| `[[OwnPropertyKeys]]` | `Object.keys`, `Reflect.ownKeys` | `ownKeys` |
+
+객체는 두 종류로 나뉩니다.
+
+- **일반 객체**(ordinary object): 11개 내부 메서드가 모두 명세의 기본 알고리즘을 따르는 객체입니다. 객체 리터럴과 클래스 인스턴스가 해당합니다.
+- **이그조틱 객체**(exotic object): 일부 내부 메서드가 기본과 다르게 동작하는 객체입니다. Array, String 래퍼 객체, arguments, TypedArray, 모듈 네임스페이스, Proxy, `bind`로 만든 함수가 해당합니다.
+
+```js
+const arr = [1, 2, 3]
+arr[5] = 0
+arr.length // 6 — Array의 [[DefineOwnProperty]]가 length를 갱신
+```
+
+Proxy는 11개 내부 메서드를 각각 트랩 함수로 가로채는 객체입니다(자세히는 47편).
+
+이 문서의 주제와 내부 메서드는 이렇게 연결됩니다. `[[Set]]`은 대상 프로퍼티의 `[[Writable]]`을 확인하고, `[[DefineOwnProperty]]`는 `[[Configurable]]`과 객체의 `[[Extensible]]`을 확인합니다. 명세는 프로퍼티 어트리뷰트도 `[[Value]]`, `[[Writable]]`처럼 같은 표기로 씁니다. 코드에서는 같은 것을 `value`, `writable`이라는 이름으로 다룹니다.
+
+## 프로퍼티 어트리뷰트와 디스크립터
+
+프로퍼티 어트리뷰트(property attribute)는 프로퍼티 하나의 상태를 나타내는 내부 값의 집합입니다. ES5(2009)에서 도입됐고, 프로퍼티는 종류에 따라 어트리뷰트 구성이 다릅니다.
+
+| 프로퍼티 종류 | 어트리뷰트 |
+|---------------|------------|
+| 데이터 프로퍼티 | `value`, `writable`, `enumerable`, `configurable` |
+| 접근자 프로퍼티 | `get`, `set`, `enumerable`, `configurable` |
+
+| 어트리뷰트 | 뜻 | false 또는 undefined일 때 |
+|------------|----|--------------------------|
+| `value` | 프로퍼티 값 | — |
+| `writable` | 값을 바꿀 수 있는가 | 대입이 실패한다 |
+| `enumerable` | 열거 대상인가 | `for...in`, `Object.keys`, 스프레드, `JSON.stringify`에서 빠진다 |
+| `configurable` | 삭제·재정의할 수 있는가 | 삭제와 대부분의 재정의가 실패한다 |
+| `get` | 읽을 때 호출되는 함수 | 읽으면 `undefined` |
+| `set` | 쓸 때 호출되는 함수 | 대입이 실패한다 |
+
+어트리뷰트는 내부 상태이므로 코드에서 직접 읽거나 쓸 수 없습니다. 대신 디스크립터(property descriptor)라는 일반 객체로 주고받습니다. 디스크립터의 필드 이름은 어트리뷰트 이름과 같습니다.
+
+| 디스크립터 | 가진 필드 | 쓰는 곳 |
+|------------|-----------|---------|
+| 데이터 디스크립터 | `value` 또는 `writable` | 데이터 프로퍼티 정의 |
+| 접근자 디스크립터 | `get` 또는 `set` | 접근자 프로퍼티 정의 |
+| 일반 디스크립터 | `enumerable`, `configurable`만 | 종류를 바꾸지 않고 공통 어트리뷰트만 변경 |
+
+프로퍼티의 어트리뷰트 기본값은 만드는 방법에 따라 다릅니다.
+
+| 만드는 방법 | writable | enumerable | configurable |
+|-------------|----------|------------|--------------|
+| 객체 리터럴, `obj.x = 1` | true | true | true |
+| `defineProperty`로 새로 만들며 생략 | false | false | false |
+| 클래스 메서드 | true | false | true |
+| 클래스 필드 | true | true | true |
+| 배열 `length` | true | false | false |
+| 함수의 `name`, `length` | false | false | true |
+| `Math.PI` 같은 내장 상수 | false | false | false |
+
+클래스 메서드는 24편, 함수 객체의 프로퍼티는 16편에서 다룹니다.
+
+## Object.getOwnPropertyDescriptor
+
+`Object.getOwnPropertyDescriptor(obj, key)`는 객체가 직접 가진 프로퍼티의 디스크립터를 객체로 반환하고, 없으면 `undefined`를 반환합니다.
+
+```js
+const person = { name: 'Lee' }
+
+Object.getOwnPropertyDescriptor(person, 'name')
+// { value: 'Lee', writable: true, enumerable: true,
+//   configurable: true }
+Object.getOwnPropertyDescriptor(person, 'age')
+// undefined — 없는 프로퍼티
+Object.getOwnPropertyDescriptor(person, 'toString')
+// undefined — 상속한 프로퍼티
+```
+
+- 객체 자신의 프로퍼티만 조회합니다. `toString`처럼 프로토타입에서 상속한 프로퍼티는 `undefined`입니다. 상속 프로퍼티를 보려면 `Object.getPrototypeOf`로 프로토타입 객체를 얻어 거기서 조회합니다(자세히는 17편).
+- 반환값은 매번 새로 만든 객체입니다. 반환된 객체를 고쳐도 프로퍼티는 바뀌지 않습니다.
+- 키는 문자열이나 심볼입니다. 숫자는 문자열로 변환됩니다.
+- 데이터 프로퍼티는 `value`, `writable`, `enumerable`, `configurable` 네 필드를, 접근자 프로퍼티는 `get`, `set`, `enumerable`, `configurable` 네 필드를 반환합니다.
+- 첫 인수가 원시값이면 객체로 변환해 조회합니다(ES2015부터). `null`과 `undefined`는 TypeError입니다.
+
+```js
+Object.getOwnPropertyDescriptor('abc', 0)
+// { value: 'a', writable: false, enumerable: true,
+//   configurable: false }
+Object.getOwnPropertyDescriptor('abc', 'length')
+// { value: 3, writable: false, enumerable: false,
+//   configurable: false }
+```
+
+## 데이터 프로퍼티
+
+데이터 프로퍼티는 키에 값을 직접 연결하는 프로퍼티입니다. 객체 리터럴의 `name: 'Lee'`나 `obj.x = 1`로 만든 프로퍼티는 모두 데이터 프로퍼티입니다. 어트리뷰트는 `value`, `writable`, `enumerable`, `configurable`입니다.
+
+### writable
+
+`writable`이 false이면 값을 바꾸는 모든 대입이 실패합니다. 복합 대입(`+=`)과 증감(`++`)도 같습니다.
+
+```js
+const o = Object.defineProperty({}, 'id', { value: 1 })
+
+o.id = 2   // 조용히 무시된다 (엄격 모드: TypeError)
+o.id       // 1
+```
+
+- 실패 방식은 모드에 따라 다릅니다(자세히는 아래 "비엄격 모드의 조용한 실패").
+- 프로토타입 체인 위에 읽기 전용 프로퍼티가 있으면 자식 객체에서도 같은 이름에 대입할 수 없습니다.
+
+```js
+const proto = Object.freeze({ v: 1 })
+const child = Object.create(proto)
+
+child.v = 2   // 무시된다. child에 자기 프로퍼티가 생기지 않는다
+child.v       // 1
+Object.defineProperty(child, 'v', { value: 2 })
+child.v       // 2 — 자기 프로퍼티를 직접 정의하면 가능
+```
+
+- `writable`이 false여도 `configurable`이 true이면 `defineProperty`로 값을 바꿀 수 있습니다. 대입만 막힙니다.
+- `writable`은 값의 교체만 막습니다. `value`가 객체이면 그 객체의 내부는 바꿀 수 있습니다.
+
+### enumerable
+
+`enumerable`이 false이면 열거에서 빠집니다. 프로퍼티는 존재하고 읽을 수 있습니다.
+
+```js
+const o = Object.defineProperty({ b: 1 }, 'h', { value: 2 })
+
+Object.keys(o)                // ['b']
+Object.entries(o)             // [['b', 1]]
+JSON.stringify(o)             // '{"b":1}'
+o.h                           // 2
+'h' in o                      // true
+Object.getOwnPropertyNames(o) // ['b', 'h']
+```
+
+- 열거에서 빠지는 대상: `for...in`, `Object.keys`·`values`·`entries`, 스프레드와 `Object.assign`, `JSON.stringify`.
+- 비열거 프로퍼티가 보이는 곳: 직접 읽기, `in` 연산자, `Object.getOwnPropertyNames`, `Reflect.ownKeys`.
+- `Array.prototype.push` 같은 내장 메서드가 `for...in`에 나타나지 않는 이유가 이것입니다. 내장 메서드는 대부분 비열거입니다.
+- 열거 방법별 상세는 18편에서 다룹니다.
+
+### configurable
+
+`configurable`이 false이면 프로퍼티를 삭제할 수 없고, 어트리뷰트 재정의도 제한됩니다.
+
+```js
+const o = Object.defineProperty({}, 'x', { value: 1 })
+
+delete o.x   // false (엄격 모드: TypeError)
+o.x          // 1
+```
+
+- 재정의 제한의 구체적인 규칙은 `Object.defineProperty` 절의 표에 있습니다.
+- `configurable`을 false로 바꾸면 되돌릴 수 없습니다. false에서 true로 바꾸는 재정의는 항상 실패합니다.
+
+## 접근자 프로퍼티
+
+접근자 프로퍼티는 값을 직접 저장하지 않고, 읽을 때 getter 함수를, 쓸 때 setter 함수를 호출하는 프로퍼티입니다. 어트리뷰트는 `get`, `set`, `enumerable`, `configurable`이며 `value`와 `writable`은 없습니다.
+
+```js
+const temp = {
+  celsius: 0,
+  get fahrenheit() { return this.celsius * 9 / 5 + 32 },
+  set fahrenheit(f) { this.celsius = (f - 32) * 5 / 9 },
+}
+
+temp.fahrenheit        // 32 — getter 호출
+temp.fahrenheit = 212  // setter 호출
+temp.celsius           // 100
+```
+
+- getter만 있으면 대입이 실패합니다(비엄격 모드는 무시, 엄격 모드는 TypeError). setter만 있으면 읽은 값이 `undefined`입니다.
+- 한 프로퍼티는 데이터 프로퍼티이거나 접근자 프로퍼티이거나 둘 중 하나입니다. 값과 get·set을 동시에 가질 수 없습니다.
+- 접근자가 프로토타입에서 상속되면 `this`는 정의된 객체가 아니라 점 앞의 객체입니다. 상속된 setter에 대입해도 자식 객체에 같은 이름의 프로퍼티는 생기지 않습니다.
+
+```js
+const base = { get who() { return this.name } }
+const kid = Object.create(base)
+kid.name = 'kid'
+kid.who   // 'kid'
+```
+
+- getter는 읽을 때마다 실행됩니다. 열거 가능한 접근자는 `JSON.stringify`와 스프레드 때도 호출됩니다.
+- 객체 리터럴의 접근자는 `enumerable`이 true이고, 클래스의 접근자는 false입니다(자세히는 24편).
+- 대표 용도는 계산된 값, 검증을 거치는 대입, 읽기 전용 노출, 첫 읽기 때 계산해 저장하는 지연 평가입니다.
+
+```js
+const lazy = {
+  get data() {
+    Object.defineProperty(this, 'data', { value: 42 })
+    return 42   // 이후 data는 데이터 프로퍼티다. getter는 다시 안 돈다
+  },
+}
+```
+
+흔한 실수는 setter 안에서 자기 이름의 프로퍼티에 대입하는 것입니다. 대입이 다시 setter를 호출해 무한 재귀가 됩니다.
+
+```js
+const o = { set x(v) { this.x = v } }
+o.x = 1   // RangeError: Maximum call stack size exceeded
+```
+
+저장 공간은 `_x`처럼 다른 이름의 프로퍼티나 클로저 변수, 프라이빗 필드(24편)로 따로 둡니다.
+
+## Object.defineProperty
+
+`Object.defineProperty(obj, key, descriptor)`는 객체의 프로퍼티를 새로 정의하거나 기존 프로퍼티를 재정의하고, 첫 인수 객체를 반환합니다. 내부적으로 `[[DefineOwnProperty]]`를 호출합니다.
+
+```js
+const o = {}
+Object.defineProperty(o, 'a', {
+  value: 1,
+  writable: true,
+  enumerable: true,
+  configurable: true,
+})
+```
+
+### 생략한 어트리뷰트의 기본값
+
+디스크립터에서 생략한 어트리뷰트는 새 프로퍼티냐 기존 프로퍼티냐에 따라 다르게 처리됩니다.
+
+| 대상 | 생략한 어트리뷰트 |
+|------|-------------------|
+| 새 프로퍼티 | `value`·`get`·`set`은 `undefined`, `writable`·`enumerable`·`configurable`은 `false` |
+| 기존 프로퍼티 | 현재 값을 그대로 유지 (false로 초기화되지 않음) |
+
+```js
+const o = {}
+Object.defineProperty(o, 'a', { value: 1 })
+// { value: 1, writable: false, enumerable: false,
+//   configurable: false }
+
+const p = { b: 1 }
+Object.defineProperty(p, 'b', { enumerable: false })
+// { value: 1, writable: true, enumerable: false,
+//   configurable: true } — 나머지는 유지
+```
+
+- 흔한 실수: `obj.a = 1`로 만든 프로퍼티와 같을 거라고 생각하는 것입니다. `defineProperty`로 새로 만들면 읽기 전용이고, `Object.keys`에 나타나지 않고, 삭제도 안 됩니다.
+- `{ enumerable: true }`처럼 일반 디스크립터로 새 프로퍼티를 만들면 `value`가 `undefined`인 데이터 프로퍼티가 생깁니다.
+- `get`만 주면 setter가 없는 접근자 프로퍼티가 생깁니다.
+
+### 데이터와 접근자 사이의 전환
+
+`configurable`이 true인 프로퍼티는 데이터 프로퍼티와 접근자 프로퍼티 사이를 오갈 수 있습니다. 전환하면 `enumerable`과 `configurable`은 유지되고, 나머지는 기본값이 됩니다.
+
+```js
+const r = { d: 1 }
+Object.defineProperty(r, 'd', { get() { return 5 } })
+// { get: [Function: get], set: undefined,
+//   enumerable: true, configurable: true }
+```
+
+### configurable이 false일 때의 재정의 제한
+
+| 변경 | 데이터 프로퍼티 |
+|------|-----------------|
+| `value` 변경 | `writable`이 true일 때만 가능 |
+| `writable` true → false | 가능 |
+| `writable` false → true | 불가 |
+| `enumerable` 변경 | 불가 |
+| `configurable` false → true | 불가 |
+| 접근자로 전환 | 불가 |
+
+- 현재 값과 같은 값으로 재지정하는 것은 `writable`과 상관없이 허용됩니다. 같은 값의 판정은 `Object.is`와 같아서 `NaN`은 같은 값이고 `+0`과 `-0`은 다른 값입니다.
+- 접근자 프로퍼티는 `get`·`set`을 다른 함수로 바꿀 수 없습니다. 같은 함수를 다시 지정하는 것은 허용됩니다.
+- `writable`은 true에서 false로 바꾸는 한 방향만 허용됩니다.
+- 규칙을 어기면 엄격 모드와 상관없이 항상 TypeError입니다.
+
+```js
+const o = Object.defineProperty({}, 'x', { value: 1 })
+Object.defineProperty(o, 'x', { value: 1 })   // 같은 값: 통과
+Object.defineProperty(o, 'x', { value: 2 })   // TypeError
+```
+
+### 디스크립터 검증
+
+`defineProperty`는 디스크립터를 먼저 검증하고, 규칙에 어긋나면 TypeError를 던집니다.
+
+- 첫 인수와 디스크립터는 객체여야 합니다. 원시값이면 TypeError입니다.
+- `value`·`writable`과 `get`·`set`을 함께 지정하면 TypeError입니다.
+- `get`·`set`은 함수나 `undefined`여야 합니다. 다른 값이면 TypeError입니다.
+- 디스크립터의 필드는 프로토타입 체인에서도 읽습니다. 상속받은 `value`도 적용됩니다. 알 수 없는 필드는 무시됩니다.
+- 확장 불가 객체에 새 프로퍼티를 정의하는 것도 TypeError입니다.
+
+`Reflect.defineProperty`는 같은 일을 하되 실패해도 예외 대신 `false`를 반환합니다(자세히는 47편). 배열의 인덱스와 `length`를 정의할 때는 이그조틱 객체인 Array의 규칙이 추가로 적용됩니다(자세히는 28편).
+
+## Object.defineProperties
+
+`Object.defineProperties(obj, props)`는 여러 프로퍼티를 한 번에 정의합니다. `props`의 키가 프로퍼티 이름이고 값이 디스크립터입니다. 첫 인수 객체를 반환합니다.
+
+```js
+const point = Object.defineProperties({}, {
+  x: { value: 1, enumerable: true },
+  y: { value: 2, enumerable: true },
+  sum: { get() { return this.x + this.y } },
+})
+point.sum   // 3
+```
+
+- `props`에서는 객체가 직접 가진 열거 가능한 키만 읽습니다. 심볼 키도 포함하고, 비열거 키는 무시합니다.
+- 전체가 한 번에 성공하거나 실패하는 원자적 연산이 아닙니다. 모든 디스크립터를 먼저 검증한 뒤 순서대로 정의합니다.
+
+| 실패 유형 | 결과 |
+|-----------|------|
+| 디스크립터 형식 오류 (`value`와 `get` 동시 지정 등) | 정의 전에 TypeError. 아무것도 정의되지 않음 |
+| 정의 중 위반 (재정의 불가 프로퍼티 변경 등) | TypeError. 그 앞에서 정의된 프로퍼티는 남음 |
+
+- `Object.create(proto, props)`의 두 번째 인수도 같은 형식입니다.
+
+## Object.getOwnPropertyDescriptors
+
+`Object.getOwnPropertyDescriptors(obj)`(ES2017)는 객체의 모든 프로퍼티의 디스크립터를 한 객체에 담아 반환합니다. 문자열 키와 심볼 키, 비열거 프로퍼티까지 포함합니다. 반환 형태가 `defineProperties`의 입력 형식과 같아서 둘을 이어 쓸 수 있습니다.
+
+```js
+const src = { a: 1, get b() { return this.a + 1 } }
+
+Object.getOwnPropertyDescriptors(src)
+// {
+//   a: { value: 1, writable: true, ... },
+//   b: { get: [Function: get b], set: undefined, ... }
+// }
+```
+
+접근자와 어트리뷰트를 보존하는 얕은 복사에 씁니다.
+
+```js
+const clone = Object.create(
+  Object.getPrototypeOf(src),
+  Object.getOwnPropertyDescriptors(src),
+)
+clone.a = 10
+clone.b   // 11 — getter가 그대로 복사됐다
+```
+
+스프레드·`Object.assign`과의 차이는 다음과 같습니다.
+
+| 항목 | 스프레드, `Object.assign` | 디스크립터 복제 |
+|------|---------------------------|-----------------|
+| getter | 호출해서 나온 값을 복사 | 접근자를 그대로 복사 |
+| 비열거 프로퍼티 | 제외 | 포함 |
+| 어트리뷰트 | 값만 복사하므로 새로 true로 만들어짐 | 그대로 보존 |
+
+- 복사되는 것은 값 자체이므로 중첩 객체는 같은 참조를 공유하는 얕은 복사입니다.
+- 배열에 쓰면 인덱스 키와 `length`가 모두 나옵니다.
+
+## 비엄격 모드의 조용한 실패
+
+어트리뷰트가 허용하지 않는 변경을 시도하면, 비엄격 모드에서는 에러 없이 무시되고 엄격 모드에서는 TypeError가 발생합니다(자세히는 19편).
+
+| 시도 | 비엄격 모드 | 엄격 모드 |
+|------|-------------|-----------|
+| `writable`이 false인 프로퍼티에 대입 | 무시 | TypeError |
+| getter만 있는 접근자에 대입 | 무시 | TypeError |
+| 확장 불가 객체에 새 프로퍼티 추가 | 무시 | TypeError |
+| `configurable`이 false인 프로퍼티 `delete` | `false` 반환 | TypeError |
+
+```js
+const o = Object.freeze({ a: 1 })
+
+o.a = 2           // 비엄격 모드: 무시
+delete o.a        // false
+console.log(o.a)  // 1
+
+function strictSet() {
+  'use strict'
+  o.a = 2         // TypeError
+}
+```
+
+- 엄격 모드 여부는 대입하는 코드의 모드로 정해집니다. 객체를 동결한 코드의 모드는 상관없습니다. 위 예에서 `o`를 비엄격 코드에서 동결했어도 `strictSet`은 TypeError를 냅니다.
+- 클래스 본문과 모듈 코드는 자동으로 엄격 모드입니다(자세히는 19편, 45편).
+- `Math.PI = 3`이나 `undefined = 1`도 비엄격 모드에서는 조용히 무시됩니다. 둘 다 `writable`이 false입니다.
+
+모드와 상관없이 항상 TypeError를 던지는 경우도 있습니다.
+
+- `Object.defineProperty`·`defineProperties`의 규칙 위반
+- 내장 메서드가 변경에 실패할 때: 동결된 배열의 `push`·`pop`·`sort`, 동결된 객체를 대상으로 한 `Object.assign`
+- 확장 불가 객체의 프로토타입 변경: `Object.setPrototypeOf`, `__proto__` 대입
+- 요소가 있는 TypedArray의 `Object.freeze`(자세히는 48편)
+
+`Reflect.set`·`Reflect.deleteProperty`·`Reflect.defineProperty`는 예외 대신 `false`를 반환합니다(자세히는 47편).
+
+흔한 실수는 비엄격 모드에서 `Object.freeze` 뒤의 대입이 아무 일도 없었던 것처럼 지나가서, 동결이 안 됐다고 착각하거나 버그를 놓치는 것입니다. 엄격 모드나 모듈에서 작성하면 같은 실수가 바로 에러로 드러납니다.
+
+## preventExtensions, seal, freeze
+
+세 메서드는 객체의 변경 범위를 세 단계로 제한합니다. 뒤의 단계가 앞 단계를 포함합니다.
+
+| 메서드 | 프로퍼티 추가 | 프로퍼티 삭제 | 값 변경 |
+|--------|---------------|---------------|---------|
+| 제한 없음 | 가능 | 가능 | 가능 |
+| `preventExtensions` | 불가 | 가능 | 가능 |
+| `seal` | 불가 | 불가 | 가능 |
+| `freeze` | 불가 | 불가 | 불가 |
+
+| 메서드 | 하는 일 |
+|--------|---------|
+| `Object.preventExtensions` | `[[Extensible]]`을 false로 바꾼다 |
+| `Object.seal` | 확장 금지 + 모든 프로퍼티의 `configurable`을 false로 |
+| `Object.freeze` | 밀봉 + 모든 데이터 프로퍼티의 `writable`을 false로 |
+
+- 세 메서드 모두 받은 객체를 그대로 반환하고, 되돌릴 수 없습니다.
+- 객체 자신의 프로퍼티에만 적용되는 얕은 연산입니다.
+- 원시값을 넘기면 그대로 반환합니다(ES2015부터).
+
+### Object.preventExtensions
+
+객체에 새 프로퍼티를 추가하지 못하게 합니다. 기존 프로퍼티의 수정과 삭제는 그대로 가능합니다.
+
+```js
+const o = Object.preventExtensions({ a: 1 })
+
+Object.isExtensible(o)   // false
+o.b = 2                  // 무시 (엄격 모드: TypeError)
+o.a = 5                  // 가능
+delete o.a               // 가능
+Object.defineProperty(o, 'c', { value: 1 })   // TypeError
+```
+
+- 삭제한 프로퍼티는 다시 추가할 수 없습니다.
+- 객체의 프로토타입도 바꿀 수 없습니다. `Object.setPrototypeOf`와 `__proto__` 대입은 같은 프로토타입으로 지정할 때만 통과하고, 그 외에는 모드와 상관없이 TypeError입니다.
+- 프로토타입 체인은 막지 못합니다. 프로토타입 객체에 프로퍼티가 추가되면 확장 불가 객체에서도 읽힙니다. 막는 것은 객체 자신에 프로퍼티를 추가하는 일뿐입니다.
+
+### Object.seal
+
+확장을 막고 모든 프로퍼티를 `configurable: false`로 만듭니다. 값 변경은 가능합니다.
+
+```js
+const s = Object.seal({ a: 1 })
+
+s.a = 2              // 가능
+delete s.a           // false
+s.b = 1              // 무시
+Object.isSealed(s)   // true
+```
+
+- `configurable`이 false이므로 `enumerable` 변경이나 접근자 전환은 TypeError입니다.
+- 예외로 `writable`은 true에서 false로 바꿀 수 있어서, 밀봉된 객체의 데이터 프로퍼티를 개별로 읽기 전용으로 만들 수 있습니다.
+- 접근자 프로퍼티는 setter를 계속 호출할 수 있습니다.
+
+### Object.freeze
+
+밀봉에 더해 모든 데이터 프로퍼티를 `writable: false`로 만듭니다. 추가·삭제·수정이 모두 막힙니다.
+
+```js
+const f = Object.freeze({ a: 1 })
+
+f.a = 2              // 무시
+f.b = 1              // 무시
+delete f.a           // false
+Object.isFrozen(f)   // true
+```
+
+- 접근자 프로퍼티에는 `writable`이 없어서 바뀌지 않습니다. setter가 있으면 대입할 때 setter가 계속 호출되고, setter가 객체 밖의 변수나 다른 객체를 바꾸면 그 변경은 막히지 않습니다.
+- 동결된 배열은 요소와 `length`가 모두 잠깁니다. `push`·`pop`·`sort` 같은 변경 메서드는 모드와 상관없이 TypeError이고, `map`·`filter`처럼 새 배열을 만드는 메서드는 정상 동작합니다.
+- 내부 슬롯의 상태는 동결되지 않습니다. 동결한 Map의 `set`, Set의 `add`, Date의 `setTime`은 그대로 값을 바꿉니다.
+- 프라이빗 필드(`#x`)는 프로퍼티가 아니므로 동결의 영향을 받지 않습니다(자세히는 24편).
+- 요소가 있는 TypedArray는 동결할 수 없어서 TypeError입니다(자세히는 48편). 요소가 없는 것은 가능합니다.
+- 함수도 객체이므로 동결할 수 있습니다.
+
+### isExtensible, isSealed, isFrozen
+
+| 메서드 | true가 되는 조건 |
+|--------|------------------|
+| `Object.isExtensible` | `[[Extensible]]`이 true |
+| `Object.isSealed` | 확장 불가이고 모든 프로퍼티의 `configurable`이 false |
+| `Object.isFrozen` | 밀봉 조건에 더해 모든 데이터 프로퍼티의 `writable`이 false |
+
+이 메서드는 `seal`·`freeze`를 호출했는지가 아니라 객체의 현재 상태를 검사합니다. 같은 상태를 `defineProperty`로 직접 만들어도 true입니다.
+
+```js
+const o = Object.defineProperty({}, 'a', { value: 1 })
+Object.preventExtensions(o)
+Object.isFrozen(o)   // true — freeze를 호출하지 않았어도
+```
+
+- 포함 관계는 동결 → 밀봉 → 확장 불가입니다. 동결된 객체는 `isSealed`도 true이고 `isExtensible`은 false입니다. 밀봉만 한 객체는 `isFrozen`이 false입니다.
+- 프로퍼티가 하나도 없는 확장 불가 객체는 `isSealed`와 `isFrozen`이 모두 true입니다. 확장 가능한 빈 객체 `{}`는 `isFrozen`이 false입니다.
+- 확장 불가 객체에서 쓰기 가능한 프로퍼티를 삭제해 잠기지 않은 프로퍼티가 없어지면 `isFrozen`이 false에서 true로 바뀝니다.
+- 원시값에서는 `isExtensible`이 false이고 `isSealed`·`isFrozen`은 true입니다(ES2015부터).
+- 검사는 객체 자신만 대상으로 합니다. 동결된 객체 안의 중첩 객체는 별도로 확인해야 합니다.
+
+## 불변 객체와 깊은 동결
+
+불변 객체는 만든 뒤에 상태를 바꿀 수 없는 객체입니다. JavaScript는 불변 객체를 따로 제공하지 않으므로 두 가지 방법으로 만듭니다.
+
+- `Object.freeze`로 동결해 변경을 막습니다.
+- 변경 대신 수정된 복사본을 새로 만듭니다(스프레드 문법은 36편).
+
+```js
+const next = { ...Object.freeze({ a: 1, b: 2 }), b: 3 }
+// next는 { a: 1, b: 3 }. 원본은 그대로
+Object.isFrozen(next)   // false — 복사본은 동결되지 않는다
+```
+
+동결한 객체의 복사본은 동결되지 않습니다. 호스트 API인 `structuredClone`의 결과도 마찬가지입니다.
+
+용도는 설정 객체, 열거형 대용 상수 객체, 상태가 의도치 않게 바뀌는 것을 막는 방어입니다.
+
+```js
+const Color = Object.freeze({ RED: 'red', BLUE: 'blue' })
+Color.GREEN = 'green'   // 무시
+Color.RED = 'x'         // 무시
+```
+
+### const와 동결의 차이
+
+`const`는 변수에 다른 값을 다시 대입하는 것만 막고, 객체의 내용 변경은 막지 않습니다(자세히는 03편, 13편). 동결은 반대로 변수 재대입은 막지 못하고 객체 내용 변경만 막습니다.
+
+| 선언 | 재대입 | 프로퍼티 변경 |
+|------|--------|---------------|
+| `let o = {}` | 가능 | 가능 |
+| `const o = {}` | 불가 | 가능 |
+| `const o = Object.freeze({})` | 불가 | 불가 (얕게) |
+
+### 얕은 동결의 한계
+
+`freeze`는 대상 객체 자신의 프로퍼티만 잠급니다. 프로퍼티 값이 객체이면 그 객체는 동결되지 않습니다.
+
+```js
+const cfg = Object.freeze({
+  db: { host: 'a' },
+  ports: [1, 2],
+})
+
+cfg.db.host = 'b'   // 가능
+cfg.ports.push(3)   // 가능
+cfg.db = null       // 무시
+```
+
+Map, Set, Date처럼 내부 슬롯에 상태를 가진 객체는 `freeze`를 해도 메서드로 상태가 바뀝니다.
+
+### 깊은 동결
+
+깊은 동결은 객체를 동결한 뒤 프로퍼티 값이 객체이면 같은 일을 재귀로 반복합니다. 순환 참조가 있어도 끝나도록 방문한 객체를 기록합니다.
+
+```js
+function deepFreeze(value, seen = new WeakSet()) {
+  if (!value || typeof value !== 'object') return value
+  if (seen.has(value)) return value
+  seen.add(value)
+  Object.freeze(value)
+  for (const key of Reflect.ownKeys(value)) {
+    deepFreeze(value[key], seen)
+  }
+  return value
+}
+```
+
+`WeakSet`은 38편, `Reflect.ownKeys`는 47편에서 다룹니다. `Reflect.ownKeys`는 심볼과 비열거 키를 포함한 모든 자기 키를 반환합니다.
+
+- 방문 여부를 `Object.isFrozen`이 아니라 `seen`으로 판정하는 이유가 있습니다. 이미 동결된 객체 안에 동결되지 않은 객체가 있을 수 있어서, `isFrozen`으로 건너뛰면 하위 객체가 동결에서 빠집니다.
+- `value[key]`는 접근자의 getter를 호출합니다. getter에 부수 효과가 있으면 실행됩니다.
+- `typeof`가 `'function'`인 값은 건너뜁니다. 함수는 동결되지 않습니다.
+- 위 구현은 Map·Set·Date의 내부 상태를 동결하지 못합니다. 요소가 있는 TypedArray를 만나면 `freeze`가 TypeError를 던집니다.
+- 객체 전체를 순회하므로 큰 객체에서는 비용이 듭니다.
+
+## 핵심 정리
+
+- 프로퍼티는 데이터(`value`, `writable`)와 접근자(`get`, `set`)로 나뉘고, 둘 다 `enumerable`·`configurable`을 가집니다. 어트리뷰트는 디스크립터 객체로만 읽고 씁니다.
+- 리터럴과 대입으로 만든 프로퍼티는 어트리뷰트가 모두 true이고, `defineProperty`로 새로 만들며 생략하면 모두 false입니다. 기존 프로퍼티를 재정의할 때 생략한 값은 유지됩니다.
+- `configurable: false`는 되돌릴 수 없고, `writable`만 true에서 false로 바꿀 수 있습니다. `defineProperty` 위반은 항상 TypeError입니다.
+- 어트리뷰트가 막은 대입과 삭제는 비엄격 모드에서 조용히 무시되고 엄격 모드에서 TypeError입니다. 내장 메서드는 모드와 상관없이 TypeError입니다.
+- `preventExtensions`는 추가를, `seal`은 추가·삭제를, `freeze`는 추가·삭제·수정을 막습니다. 모두 얕고 되돌릴 수 없으며, 중첩 객체와 내부 슬롯 상태는 막지 못해서 깊은 동결은 재귀로 직접 구현합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="o = {} 에 Object.defineProperty(o, 'a', { value: 1 })을 실행한 뒤, 비엄격 모드에서 옳은 설명은?"
+  options={['o.a = 2로 값을 바꿀 수 있다', 'Object.keys(o)에 a가 포함된다', 'delete o.a로 삭제할 수 있다', 'o.a는 1이고 o.a = 2는 에러 없이 무시된다']}
+  correctAnswer={4}
+  explanation="defineProperty로 새 프로퍼티를 만들며 생략한 writable, enumerable, configurable은 모두 false입니다. 따라서 대입은 비엄격 모드에서 조용히 무시되고, Object.keys에서 빠지고, delete는 false를 반환하며 삭제되지 않습니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="Object.seal로 밀봉한 일반 객체에서 가능한 동작은?"
+  options={['새 프로퍼티 추가', '기존 프로퍼티 삭제', '기존 데이터 프로퍼티의 값 변경', 'enumerable 어트리뷰트 변경']}
+  correctAnswer={3}
+  explanation="seal은 객체를 확장 불가로 만들고 모든 프로퍼티의 configurable을 false로 바꿉니다. 그래서 추가와 삭제는 막히고 enumerable 변경도 TypeError입니다. writable은 그대로 true이므로 값 변경은 가능합니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="const o = Object.freeze({ list: [1, 2] }) 이후 o.list.push(3)과 o.list = []를 비엄격 모드에서 차례로 실행했을 때 o.list의 값은?"
+  options={['[1, 2]', '[1, 2, 3]', '[]', 'TypeError가 발생한다']}
+  correctAnswer={2}
+  explanation="freeze는 얕은 동결이라 o의 프로퍼티만 잠그고 list가 가리키는 배열은 동결하지 않으므로 push가 성공합니다. o.list = []는 writable이 false라서 비엄격 모드에서 조용히 무시됩니다. 그래서 값은 [1, 2, 3]입니다."
+/>
+
+## 참고 자료
+
+- [ECMA-262 — Property Attributes](https://tc39.es/ecma262/#sec-property-attributes)
+- [ECMA-262 — Object Internal Methods and Internal Slots](https://tc39.es/ecma262/#sec-object-internal-methods-and-internal-slots)
+- [MDN — Object.defineProperty()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/defineProperty)
+- [MDN — Object.getOwnPropertyDescriptor()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/getOwnPropertyDescriptor)
+- [MDN — Object.getOwnPropertyDescriptors()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/getOwnPropertyDescriptors)
+- [MDN — Object.preventExtensions()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/preventExtensions)
+- [MDN — Object.seal()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/seal)
+- [MDN — Object.freeze()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/freeze)

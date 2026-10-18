@@ -1,0 +1,289 @@
+---
+title: '09. Transition'
+description: 'useTransition과 startTransition으로 업데이트에 우선순위를 주는 방법, 탭·검색·내비게이션 예제, Suspense 조합, 비동기 Action과 await 뒤 set의 주의점을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** Transition이 어떤 업데이트를 뒤로 미루는지 설명하고, `useTransition`과 `startTransition`을 상황에 맞게 골라 쓰며, 동작하지 않는 경우를 구별할 수 있습니다.
+</Callout>
+
+## useTransition과 Transition
+
+Transition은 state 업데이트를 "급하지 않음"으로 표시해, 화면이 멈추지 않도록 렌더링을 뒤로 미루는 기능입니다. `useTransition`은 이 표시를 하는 Hook입니다(React 18 도입, 비동기 함수 지원은 React 19).
+
+```jsx
+const [isPending, startTransition] = useTransition()
+```
+
+| 반환값 | 역할 |
+|--------|------|
+| `isPending` | 진행 중인 Transition이 있으면 `true` |
+| `startTransition` | 인수로 받은 함수 안의 state 업데이트를 Transition으로 표시 |
+
+```jsx
+function Tabs() {
+  const [tab, setTab] = useState('home')
+  const [isPending, startTransition] = useTransition()
+
+  function select(next) {
+    startTransition(() => {
+      setTab(next) // Transition 업데이트
+    })
+  }
+  // ...
+}
+```
+
+- `startTransition`은 아무것도 반환하지 않습니다.
+- `startTransition`의 정체성은 안정적이라서 Effect 의존성에서 빼도 됩니다.
+- Transition 안에서 던진 에러는 Error Boundary가 잡습니다(자세히는 13편).
+
+### isPending
+
+`isPending`은 첫 `startTransition` 호출 때 `true`가 되고, 모든 Action이 끝나고 최종 state가 화면에 반영될 때까지 유지됩니다. 이전 화면을 그대로 두고 "갱신 중" 표시를 얹는 데 씁니다.
+
+```jsx
+<button disabled={isPending} onClick={() => go('posts')}>
+  {isPending ? '불러오는 중' : '게시글'}
+</button>
+```
+
+## 긴급 업데이트와 비긴급 업데이트
+
+React는 업데이트를 우선순위로 나눕니다. 이 구분이 Transition의 핵심입니다.
+
+| 구분 | 예 | 기대하는 반응 |
+|------|----|---------------|
+| 긴급(urgent) | 타이핑, 클릭, 누르기 | 즉시 화면에 반영 |
+| 비긴급(non-urgent) | Transition으로 표시한 업데이트 | 조금 늦어도 됨 |
+
+- Transition 업데이트는 백그라운드에서 렌더링됩니다. 새 화면을 메모리에서 먼저 그려 보고, 끝나면 화면에 반영합니다.
+- 렌더링 중에 긴급 업데이트가 들어오면 React는 Transition 렌더링을 중단하고 긴급 업데이트를 먼저 처리한 뒤 Transition을 다시 시작합니다.
+- 그래서 무거운 렌더링이 진행되는 동안에도 입력과 클릭이 막히지 않습니다. 이것이 UI 응답성이 좋아진다는 뜻입니다.
+- 사용자가 탭 A를 누르고 마음을 바꿔 탭 B를 누르면, 두 번째 클릭은 첫 번째 렌더링이 끝나길 기다리지 않고 바로 처리됩니다.
+
+Transition은 렌더링 작업의 우선순위를 낮출 뿐이고, 작업량을 줄이지는 않습니다. 렌더링이 느린 원인이 남아 있으면 끝나는 시점이 늦을 뿐 총 비용은 같습니다.
+
+## State 업데이트 감싸기
+
+`startTransition` 안에서 `set` 함수를 호출한 업데이트만 Transition이 됩니다. 감싸지 않은 `set`은 긴급 업데이트입니다.
+
+```jsx
+setInput(value)           // 긴급
+startTransition(() => {
+  setResults(compute(value)) // 비긴급
+})
+```
+
+규칙은 다음과 같습니다.
+
+- 전달한 함수는 즉시, 동기적으로 실행됩니다. 그 실행 중에 호출된 `set`만 표시됩니다.
+- `setTimeout` 안의 `set`은 이미 함수 실행이 끝난 뒤에 호출되므로 Transition이 아닙니다.
+- `set` 함수에 접근할 수 있어야 감쌀 수 있습니다. props나 커스텀 Hook이 돌려준 값만 가진 경우에는 `useDeferredValue`를 씁니다(자세히는 10편).
+
+```jsx
+startTransition(() => {
+  setTimeout(() => {
+    setPage('/about') // ❌ Transition이 아님
+  }, 1000)
+})
+```
+
+- Transition 렌더링 도중 다른 state 업데이트가 들어오면 Transition은 중단되고 처음부터 다시 시작합니다.
+- 진행 중인 여러 Transition은 현재 하나로 합쳐 처리됩니다. React 공식 문서가 앞으로 바뀔 수 있다고 밝힌 제약입니다.
+
+## 탭 전환
+
+무거운 탭으로 전환할 때 클릭 직후 화면이 멈추는 문제를 해결하는 대표 사례입니다.
+
+```jsx
+function TabButton({ children, isActive, onClick }) {
+  const [isPending, startTransition] = useTransition()
+  if (isActive) return <b>{children}</b>
+  if (isPending) return <b className="dim">{children}</b>
+  return (
+    <button onClick={() => startTransition(onClick)}>
+      {children}
+    </button>
+  )
+}
+```
+
+- 버튼 클릭은 즉시 처리되고, 느린 탭의 렌더링은 백그라운드로 갑니다.
+- 렌더링 중에도 이전 탭 화면이 계속 반응하며, 다른 탭을 눌러 도중에 바꿀 수 있습니다.
+- `isPending`은 호출한 컴포넌트가 가진 값이라서 각 버튼이 자기 대기 상태를 따로 표시할 수 있습니다.
+- React 19 공식 문서는 `onClick` 대신 `action` 같은 이름의 prop을 받고 `startTransition(async () => { await action() })`으로 감싸는 형태를 보여 줍니다. 부모가 Transition 여부를 신경 쓰지 않아도 되게 하는 설계입니다.
+
+## 검색
+
+입력 값과 검색 결과를 별도 state로 두고, 결과 쪽만 Transition으로 갱신합니다.
+
+```jsx
+function Search() {
+  const [text, setText] = useState('')
+  const [query, setQuery] = useState('')
+  const [isPending, startTransition] = useTransition()
+
+  function onChange(e) {
+    setText(e.target.value)            // 긴급: 입력창
+    startTransition(() => setQuery(e.target.value)) // 비긴급
+  }
+  // <input value={text} /> <Results query={query} />
+}
+```
+
+- 입력창은 `text`로 제어하므로 타이핑이 끊기지 않습니다.
+- 느린 목록은 `query`만 읽으며, 빠르게 입력하면 이전 렌더링을 버리고 최신 `query`로 다시 시작합니다.
+- 같은 효과를 state 하나와 `useDeferredValue`로도 낼 수 있습니다. 값을 바꾸는 코드를 소유하면 `startTransition`, 값을 받기만 하면 `useDeferredValue`를 씁니다(자세히는 10편).
+
+## 내비게이션
+
+화면 전환(페이지 이동)을 Transition으로 감싸면, 새 화면이 준비될 때까지 이전 화면을 유지합니다.
+
+```jsx
+function Router() {
+  const [page, setPage] = useState('/')
+  const [isPending, startTransition] = useTransition()
+
+  function navigate(url) {
+    startTransition(() => setPage(url))
+  }
+  // isPending이면 이전 화면에 로딩 표시를 얹는다
+}
+```
+
+- 새 화면이 데이터를 기다리며 중단(suspend)되어도 이미 보이는 내용은 fallback으로 바뀌지 않습니다.
+- Suspense를 지원하는 라우터는 이동을 자동으로 Transition으로 감쌉니다. 직접 라우터를 만들 때만 이 패턴이 필요합니다.
+
+## Suspense와 조합
+
+이미 화면에 보이는 Suspense 경계의 내용이 다시 중단되면, 일반 업데이트에서는 fallback이 나타나 내용을 가립니다. Transition으로 일으킨 업데이트에서는 React가 fallback을 보여 주지 않고 이전 내용을 유지하며 새 내용이 준비되기를 기다립니다(자세히는 11편).
+
+```jsx
+startTransition(() => {
+  setArtist(next) // 새 데이터가 중단되어도 이전 내용 유지
+})
+```
+
+- 긴급 업데이트로 일으킨 중단은 항상 fallback을 보입니다. "이전 내용 유지"는 비긴급 업데이트에서만 동작합니다.
+- 중단 상태 동안 `isPending`으로 이전 화면을 흐리게 표시하는 것이 표준 조합입니다.
+
+## startTransition과 Hook 밖 Transition
+
+`react`에서 바로 가져오는 `startTransition`은 `useTransition`의 `startTransition`과 같은 일을 하지만 `isPending`이 없습니다.
+
+```jsx
+import { startTransition } from 'react'
+
+function onSelect(id) {
+  startTransition(() => {
+    store.setSelected(id)
+  })
+}
+```
+
+| 항목 | `useTransition` | `startTransition` |
+|------|-----------------|-------------------|
+| 호출 위치 | 컴포넌트·커스텀 Hook 안 | 어디서든 |
+| `isPending` | 제공 | 없음 |
+| 에러 | Error Boundary로 전달 | `reportError`로 보고 |
+
+- 데이터 라이브러리나 컴포넌트 밖 유틸리티처럼 Hook을 쓸 수 없는 곳에서는 `startTransition`을 씁니다.
+- 대기 상태를 화면에 보여야 하면 `useTransition`을 씁니다.
+- 어느 쪽이든 `set` 함수에 접근할 수 있어야 하고, 함수는 동기적으로 실행되어야 합니다.
+
+## Controlled Input에 부적합
+
+텍스트 입력의 state를 Transition으로 갱신하면 안 됩니다.
+
+```jsx
+function onChange(e) {
+  startTransition(() => {
+    setText(e.target.value) // ❌ 입력값이 즉시 반영되지 않음
+  })
+}
+```
+
+- 제어 입력은 타이핑마다 같은 틱 안에 값이 반영되어야 하는데, Transition은 반영을 미룹니다. 입력 중에 글자가 사라지거나 늦게 나타납니다.
+- 해결은 둘 중 하나입니다. 입력용 state와 결과용 state를 따로 두고 결과 쪽만 감싸거나(위 "검색"), 한 state에 `useDeferredValue`를 씁니다.
+
+## 비동기 Action
+
+React 19부터 `startTransition`에 `async` 함수를 넘길 수 있습니다. 이렇게 넘기는 함수를 Action이라고 부릅니다. `await`하는 동안에도 Transition이 유지되며 `isPending`이 `true`로 남습니다.
+
+```jsx
+function save(newQuantity) {
+  startTransition(async () => {
+    const saved = await updateQuantity(newQuantity)
+    startTransition(() => {
+      setQuantity(saved) // await 뒤에는 다시 감싼다
+    })
+  })
+}
+```
+
+- 작동 방식은 함수가 호출된 시점부터 `isPending`이 `true`가 되고, 모든 Action이 끝나 최종 state가 보일 때 `false`가 되는 것입니다.
+- 서버 호출처럼 시간이 걸리는 작업 동안 버튼을 비활성화하거나 로딩 표시를 하기 좋습니다.
+- 콜백 prop 이름은 관례로 `submitAction`처럼 `Action` 접미사를 붙입니다. 이 prop이 Transition 안에서 호출된다는 신호입니다.
+- 폼 Action과 `useActionState`도 같은 메커니즘 위에 있습니다(자세히는 06편, 07편).
+
+### await 뒤의 set
+
+공식 문서가 알려진 제한으로 밝힌 규칙입니다. `await` 뒤에서 호출한 `set`은 Transition으로 표시되지 않습니다.
+
+```jsx
+startTransition(async () => {
+  await someAsyncFunction()
+  setPage('/about') // ❌ 긴급 업데이트로 처리됨
+})
+```
+
+- `await` 뒤의 코드는 `startTransition`의 동기 실행이 끝난 뒤에 이어지기 때문입니다.
+- 대처는 `await` 뒤의 `set`을 다시 `startTransition`으로 감싸는 것입니다(위 코드의 안쪽 `startTransition`).
+- 공식 문서는 이 제한이 앞으로 해결될 것이라고 적고 있습니다. 쓰는 버전의 문서를 확인합니다.
+- 반대로 `await`하는 동안의 `isPending`은 바깥 Action이 유지하므로 로딩 표시는 별도 처리가 필요 없습니다.
+
+## 핵심 정리
+
+- Transition은 `startTransition` 안의 state 업데이트를 비긴급으로 표시해 백그라운드에서 중단 가능하게 렌더링합니다.
+- 긴급 업데이트(타이핑·클릭)가 들어오면 Transition 렌더링은 중단되고 다시 시작됩니다. 작업량이 줄어드는 것은 아닙니다.
+- `useTransition`은 `isPending`을 주고, 컴포넌트 밖에서는 `isPending` 없는 `startTransition`을 씁니다.
+- `set` 함수에 접근할 수 있어야 하고, 함수 안에서 동기적으로 호출된 업데이트만 표시됩니다. 제어 입력의 state에는 쓰지 않습니다.
+- Suspense 경계의 이미 보이는 내용은 Transition 업데이트에서 fallback으로 바뀌지 않고 유지됩니다.
+- React 19에서는 `async` Action을 넘길 수 있고, `await` 뒤의 `set`은 다시 `startTransition`으로 감쌉니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="다음 중 Transition으로 표시되지 않는 업데이트는?"
+  options={['startTransition 안에서 곧바로 호출한 setTab', 'startTransition 안의 setTimeout 콜백에서 호출한 setPage', 'startTransition 안에서 호출한 두 개의 set 함수 중 첫 번째', 'startTransition 안에서 호출한 setQuery']}
+  correctAnswer={2}
+  explanation="startTransition에 넘긴 함수는 즉시 동기적으로 실행되고, 그 실행 중에 호출된 set만 Transition이 됩니다. setTimeout 콜백은 함수 실행이 끝난 뒤에 호출되므로 긴급 업데이트로 처리됩니다."
+  optionExplanations={['동기적으로 호출했으므로 Transition입니다.', '정답입니다. 비동기 콜백 안의 set은 표시되지 않습니다.', '같은 함수 안에서 동기적으로 호출한 set은 모두 Transition입니다.', '동기 호출이므로 Transition입니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="텍스트 입력창을 제어하는 state의 set 함수를 startTransition으로 감쌌을 때 일어나는 문제는?"
+  options={['에러 없이 입력이 더 빨라진다', '입력값 반영이 미뤄져 타이핑이 어색해진다', 'isPending이 항상 false가 된다', 'React가 경고 없이 Transition을 무시하고 긴급 업데이트로 바꾼다']}
+  correctAnswer={2}
+  explanation="제어 입력은 타이핑과 같은 시점에 값이 반영되어야 하는데 Transition은 반영을 미룹니다. 입력용 state는 그대로 두고 결과용 state만 감싸거나 useDeferredValue를 써야 합니다."
+  optionExplanations={['반영이 늦어질 뿐 빨라지지 않습니다.', '정답입니다. 입력값이 늦게 반영되거나 글자가 사라진 것처럼 보입니다.', 'isPending은 Transition이 진행되는 동안 true가 됩니다.', 'React는 자동으로 바꾸지 않고 그대로 Transition으로 처리합니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="startTransition에 async 함수를 넘기고 await 뒤에서 setPage를 호출할 때 올바른 처리는?"
+  options={['그대로 두면 자동으로 Transition이 된다', 'await 뒤의 set 호출을 다시 startTransition으로 감싼다', 'async 함수는 startTransition에 쓸 수 없다', 'useTransition 대신 setTimeout으로 호출한다']}
+  correctAnswer={2}
+  explanation="await 뒤에서 호출한 set은 Transition으로 표시되지 않는 것이 공식 문서가 밝힌 제한입니다. 그 set을 다시 startTransition으로 감싸야 합니다. React 19부터 async 함수 자체는 넘길 수 있습니다."
+  optionExplanations={['await 뒤의 set은 자동으로 표시되지 않습니다.', '정답입니다. 안쪽에서 한 번 더 감쌉니다.', 'React 19부터 async 함수를 넘길 수 있습니다.', 'setTimeout 안의 set도 Transition이 아닙니다.']}
+/>
+
+## 참고 자료
+
+- [React — useTransition](https://react.dev/reference/react/useTransition)
+- [React — startTransition](https://react.dev/reference/react/startTransition)
+- [React — Suspense](https://react.dev/reference/react/Suspense)
+- [React — useDeferredValue](https://react.dev/reference/react/useDeferredValue)

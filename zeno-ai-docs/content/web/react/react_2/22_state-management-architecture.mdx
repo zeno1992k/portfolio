@@ -1,0 +1,285 @@
+---
+title: '22. 상태 관리 아키텍처'
+description: '로컬·끌어올린·Context·Reducer·외부 스토어·서버·URL·폼 상태의 역할을 구분하고, 상태를 둘 위치와 전역 상태로 올리는 기준, 종류별 도구 대응표를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 상태를 종류별로 나누어 각각 어디에 두고 어떤 도구로 다룰지 기준에 따라 판단하고, 전역 상태가 정말 필요한 경우를 구별할 수 있습니다.
+</Callout>
+
+## 상태를 나누는 관점
+
+"상태 관리"는 한 가지 도구를 고르는 일이 아닙니다. 상태는 출처와 수명이 다른 여러 종류로 나뉘고, 종류마다 알맞은 도구가 다릅니다. 이 편은 종류를 구분하는 기준과 위치를 정하는 순서를 다룹니다. 도구별 사용법은 뒤의 편에서 따로 다룹니다.
+
+| 구분 기준 | 질문 |
+|-----------|------|
+| 출처 | 값이 브라우저 안에서 생기는가, 서버에 원본이 있는가 |
+| 범위 | 한 컴포넌트가 쓰는가, 몇 개가 공유하는가, 앱 전체가 쓰는가 |
+| 수명 | 컴포넌트가 사라지면 같이 사라지는가, 새로고침 후에도 남아야 하는가 |
+| 공유성 | 링크로 다른 사람에게 전달되어야 하는가 |
+
+React 공식 문서의 원칙부터 확인합니다. 상태는 가능한 한 단순하게 구조를 잡습니다.
+
+- 같이 바뀌는 값은 하나의 state로 묶습니다.
+- 모순되는 값(`isSending`과 `isSent`가 둘 다 true)이 생기지 않게 `status` 하나로 표현합니다.
+- 다른 값에서 계산할 수 있으면 state로 두지 않고 렌더링 중에 계산합니다.
+- 같은 데이터를 두 곳에 복사하지 않고 ID만 저장합니다.
+- 깊게 중첩하지 않고 평평하게 둡니다.
+
+상태가 줄수록 동기화 버그도 줄어듭니다. 관리 방법을 고민하기 전에 그 값이 정말 state여야 하는지부터 확인합니다.
+
+## Local State
+
+Local State는 한 컴포넌트 안에서만 쓰고, 그 컴포넌트와 수명을 같이하는 상태입니다. `useState`나 `useReducer`로 컴포넌트 안에 둡니다.
+
+```jsx
+function Search() {
+  const [query, setQuery] = useState('')
+  const change = (e) => setQuery(e.target.value)
+  return <input value={query} onChange={change} />
+}
+```
+
+- 모달의 열림 여부, 입력 중인 텍스트, 토글, 호버 상태가 대표적입니다.
+- 컴포넌트가 사라지면 상태도 사라집니다. `key`를 바꾸면 의도적으로 초기화할 수도 있습니다.
+- 기본값은 항상 Local State입니다. 더 넓은 범위가 필요하다는 증거가 생길 때만 올립니다.
+
+## Lifted State
+
+Lifted State는 둘 이상의 컴포넌트가 같은 값을 써야 할 때 가장 가까운 공통 부모로 끌어올린 상태입니다. 부모가 값을 props로 내려 주고, 자식은 이벤트 핸들러를 props로 받아 부모에게 변경을 요청합니다.
+
+```jsx
+function Accordion() {
+  const [active, setActive] = useState(0)
+  return (
+    <>
+      <Panel open={active === 0}
+             onShow={() => setActive(0)} />
+      <Panel open={active === 1}
+             onShow={() => setActive(1)} />
+    </>
+  )
+}
+```
+
+- 끌어올리면 자식은 스스로 상태를 갖지 않고 props로만 움직이는 제어(controlled) 컴포넌트가 됩니다. 상태를 스스로 갖는 쪽은 비제어(uncontrolled)입니다. 제어 쪽이 조율하기 쉽고, 비제어 쪽이 따로 쓰기 쉽습니다.
+- 값마다 소유자는 하나입니다(단일 진실 공급원). 같은 값을 여러 곳에 복사해 동기화하지 않습니다.
+- 끌어올린 거리가 멀어져 중간 컴포넌트가 쓰지도 않는 props를 전달만 하면(props drilling) 다음 단계를 검토합니다. 먼저 `children`으로 조합해 중간 단계를 없앨 수 있는지 봅니다.
+
+## Context State
+
+Context State는 트리 깊숙한 곳의 여러 컴포넌트가 읽는 값을 Provider로 내려 주는 상태입니다. props를 층층이 전달하지 않아도 됩니다(자세히는 01편).
+
+```jsx
+const ThemeContext = createContext('light')
+
+function App() {
+  const [theme, setTheme] = useState('light')
+  return (
+    <ThemeContext value={theme}>
+      <Page onToggle={() => setTheme('dark')} />
+    </ThemeContext>
+  )
+}
+```
+
+- 테마, 로그인한 사용자, 언어처럼 자주 바뀌지 않고 넓게 읽히는 값에 알맞습니다.
+- Context는 값을 전달하는 통로이고 상태 자체를 만드는 도구가 아닙니다. 값은 여전히 `useState`나 `useReducer`가 만듭니다.
+- Context 값이 바뀌면 그 Context를 읽는 모든 컴포넌트가 다시 렌더링됩니다. 일부만 읽는 selector 기능이 없어서 자주 바뀌는 값을 넣으면 렌더링이 넓게 퍼집니다.
+- 이 한계를 줄이려고 상태와 dispatch를 별도의 Context로 나눕니다.
+
+## Reducer State
+
+Reducer State는 상태를 바꾸는 규칙을 컴포넌트 밖의 순수 함수(reducer)에 모아 두는 상태입니다. 이벤트 핸들러는 어떤 일이 일어났는지(action)만 `dispatch`하고, 상태가 어떻게 바뀌는지는 reducer가 정합니다(자세히는 02편).
+
+```jsx
+function reducer(state, action) {
+  switch (action.type) {
+    case 'added':
+      return [...state, action.task]
+    case 'removed':
+      return state.filter((t) => t.id !== action.id)
+    default:
+      throw Error('Unknown action: ' + action.type)
+  }
+}
+const [tasks, dispatch] = useReducer(reducer, [])
+```
+
+- 하나의 이벤트로 여러 값이 함께 바뀌거나, 다음 상태가 이전 상태에 복잡하게 의존할 때 `useState`보다 낫습니다.
+- reducer는 렌더링 밖에서 단독으로 테스트할 수 있습니다.
+- Reducer와 Context를 함께 쓰면 상태와 dispatch를 트리 전체에 내려 줄 수 있습니다. 공식 문서는 상태용 Context와 dispatch용 Context를 둘로 나누고, 커스텀 훅으로 감싸 노출하는 구성을 권합니다. dispatch만 쓰는 컴포넌트는 상태가 바뀌어도 다시 렌더링되지 않습니다.
+- Reducer State는 위치가 아니라 갱신 방식에 관한 구분입니다. 컴포넌트 안에도, 끌어올린 부모에도, Context 뒤에도 둘 수 있습니다.
+
+## External Store
+
+External Store는 React 바깥에 값을 두고, 컴포넌트가 구독해서 읽는 상태입니다. 스토어는 컴포넌트 트리와 독립적으로 존재합니다. React 컴포넌트가 아닌 코드(이벤트 핸들러 밖의 모듈, 네트워크 콜백)에서도 읽고 쓸 수 있습니다.
+
+```jsx
+const count = useStore((s) => s.count)   // 필요한 조각만 구독
+useStore.getState().increment()          // 컴포넌트 밖에서도 호출
+```
+
+- Redux, Zustand, Jotai가 대표적인 라이브러리이고 개관은 23편, Zustand는 24편에서 다룹니다.
+- Context와 달리 스토어를 읽는 쪽이 필요한 조각(selector)만 구독해서, 관련 없는 값이 바뀌어도 다시 렌더링되지 않게 만들 수 있습니다.
+- 내부적으로 React의 `useSyncExternalStore`를 쓰는 라이브러리가 많습니다(자세히는 05편).
+- 앱 전체가 공유하는 클라이언트 상태(UI 설정, 장바구니, 여러 화면에 걸친 위저드 진행 상태)에 알맞습니다. 서버에서 가져온 데이터를 담는 용도로는 쓰지 않습니다(다음 절).
+
+## Server State
+
+Server State는 원본이 서버에 있고, 클라이언트는 사본을 빌려 쓰는 상태입니다. TanStack Query 공식 문서는 서버 상태를 다음과 같이 설명합니다.
+
+- 내가 소유하지 않고 통제할 수 없는 원격 위치에 저장됩니다.
+- 가져오고 갱신하는 데 비동기 API가 필요합니다.
+- 다른 사용자가 모르는 사이에 바꿀 수 있습니다.
+- 관리하지 않으면 금방 낡은(stale) 값이 됩니다.
+
+따라서 캐싱, 중복 요청 제거, 백그라운드 갱신, 가비지 컬렉션, 페이지네이션 같은 문제가 따라옵니다. 일반 상태 관리 라이브러리는 클라이언트 상태에는 좋지만 비동기·서버 상태를 다루려고 만든 것이 아니라는 것이 TanStack Query 문서의 설명입니다.
+
+- 서버 상태는 TanStack Query나 SWR 같은 전용 라이브러리가 맡습니다(자세히는 26편).
+- 서버 데이터를 `useEffect` 안에서 가져와 `useState`나 전역 스토어에 복사하는 방식은 로딩·에러·캐시·경쟁 상태를 모두 직접 짜야 합니다.
+- 서버 데이터를 전역 스토어에 다시 복사하면 서버 사본과 스토어 사본이 어긋납니다. 같은 데이터를 두 곳에 두지 않는 원칙에 어긋납니다(자세히는 36편).
+
+## URL State
+
+URL State는 주소(경로, 쿼리 문자열, 해시)에 담긴 상태입니다. 새로고침해도 유지되고, 링크로 공유할 수 있고, 뒤로 가기와 앞으로 가기가 그대로 동작합니다(자세히는 29편).
+
+```jsx
+const [params, setParams] = useSearchParams()
+const sort = params.get('sort') ?? 'recent'
+setParams({ sort: 'price' }) // 주소가 ?sort=price로 바뀜
+```
+
+React Router의 `useSearchParams`는 현재 URL의 쿼리 문자열을 `URLSearchParams` 객체로 돌려주고, 갱신하면 내비게이션이 일어나 컴포넌트가 다시 렌더링됩니다.
+
+- 검색어, 필터, 정렬, 페이지 번호, 선택된 탭처럼 "이 화면 그대로 보여 줘"라는 요구가 있는 값을 둡니다.
+- URL에 둔 값을 `useState`에 또 복사하면 두 값이 어긋납니다. URL을 유일한 원본으로 쓰고 필요한 값은 렌더링 중에 읽습니다.
+- 주소에는 문자열만 담기므로 숫자·배열·날짜를 직렬화하고 해석하는 규칙이 필요합니다. 길고 민감한 값은 담지 않습니다.
+
+## Form State
+
+Form State는 입력 중인 값, 검증 오류, 제출 상태, 수정 여부 같은 폼에 관한 상태입니다. 폼이 닫히거나 제출되면 사라지는 단기 상태입니다.
+
+| 방식 | 설명 |
+|------|------|
+| 제어 컴포넌트 | 입력마다 `useState`로 값을 관리. 입력 필드가 적을 때 단순함 |
+| 비제어 + FormData | 제출 시점에 `FormData`로 읽음. React 19 Form Action과 함께 씀(자세히는 06편, 07편) |
+| 폼 라이브러리 | React Hook Form처럼 값·오류·제출 상태를 한 번에 관리(자세히는 31편) |
+
+- React Hook Form은 비제어 컴포넌트와 네이티브 입력을 기반으로 하며, 상태 구독 모델로 필요한 부분만 다시 렌더링하게 합니다.
+- 폼 값은 전역 스토어에 넣지 않습니다. 제출 전의 임시 값은 폼 안에 두고, 제출이 성공하면 서버 상태가 갱신됩니다.
+- 수정 폼의 초기값은 서버 상태에서 오고, 사용자가 고친 값은 Form State입니다. 둘을 섞어 한 state에 두면 서버 갱신이 입력 중인 값을 덮어쓰는 문제가 생깁니다.
+
+## State 위치
+
+위치를 정하는 원칙은 "그 상태를 쓰는 컴포넌트들의 가장 가까운 공통 조상에 둔다"입니다. 아래에서 위로 올라가며 처음 해당하는 단계에서 멈춥니다.
+
+| 순서 | 질문 | 해당하면 |
+|------|------|----------|
+| 1 | 계산할 수 있는 값인가 | state로 두지 않고 렌더링 중에 계산 |
+| 2 | 서버에 원본이 있는가 | Server State, 서버 상태 라이브러리 |
+| 3 | 링크·새로고침·뒤로 가기로 복원되어야 하는가 | URL State |
+| 4 | 폼 입력인가 | Form State |
+| 5 | 한 컴포넌트만 쓰는가 | Local State |
+| 6 | 가까운 형제·부모만 쓰는가 | Lifted State |
+| 7 | 트리 깊숙한 곳이 읽고, 자주 바뀌지 않는가 | Context |
+| 8 | 멀리 떨어진 여러 곳이 읽고 쓰며 자주 바뀌는가 | External Store |
+
+- 순서의 핵심은 서버·URL·폼처럼 출처가 분명한 상태를 먼저 걸러내는 것입니다. 걸러내고 나면 앱이 직접 소유하는 클라이언트 상태가 거의 남지 않는 경우가 많습니다.
+- 위치를 잘못 잡았다면 옮깁니다. 아래에서 시작해 필요해질 때 위로 올리는 편이, 처음부터 전역에 두고 내리는 편보다 쉽습니다.
+- 상태를 올릴수록 그 상태가 바뀔 때 영향받는 범위가 넓어집니다. 올리는 데에는 이유가 있어야 합니다.
+
+**흔한 실수:** props로 내려받은 값을 `useState`의 초기값으로 복사하는 것입니다. 부모의 값이 바뀌어도 자식의 state는 처음 값을 유지해서 두 값이 어긋납니다(자세히는 36편).
+
+## Global State 기준
+
+Global State는 앱의 여러 곳이 공유하는 클라이언트 상태를 말합니다. 전역으로 올릴 때는 아래 조건을 따집니다.
+
+| 조건 | 설명 |
+|------|------|
+| 여러 영역이 읽는다 | 서로 먼 두 개 이상의 컴포넌트 트리가 같은 값을 읽음 |
+| 화면 이동을 넘어 산다 | 라우트가 바뀌어도 값이 유지되어야 함 |
+| 컴포넌트 밖에서 쓴다 | 이벤트 핸들러 밖(인터셉터, 모듈)에서 읽거나 바꿔야 함 |
+| 갱신이 잦다 | Context로는 재렌더링이 넓게 퍼짐 |
+
+- 해당하는 것이 없으면 전역으로 올리지 않습니다. "나중에 필요할지도 모른다"는 이유로 올리지 않습니다.
+- 전역에 두는 대표 사례는 인증된 사용자 정보의 클라이언트 쪽 사본, 테마·언어, 장바구니, 사이드바 열림 상태, 여러 단계에 걸친 위저드 입력입니다. 인증 사용자 정보도 원본은 서버에 있으므로 서버 상태 라이브러리가 더 알맞은 경우가 있습니다.
+- 전역으로 올린다고 해서 스토어 하나에 모두 담을 필요는 없습니다. 도메인별로 나눕니다.
+
+## 상태 종류별 도구 대응표
+
+| 상태 종류 | 예 | 도구 |
+|-----------|----|------|
+| Local | 모달 열림, 입력 중인 텍스트 | `useState`, `useReducer` |
+| Lifted | 아코디언 활성 패널 | 공통 부모의 `useState`, props |
+| Context | 테마, 로케일 | `createContext`와 `useContext` |
+| Reducer | 복잡한 전이 규칙 | `useReducer`(Context와 함께 쓰기도 함) |
+| External Store | 장바구니, UI 설정 | Zustand, Redux Toolkit, Jotai |
+| Server | 목록, 상세, 사용자 프로필 | TanStack Query, SWR |
+| URL | 검색어, 필터, 정렬, 페이지 | React Router의 `useSearchParams`, nuqs |
+| Form | 입력값, 검증 오류 | `FormData`와 Action, React Hook Form |
+
+## 채용 공고 기준 조합
+
+이 과목의 조사(2026-10, 원티드·점핏·사람인 React 프론트엔드 공고)에서 반복해서 나온 요건은 React Hook 이해, 상태 관리(Zustand), 데이터 패칭(TanStack Query)이었습니다. 위의 종류 구분에 대응시키면 다음 조합이 됩니다.
+
+| 역할 | 선택 |
+|------|------|
+| 서버 상태 | TanStack Query |
+| 클라이언트 전역 상태 | Zustand |
+| 폼 | React Hook Form |
+| URL 상태 | 라우터의 쿼리 파라미터 |
+| 지역·공유 상태 | React 기본 Hook |
+
+- 서버 상태를 TanStack Query로 빼면 전역 스토어에 남는 것은 UI 상태 정도라서 Zustand 스토어가 작아집니다. 두 도구는 경쟁이 아니라 역할이 다릅니다(자세히는 28편).
+- 이 조합은 시작점입니다. 작은 앱에서는 React 기본 Hook만으로 충분하고, 팀이 Redux Toolkit 규약을 쓰고 있으면 Zustand 자리에 그것이 들어갑니다(자세히는 25편).
+- 도구 선택보다 종류 구분이 먼저입니다. 종류를 구분하지 않고 라이브러리를 고르면 서버 데이터를 스토어에 담는 실수로 이어집니다.
+
+## 핵심 정리
+
+- 상태는 출처와 수명에 따라 Local, Lifted, Context, Reducer, External Store, Server, URL, Form으로 나뉘고, 종류마다 도구가 다릅니다.
+- 계산할 수 있는 값은 state로 두지 않고, 같은 데이터는 한 곳에만 둡니다.
+- 위치는 서버·URL·폼 같은 출처가 분명한 상태를 먼저 걸러낸 뒤 Local에서 시작해 필요할 때 올립니다.
+- Context는 전달 통로이며 값이 바뀌면 읽는 모든 곳이 다시 렌더링되므로 자주 바뀌는 값에는 External Store를 씁니다.
+- 서버 데이터는 전용 라이브러리가 맡고 전역 스토어에 복사하지 않습니다.
+- 전역은 먼 여러 곳이 읽고, 화면 이동을 넘어 살고, 갱신이 잦은 클라이언트 상태에만 씁니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="상품 목록 API의 응답을 화면에 보여 주려 한다. 가장 알맞은 상태 처리 방식은?"
+  options={['useEffect로 가져와 전역 스토어에 복사해 둔다', '컴포넌트마다 useState로 가져와 각자 보관한다', 'TanStack Query 같은 서버 상태 라이브러리가 캐싱과 갱신을 맡게 한다', 'Context Provider에 응답을 넣어 앱 전체에 내려 준다']}
+  correctAnswer={3}
+  explanation="서버 상태는 원본이 서버에 있고 낡을 수 있어 캐싱, 중복 요청 제거, 갱신이 필요합니다. 이를 전담하는 서버 상태 라이브러리를 씁니다. 전역 스토어나 Context에 복사하면 서버 사본과 어긋나고, 컴포넌트별 useState는 중복 요청과 로딩·에러 처리를 모두 직접 해야 합니다."
+  optionExplanations={['스토어에 복사하면 서버 데이터와 스토어 사본이 어긋나고 캐시·경쟁 상태를 직접 처리해야 합니다.', '같은 데이터를 컴포넌트마다 요청하게 되어 중복과 불일치가 생깁니다.', '정답입니다. 캐싱, 중복 제거, 백그라운드 갱신을 라이브러리가 처리합니다.', 'Context는 전달 통로일 뿐 서버 상태의 캐싱·갱신 문제를 풀어 주지 않습니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="검색어와 정렬 기준을 새로고침과 링크 공유 후에도 그대로 복원하려 한다. 가장 알맞은 위치는?"
+  options={['공통 부모 컴포넌트의 useState', '전역 External Store', 'URL의 쿼리 문자열', '폼 라이브러리의 defaultValues']}
+  correctAnswer={3}
+  explanation="링크 공유와 새로고침 복원, 뒤로 가기 동작이 필요한 값은 URL State로 둡니다. useState와 스토어의 값은 새로고침하면 사라지고 링크에 담기지 않습니다. 폼 라이브러리의 값도 폼이 닫히면 사라지는 단기 상태입니다."
+  optionExplanations={['새로고침하면 초기값으로 돌아가고 링크로 전달되지 않습니다.', '메모리에 있는 값이라 새로고침과 링크 공유에서 복원되지 않습니다.', '정답입니다. 주소가 곧 상태의 원본이 됩니다.', 'defaultValues는 폼의 초기값이고 주소와 연결되지 않습니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="Context로 상태를 내려 줄 때 가장 주의할 점은?"
+  options={['Context 값이 바뀌면 그 Context를 읽는 모든 컴포넌트가 다시 렌더링된다', 'Context는 useState와 함께 쓸 수 없다', 'Context를 쓰면 상태가 서버에 저장된다', 'Context 안의 값은 일부만 골라 구독할 수 있다']}
+  correctAnswer={1}
+  explanation="Context에는 일부만 골라 구독하는 selector 기능이 없어서 값이 바뀌면 그 Context를 읽는 모든 컴포넌트가 다시 렌더링됩니다. 그래서 자주 바뀌는 값에는 External Store가 알맞고, 상태와 dispatch를 별도 Context로 나누는 방법도 씁니다. Context는 useState나 useReducer가 만든 값을 전달하는 통로이며 서버와는 무관합니다."
+  optionExplanations={['정답입니다. 값이 바뀔 때 읽는 쪽 전체가 영향을 받습니다.', 'Context 값은 보통 useState나 useReducer가 만든 상태를 전달합니다.', 'Context는 클라이언트 메모리에서 값을 전달할 뿐입니다.', '일부만 구독하는 기능은 Context에 없고 External Store의 selector가 제공합니다.']}
+/>
+
+## 참고 자료
+
+- [React 공식 문서 — Managing State](https://react.dev/learn/managing-state)
+- [React 공식 문서 — Choosing the State Structure](https://react.dev/learn/choosing-the-state-structure)
+- [React 공식 문서 — Sharing State Between Components](https://react.dev/learn/sharing-state-between-components)
+- [React 공식 문서 — Scaling Up with Reducer and Context](https://react.dev/learn/scaling-up-with-reducer-and-context)
+- [TanStack Query — Overview](https://tanstack.com/query/latest/docs/framework/react/overview)
+- [React Router — useSearchParams](https://reactrouter.com/api/hooks/useSearchParams)
+- [React Hook Form — Get Started](https://react-hook-form.com/get-started)
+- [Zustand 공식 문서](https://zustand.docs.pmnd.rs/)

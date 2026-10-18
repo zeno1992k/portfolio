@@ -1,0 +1,74 @@
+---
+title: '05. 매핑된 타입 심화: 키 리매핑'
+description: 'as 절로 키 이름을 바꾸는 매핑된 타입을 익히고, FormErrors 타입을 만들어 거래 입력 폼에 인라인 에러 메시지를 표시합니다.'
+---
+
+03편에서 `lib/types/utility.ts`에 조건부 타입 `UnwrapPromise`, `ElementOf`를 작성했습니다. 지금까지 거래 입력 폼은 값이 잘못돼도 `alert` 한 번 띄우고 끝이었습니다.
+
+## 개념 정리
+
+### as 절로 키 이름 바꾸기
+
+매핑된 타입은 원래 `keyof T`가 만든 키 이름을 그대로 씁니다. `as` 절을 뒤에 붙이면 그 키 이름을 다른 문자열로 바꿔서 새 타입을 만들 수 있습니다.
+
+```ts
+type Prefixed<T> = {
+  [K in keyof T as `input${Capitalize<string & K>}`]: T[K]
+}
+```
+
+`{ date: string; amount: number }` 모양을 이 타입에 넣으면 `inputDate`, `inputAmount`라는 새 키를 가진 타입이 됩니다. `string & K`는 "`K`이면서 동시에 `string`인 타입"이라는 뜻으로, 템플릿 리터럴 자리에는 문자열만 올 수 있다는 제약을 만족시키기 위한 관용구입니다.
+
+### Exclude와 결합해 키 거르기
+
+`as` 절의 결과로 `never`를 주면 그 키는 결과 타입에서 사라집니다. 이 성질과 `Exclude`를 결합하면 특정 키만 제외한 매핑된 타입을 만들 수 있습니다.
+
+```ts
+type WithoutId<T> = {
+  [K in Exclude<keyof T, 'id'>]: T[K]
+}
+```
+
+`Exclude<keyof T, 'id'>`가 먼저 `'id'`를 뺀 키 목록을 계산하고, 매핑된 타입은 그 목록만 순회합니다.
+
+### FormErrors 설계
+
+거래 입력 폼에서 실제로 값을 검증할 칸은 `date`, `amount`, `memo` 세 개뿐입니다. `type`, `category`는 `select` 요소라 사용자가 목록에 없는 값을 고를 수 없어 에러 메시지가 필요 없습니다.
+
+## 자주 하는 실수
+
+| 증상 | 원인 | 고치는 법 |
+|------|------|-----------|
+| 템플릿 리터럴 키 타입 선언에서 오류 | `` `${K}Error` ``처럼 `K`를 그대로 씀 | `` `${string & K}Error` ``처럼 `string`과 교차시켜 문자열임을 명시한다 |
+| 존재하지 않는 에러 필드에 값을 대입해 컴파일 에러 | `FormErrors`가 만든 타입에 없는 키 이름을 사용 | 실제로 검증하는 필드만 골라 이름을 맞춘다 |
+| 에러 메시지 칸에 항상 undefined라는 글자가 보임 | 옵셔널 필드를 그대로 `textContent`에 대입 | `errors.dateError ?? ''`처럼 값이 없을 때 빈 문자열로 바꾼다 |
+
+## 확인 문제
+
+<Quiz
+  questionNumber={1}
+  question={"매핑된 타입에서 as 절이 하는 역할은"}
+  options={["프로퍼티의 값 타입을 바꾼다","결과 타입의 키 이름 자체를 새 이름으로 바꾼다","타입 매개변수의 기본값을 지정한다","인터페이스를 클래스로 변환한다"]}
+  correctAnswer={2}
+  explanation={"as 절은 매핑된 타입이 순회하는 각 키의 이름을 다른 문자열로 바꿔 새로운 키를 만듭니다."}
+/>
+
+<Quiz
+  questionNumber={2}
+  question={"매핑된 타입의 as 절 결과로 never를 주면 생기는 일은"}
+  options={["그 키가 문자열 타입으로 바뀐다","그 키가 결과 타입에서 사라진다","컴파일이 항상 실패한다","그 키가 옵셔널로 바뀐다"]}
+  correctAnswer={2}
+  explanation={"as 절이 never로 계산되는 키는 결과 타입에 포함되지 않고 제거됩니다."}
+/>
+
+<Quiz
+  questionNumber={3}
+  question={"FormErrors 타입에서 type, category 키를 제외한 이유는"}
+  options={["이름이 너무 길어서","두 필드는 select 요소라 목록에 없는 값을 넣을 수 없어 에러 메시지가 필요 없어서","두 필드는 항상 비어있어서","제외하지 않으면 컴파일이 느려져서"]}
+  correctAnswer={2}
+  explanation={"select 요소는 사용자가 정의된 값만 고를 수 있어 형식 오류가 날 여지가 없으므로 에러 메시지 필드를 만들 필요가 없습니다."}
+/>
+
+## 참고 자료
+
+- [TypeScript Handbook — Mapped Types](https://www.typescriptlang.org/docs/handbook/2/mapped-types.html)

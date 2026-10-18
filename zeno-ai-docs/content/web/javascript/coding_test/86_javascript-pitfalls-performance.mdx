@@ -1,0 +1,359 @@
+---
+title: '86. JavaScript 코테 실전: 성능과 호출 스택'
+description: 'Array.shift 큐의 비용, 재귀 깊이와 호출 스택 한계, 반복 DFS 변환, sort와 문자열 누적, 2차원 배열 생성, TypedArray 선택 기준, 인수 개수와 배열·문자열·Map 크기 한계를 측정과 함께 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** JavaScript에서 시간 초과와 런타임 에러로 이어지는 성능 함정(shift 큐, 깊은 재귀, sort, 문자열 수정, 2차원 배열 공유, 크기 한계)을 알아보고, 같은 일을 안전한 코드로 바꿀 수 있습니다.
+</Callout>
+
+## 측정값을 읽는 법
+
+이 편의 시간과 한계 수치는 Node.js 24.15(Windows)에서 직접 잰 값입니다. 채점기의 Node.js 버전, 속도, 실행 옵션은 확인하지 못했습니다.
+
+- 수치는 어림용입니다. 같은 코드도 실행마다 달라지므로 "몇 ms다"가 아니라 "입력이 커질 때 급격히 느려진다"는 모양을 읽습니다.
+- 엔진 내부 동작은 공식 문서로 확인하지 못한 것은 결과만 적고 원인은 단정하지 않습니다.
+- 한계 수치(호출 깊이, 문자열 길이, Map 크기)는 설계 기준이 아니라 경고선입니다. 그 근처까지 가지 않도록 코드를 짭니다.
+
+## Queue 최적화와 Array.shift 사용 피하기
+
+`Array.shift`는 배열 앞의 요소를 꺼냅니다. 배열이 커지면 한 번의 호출이 배열 길이에 비례해 느려집니다. 작은 배열에서는 빨라 보여서 놓치기 쉽습니다.
+
+`shift`로 N개를 모두 꺼내는 시간을 재 보면 입력 크기에 따라 급격히 늘었습니다.
+
+| 개수 | `shift`로 모두 꺼내기 |
+|------|----------------------|
+| 1,000 | 1ms 미만 |
+| 10,000 | 약 2ms |
+| 50,000 | 약 118ms |
+| 100,000 | 약 494ms |
+| 200,000 | 약 8.7s |
+
+BFS처럼 꺼내면서 넣는 큐에서도 같았습니다. 20만 번 꺼내며 넣는 반복이 `shift` 방식은 약 8.9s, head 인덱스 방식은 약 6ms였습니다.
+
+```js
+// ❌ 느림: 꺼낼 때마다 배열 길이만큼 비용
+const q = [start]
+while (q.length) {
+  const u = q.shift()
+  // ... q.push(v)
+}
+```
+
+```js
+// ✅ head 인덱스: 꺼내기가 O(1)
+const q = [start]
+for (let head = 0; head < q.length; head++) {
+  const u = q[head]
+  // ... q.push(v)
+}
+```
+
+- 꺼낸 자리를 비우지 않고 `head`만 올립니다. 넣은 총량만큼 배열이 커지지만 BFS는 각 상태를 한 번만 넣어서 괜찮습니다(자세히는 20편, 82편).
+- 값이 정수이고 넣을 총량을 알면 `Int32Array` 큐가 더 가볍습니다(82편의 `IntQueue`).
+- `unshift`도 같은 문제입니다. 10만 번 `unshift`가 약 680ms였습니다. 앞에 넣어야 하면 덱을 씁니다(82편).
+- `q = q.slice(1)`이나 `splice(0, 1)`은 매번 배열을 복사·이동하므로 `shift`보다 나을 것이 없습니다.
+- `pop`과 `push`는 뒤쪽 연산이라 빠릅니다. 스택에는 배열을 그대로 씁니다.
+
+**흔한 실수:** 작은 입력(수백 개)으로 시간을 재고 안심하는 것입니다. 노드가 10만 개이면 그래프 BFS가 TLE가 됩니다(자세히는 81편).
+
+## 재귀 깊이 문제와 Node.js Call Stack 한계
+
+함수가 호출될 때마다 호출 스택에 한 칸이 쌓이고, 스택의 크기는 정해져 있습니다. 한계를 넘으면 `RangeError: Maximum call stack size exceeded`가 발생하고 프로그램이 RE로 끝납니다. 종료 조건이 없을 때뿐 아니라 종료 조건은 있어도 깊이가 너무 깊을 때 생깁니다.
+
+```js
+let depth = 0
+function f() { depth++; f() }
+try { f() } catch (e) { console.log(depth) }
+// 약 12,500 (인자도 지역 변수도 없는 함수)
+```
+
+- 한계 깊이는 함수의 크기에 따라 달라집니다. 인자와 지역 변수가 많은 함수는 한 칸이 커서 덜 깊이 들어갑니다. 인자 셋을 받는 함수는 약 7,800에서 멈췄습니다. 정확한 값을 외울 수 없고 외울 필요도 없습니다.
+- 안전한 기준은 "깊이가 입력 크기에 비례하는가"입니다. 비례하고 입력이 수만 이상이면 재귀로 쓰지 않습니다.
+- 일직선으로 이어진 노드 20만 개에서 재귀 DFS는 실제로 `RangeError`가 났습니다.
+
+깊이가 입력 크기에 비례하는 대표 경우입니다.
+
+| 경우 | 깊이 |
+|------|------|
+| 일직선에 가까운 트리·그래프 DFS | 노드 수 |
+| 격자 Flood Fill 재귀 | 칸 수 |
+| 위에서 아래로(top-down) 메모이제이션 DP | 상태 길이 |
+| 연결 리스트·긴 체인을 재귀로 순회 | 길이 |
+| 하나씩 줄이며 부르는 재귀(`f(n - 1)`) | `n` |
+
+- 재귀 깊이가 로그에 비례하는 것(이분 탐색, 분할 정복, 병합 정렬)은 안전합니다.
+- 메모이제이션 DP는 아래에서 위로(bottom-up) 반복문으로 바꿉니다(자세히는 40편). 작은 값부터 채우면 재귀가 필요 없습니다.
+- 한계에 걸렸는지는 에러 메시지 `Maximum call stack size exceeded`와 RE 판정으로 알 수 있습니다(자세히는 81편).
+- 종료 조건이 틀려 끝없이 호출되는 경우도 같은 에러가 납니다. 깊이를 찍어 보거나 작은 입력에서 먼저 종료되는지 확인합니다(자세히는 22편).
+
+## 호출 스택 크기 옵션의 한계
+
+호출 스택을 키우는 방법이 몇 가지 있지만 기본 해법이 되지 못합니다.
+
+`--stack-size`는 V8 옵션으로, 스택 영역의 크기를 kB 단위로 정합니다. `node --v8-options`에서 기본값은 984(kB)로 나왔습니다. 값을 올리면 깊이가 늘었습니다.
+
+```text
+node --stack-size=984  sol.js   → 약 12,500
+node --stack-size=2000 sol.js   → 약 25,500
+node --stack-size=4000 sol.js   → 약 51,100
+node --stack-size=20000 sol.js  → 프로세스 비정상 종료
+```
+
+- V8이 쓸 수 있다고 믿는 크기가 운영체제가 실제로 준 스택보다 크면 에러 대신 프로세스가 죽습니다. 측정에서 20000에서 이렇게 끝났습니다. 안전한 상한은 환경마다 다르므로 값을 키우는 것은 위험합니다.
+- 채점 환경에서 실행 옵션을 줄 수 있는지는 확인하지 못했습니다. 제출 파일만 낼 수 있는 곳이면 쓸 수 없습니다.
+- `Worker`를 만들면 그 스레드의 스택을 정할 수 있습니다. `resourceLimits`의 `stackSizeMb`가 그 값이고 기본은 4입니다(Node.js 문서). 64로 올렸더니 같은 함수의 깊이가 약 836,000까지 늘었습니다. 다만 코드가 별도 스레드로 옮겨져 구조가 복잡해지고, 채점기가 스레드를 허용하는지는 확인하지 못했습니다. 문서도 값이 너무 작으면 Worker를 쓸 수 없게 될 수 있다고 경고합니다.
+- `--max-old-space-size`는 힙(메모리) 크기이지 호출 스택 크기가 아닙니다. 메모리 옵션을 올려도 `Maximum call stack size exceeded`는 사라지지 않습니다(자세히는 81편).
+
+결론은 옵션에 기대지 않고 코드를 바꾸는 것입니다. 입력이 클 수 있는 재귀는 반복문으로 바꿉니다.
+
+## 반복 DFS 변환
+
+재귀 대신 직접 만든 스택(배열)에 할 일을 쌓는 반복 DFS입니다. 직접 만든 스택은 힙 메모리를 쓰므로 호출 스택 한계가 없습니다. 재귀의 어떤 성질이 필요한지에 따라 세 가지로 나눕니다.
+
+1. 방문만 하면 되고 순서는 상관없는 경우(연결 요소, 도달 가능성)입니다. 이웃을 스택에 넣고 꺼내면서 방문합니다.
+2. 재귀와 같은 방문 순서나 나갈 때의 처리(종료 시점)가 필요한 경우입니다. 노드마다 "다음에 볼 이웃의 위치"를 기억하는 반복문을 씁니다(83편의 반복 DFS 템플릿).
+3. 트리에서 자식의 결과로 부모를 계산하는 경우(후위 순회)입니다. 방문 순서를 기록해 뒀다가 거꾸로 돌며 합칩니다.
+
+방문만 하면 되는 경우의 가장 짧은 형태입니다.
+
+```js
+const visited = new Uint8Array(n + 1)
+const stack = [start]
+visited[start] = 1
+while (stack.length) {
+  const u = stack.pop()
+  for (const v of adj[u]) {
+    if (visited[v]) continue
+    visited[v] = 1       // 넣을 때 표시
+    stack.push(v)
+  }
+}
+```
+
+3번의 예로 트리에서 각 노드의 서브트리 크기를 구합니다. 재귀로는 자식 크기를 더해 돌아오는 계산입니다.
+
+```js
+const order = []
+const parent = new Int32Array(n + 1)   // 루트 1의 부모 0
+const stack = [1]
+while (stack.length) {
+  const u = stack.pop()
+  order.push(u)
+  for (const v of adj[u]) {
+    if (v !== parent[u]) { parent[v] = u; stack.push(v) }
+  }
+}
+const size = new Int32Array(n + 1).fill(1)
+for (let i = order.length - 1; i > 0; i--) {
+  size[parent[order[i]]] += size[order[i]]
+}
+```
+
+- `order`는 부모가 자식보다 앞에 오는 순서입니다. 거꾸로 돌면 자식이 항상 부모보다 먼저 처리되어 `size`가 올바르게 쌓입니다.
+- 트리에서는 부모를 기록해 되돌아가는 간선을 막으면 `visited`가 필요 없습니다. 일반 그래프에서는 `visited`를 씁니다.
+- 위 코드는 무작위 트리에서 재귀 풀이와 같은 값을 냈고, 20만 노드의 일직선에서도 끝났습니다.
+- 재귀를 반복문으로 바꾸는 일반 규칙은 "재귀 호출 인자를 스택에 쌓고, 호출 뒤에 할 일이 있으면 그 상태를 함께 쌓는다"입니다(자세히는 22편).
+- 백트래킹처럼 선택과 복구가 얽힌 재귀는 반복문으로 바꾸기 어렵습니다. 깊이가 선택 개수에 비례해 작은 문제(순열·조합)는 재귀 그대로 둡니다(자세히는 23편).
+
+## sort 주의점
+
+`sort`는 배열 안에서 정렬하며(원본을 바꿈) 같은 배열을 반환합니다. 기본 순서는 요소를 문자열로 바꿔 UTF-16 코드 유닛 순으로 비교합니다(자세히는 26편).
+
+```js
+[1, 10, 2].sort()                // [1, 10, 2] (문자열 순서)
+[1, 10, 2].sort((a, b) => a - b) // [1, 2, 10]
+['b', 'a', 'C'].sort()  // ['C', 'a', 'b'] (대문자 먼저)
+```
+
+- 숫자는 항상 `(a, b) => a - b`(오름차순) 비교 함수를 씁니다. 내림차순은 `b - a`입니다.
+- 비교 함수가 불리언을 반환하면 정렬되지 않습니다. `(a, b) => a > b`는 거짓일 때 `0`, 참일 때 `1`이라 음수가 없습니다. Node.js 24에서 `[5, 1, 4].sort((a, b) => a > b)`가 `[5, 1, 4]` 그대로였습니다. 비교 함수는 음수, 0, 양수를 반환해야 합니다.
+- 문자열에 `a - b`를 쓰면 `NaN`이 되어 순서가 정해지지 않습니다. 문자열은 기본 `sort()`나 `(a, b) => (a < b ? -1 : a > b ? 1 : 0)`입니다.
+- `undefined`는 비교 함수를 호출하지 않고 항상 맨 뒤로 갑니다. `[3, undefined, 1].sort((a, b) => b - a)`는 `[3, 1, undefined]`입니다.
+- 정렬은 안정(같은 키의 원래 순서 유지)입니다(ES2019부터).
+- 비교 함수는 일관되어야 합니다. 입력에 따라 결과가 달라지는 비교 함수는 엔진마다 다른 결과를 냅니다.
+- BigInt 배열에서 `a - b`는 `TypeError`입니다(자세히는 85편).
+- 원본을 지키려면 복사 후 정렬하거나 `toSorted`(ES2023)를 씁니다. 매개변수로 받은 배열에 직접 `sort`를 부르면 호출한 쪽의 배열이 바뀝니다.
+
+```js
+const a = [3, 1, 2]
+const b = [...a].sort((x, y) => x - y)  // a는 그대로
+const c = a.toSorted((x, y) => x - y)   // ES2023
+```
+
+- 반복문 안에서 매번 `sort`를 부르면 N log N이 곱해집니다. 한 번 정렬하고 인덱스로 쓰거나, 힙을 씁니다(자세히는 81편).
+- 숫자만 많이 정렬할 때는 TypedArray의 `sort()`가 기본이 숫자 순서입니다. `new Int32Array([10, 9, 1, 100]).sort()`는 `[1, 9, 10, 100]`입니다. 100만 개를 정렬하는 시간은 일반 배열에 `(a, b) => a - b`로 약 220ms, `Float64Array`의 `sort()`로 약 140ms였습니다(한 번의 측정).
+
+## 문자열 성능과 배열 + join 누적
+
+문자열은 불변입니다. 글자 하나를 바꾸는 대입은 효과가 없습니다. 느슨한 모드(Node.js에서 CommonJS 파일의 기본)에서는 아무 일 없이 무시되고, 엄격 모드에서는 `TypeError`입니다.
+
+```js
+let s = 'abc'
+s[0] = 'x'
+s    // 'abc' (바뀌지 않음, 에러도 없음)
+```
+
+문자를 바꾸려면 새 문자열을 만들어야 하고, 한 번에 문자열 길이만큼 비용이 듭니다. 길이 10만인 문자열의 글자를 하나씩 `s = s.slice(0, i) + 'b' + s.slice(i + 1)`로 바꿨더니 약 800ms가 걸렸고, 글자 배열로 바꿔 대입한 뒤 한 번 `join`했더니 약 2ms였습니다.
+
+```js
+const chars = s.split('')     // 글자 배열
+chars[i] = 'b'                // 자유롭게 수정
+const result = chars.join('')
+```
+
+문자열을 이어 붙여 만드는 쪽은 의외의 결과였습니다.
+
+| 작업 | 측정 |
+|------|------|
+| `s += x`를 100만 번 | 약 55ms |
+| 배열에 `push` 후 `join`, 100만 개 | 약 53ms |
+| 천만 글자를 `s += 'a'`로 | 약 430ms |
+| `s += 'a'` 뒤 매번 `s[s.length - 1]` 읽기, 20만 번 | 약 4.2s |
+
+- 이어 붙이기만 반복할 때는 `+=`도 느리지 않았습니다. 그러나 이어 붙이는 도중에 글자를 읽으면 급격히 느려졌습니다. 엔진 내부 구조는 공식 문서로 확인하지 못했으므로 원인은 단정하지 않고 결과만 기억합니다.
+- 채점기의 엔진 버전을 모르므로 안전한 기본형은 배열에 모으고 마지막에 `join`입니다(자세히는 06편, 08편).
+- 이어 붙이는 중간에 `s[i]`, `s.charAt`, 정규식 같은 읽기를 섞지 않습니다. 읽어야 하면 배열로 다룹니다.
+- 앞에 붙이는 `s = 'a' + s`는 이 환경에서 빨랐지만 같은 이유로 의존하지 않습니다.
+- 문자열 하나의 길이에는 한계가 있습니다(아래 "배열·문자열·Map의 크기 한계").
+- `split('')`은 UTF-16 코드 유닛으로 자르고 `[...s]`는 코드 포인트로 자릅니다(자세히는 06편).
+
+## 2차원 배열 생성 주의
+
+`fill`에 배열을 넘기면 같은 배열 하나를 모든 칸에 넣습니다. 행이 전부 같은 배열을 가리키게 되어 한 행을 바꾸면 모든 행이 바뀝니다.
+
+```js
+const g = Array(2).fill(Array(2).fill(0))
+g[0][0] = 1
+JSON.stringify(g)   // [[1,0],[1,0]] (❌ 모든 행이 같이 바뀜)
+```
+
+행마다 새 배열을 만드는 올바른 방법입니다.
+
+```js
+const row = () => new Array(C).fill(0)
+const g1 = Array.from({ length: R }, row)
+const g2 = [...Array(R)].map(row)
+const g3 = new Int32Array(R * C)   // 1차원, g3[r * C + c]
+```
+
+- `fill`은 원시 값(숫자, 문자열, 불리언)에만 안전합니다. 객체, 배열, TypedArray를 `fill`에 넘기면 모두 공유됩니다. `Array(2).fill(new Int32Array(2))`도 같은 문제입니다.
+- `new Array(n)`은 빈 슬롯의 배열이라 `map`, `forEach`가 빈 슬롯을 건너뜁니다. `new Array(5).map(() => 1)`은 여전히 빈 슬롯 다섯 개입니다. `fill(0)`을 하거나 `Array.from`, `[...Array(n)]`으로 채웁니다.
+- `new Array(3)`은 길이 3이지만 `new Array(3, 4)`는 `[3, 4]`입니다. 숫자를 하나만 주면 길이입니다.
+- 행마다 별도 객체가 되는 것이 정상입니다. 방문 배열을 격자 크기로 새로 만들 때 `fill`로 한 번에 만들지 않았는지 확인합니다.
+- 큰 격자는 평평한 TypedArray 하나가 행마다 배열을 만드는 것보다 메모리와 생성 시간이 적습니다. 좌표는 `r * C + c`로 바꿉니다(자세히는 17편).
+- 케이스마다 2차원 배열을 새로 만드는 비용도 전체 입력 크기에 합쳐집니다(자세히는 14편).
+
+## TypedArray 활용 기준
+
+TypedArray(`Int32Array`, `Uint8Array`, `Float64Array` 등)는 한 가지 숫자 자료형을 고정 크기로 담는 배열입니다. 메모리가 정확히 계산되고 0으로 초기화되어 DP·방문·거리·큐 배열에 알맞습니다(자세히는 05편).
+
+| 종류 | 요소 크기 | 값의 범위 | 쓰임 |
+|------|-----------|-----------|------|
+| `Uint8Array` | 1바이트 | 0–255 | 방문 표시, 불리언 |
+| `Int32Array` | 4바이트 | 약 ±21억 | 거리, 개수, 인덱스, 큐 |
+| `Uint32Array` | 4바이트 | 0–4294967295 | 음수가 없는 큰 값 |
+| `Float64Array` | 8바이트 | `Number`와 같음 | 큰 합, 소수, `Infinity` |
+| `BigInt64Array` | 8바이트 | 64비트 정수 | BigInt 값 |
+
+- 생성하면 0으로 채워집니다. `new Int32Array(n).fill(-1)`로 미방문 표시를 만듭니다.
+- 길이가 고정이라 `push`, `pop`이 없습니다. 크기를 미리 알아야 합니다.
+- 범위를 넘는 값은 에러 없이 감깁니다. `Uint8Array`에 `-1`을 넣으면 `255`, `Int32Array`에 `2 ** 31`을 넣으면 `-2147483648`입니다(자세히는 85편).
+- 소수는 버려지고(`1.9`가 `1`) `Infinity`는 `Int32Array`에서 `0`이 됩니다. 무한대가 필요한 거리 배열은 `Float64Array`나 충분히 큰 정수 상수를 씁니다.
+- 범위 밖 인덱스에 쓰면 에러 없이 무시되고 읽으면 `undefined`입니다. 크기가 모자라면 값이 조용히 사라집니다.
+- `BigInt64Array`에는 BigInt만 넣을 수 있습니다. `a[0] = 1`은 `TypeError`입니다.
+- 크기는 `요소 수 × 요소 바이트`입니다. 천만 개가 `Uint8Array`는 10,000,000바이트, `Int32Array`는 40,000,000바이트, `Float64Array`는 80,000,000바이트입니다. 메모리 제한에 맞춰 자료형을 고릅니다(자세히는 81편의 MLE).
+- 일반 배열이 필요하면 `Array.from(ta)`나 `[...ta]`로 바꿉니다. `map`의 결과는 같은 TypedArray라서 `a.map((x) => x + 1.5)`는 소수를 버립니다.
+- 일반 배열이 나은 경우는 길이가 변하는 큐·스택, 값이 객체·문자열인 경우, 요소가 수십 개뿐인 경우입니다.
+
+## Math.max(...arr)의 인수 개수 한계
+
+스프레드 문법으로 배열을 함수 인수로 펼치면 인수가 호출 스택에 놓입니다. 요소가 너무 많으면 `RangeError`입니다(자세히는 ECMAscript 과목의 스프레드 문법 편).
+
+```js
+Math.max(...new Array(100000).fill(1))  // 1
+Math.max(...new Array(130000).fill(1))  // RangeError
+```
+
+- Node.js 24에서 10만 개는 통과하고 13만 개에서 `Maximum call stack size exceeded`가 났습니다. 호출하는 위치의 스택 사용량에 따라 달라지므로 안전한 개수를 외울 수 없습니다.
+- MDN은 JavaScriptCore 엔진이 인수를 65,536개로 고정 제한하고 대부분의 엔진은 예외를 던진다고 설명합니다. 초과했을 때의 동작은 명세에 없어서 엔진마다 다릅니다.
+- 같은 이유로 `Math.min(...arr)`, `arr.push(...big)`, `String.fromCharCode(...codes)`가 실패합니다. 20만 개를 `push(...big)`하거나 `fromCharCode`에 펼쳤을 때 모두 `RangeError`였습니다.
+- 배열 리터럴의 스프레드 `[...big]`, `[...a, ...b]`는 인수 목록을 만들지 않아서 50만 개도 통과했습니다.
+- 크기가 입력 크기에 비례하는 배열에는 반복문이나 `reduce`로 최댓값을 구합니다.
+
+```js
+let max = -Infinity
+for (const x of arr) if (x > max) max = x
+// 또는 arr.reduce((m, x) => (x > m ? x : m), -Infinity)
+```
+
+- 큰 배열을 이어 붙일 때는 반복문으로 `push`하거나 `concat`을 씁니다.
+- 작은 입력에서 통과하고 큰 입력에서 RE가 나는 전형적인 코드입니다. 입력 최댓값이 수만 이상이면 `Math.max(...arr)`를 쓰지 않습니다.
+
+## 배열·문자열·Map의 크기 한계
+
+JavaScript 값에는 길이나 개수의 상한이 있고, 넘으면 `RangeError`입니다. 메모리가 먼저 모자라는 경우가 대부분이지만 아래 수치는 알아 둘 만합니다.
+
+| 대상 | 상한 | 넘으면 |
+|------|------|--------|
+| 배열 길이 | 4,294,967,295 (2^32 - 1) | `RangeError: Invalid array length` |
+| 문자열 길이 | 536,870,888 (Node.js 24 측정) | `RangeError: Invalid string length` |
+| `Map` 요소 수 | 16,777,216 (Node.js 24 측정) | `RangeError: Map maximum size exceeded` |
+| `Set` 요소 수 | 16,777,216 (Node.js 24 측정) | `RangeError: Set maximum size exceeded` |
+
+- 배열 길이의 상한은 2^32 - 1이며 `new Array(2 ** 32)`와 `a.length = 2 ** 32`가 `RangeError`였습니다. 코딩테스트의 메모리 제한이 이보다 먼저 닿습니다.
+- 문자열 길이는 2^29 - 24, 즉 약 5.4억 글자였습니다(UTF-16 코드 유닛 단위). 엔진 구현의 한계라서 버전에 따라 달라질 수 있습니다. 2^28 글자짜리 둘을 이어 붙이면 넘어서 `RangeError`입니다.
+- `Map`과 `Set`은 1,677만 개를 넘으면 에러입니다. 정확히 `2 ** 24`개까지 넣고 한 개 더 넣을 때 `RangeError`가 났습니다. 키가 정수이고 범위가 좁으면 TypedArray를 인덱스로 쓰는 것이 낫습니다.
+- 한계에 닿을 만큼 큰 출력은 한 문자열로 만들지 말고 일정 개수마다 나눠 씁니다(자세히는 08편의 대량 출력 버퍼링).
+- TypedArray의 최대 길이는 메모리에 좌우됩니다. `new Int32Array(2 ** 30)`은 생성되었습니다. 크게 잡을수록 메모리 제한에 걸립니다.
+- 에러 메시지를 보면 어느 한계인지 알 수 있습니다. `Invalid array length`, `Invalid string length`, `Map maximum size exceeded`가 각각 배열, 문자열, Map의 한계입니다(자세히는 81편).
+
+## 핵심 정리
+
+- `Array.shift`는 배열 길이에 비례해 느려서 큐에는 head 인덱스를 쓰고, `unshift`와 `slice(1)`도 마찬가지로 피합니다.
+- 재귀 깊이가 입력 크기에 비례하면 약 1만 단계 근처에서 `RangeError`가 나므로 반복문으로 바꿉니다. `--stack-size`와 Worker로 늘릴 수 있어도 환경에 의존하고 위험해서 기본 해법이 아닙니다.
+- 반복 DFS는 방문만 하면 직접 스택, 종료 시점이 필요하면 이웃 위치를 기억하는 스택, 트리 계산이면 방문 순서를 기록해 거꾸로 돕니다.
+- `sort`는 숫자에 비교 함수가 필요하고 불리언을 반환하면 안 되며 원본을 바꾸므로 복사하거나 `toSorted`를 씁니다.
+- 문자열은 불변이라 글자 수정은 배열로 하고, 누적은 배열에 모아 `join`합니다. `fill`은 2차원 배열의 행을 공유하므로 `Array.from`으로 행마다 만듭니다.
+- 많은 수는 TypedArray에 담되 값의 범위를 맞추고, `Math.max(...arr)` 같은 인수 펼침은 큰 배열에 쓰지 않으며, 배열·문자열·Map의 크기 한계를 경고선으로 기억합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="노드가 10만 개인 그래프의 BFS에서 큐를 배열의 shift로 구현하면 가장 큰 문제는?"
+  options={['메모리를 너무 많이 쓴다', '꺼낼 때마다 배열 길이에 비례하는 비용이 들어 전체가 매우 느려진다', 'shift는 마지막 요소를 꺼낸다', '큐의 순서가 뒤집힌다']}
+  correctAnswer={2}
+  explanation="shift는 앞 요소를 꺼내고 나머지를 당기므로 배열이 클수록 한 번의 비용이 커져 전체가 크게 느려집니다. 측정에서 10만 개를 모두 꺼내는 데 수백 ms, 20만 개에서는 수 초가 걸렸습니다. head 인덱스를 올리는 방식은 꺼내기가 O(1)입니다. shift는 앞 요소를 꺼내므로 순서는 바뀌지 않습니다."
+  optionExplanations={['메모리가 아니라 시간이 문제입니다.', '꺼낼 때마다 길이에 비례해 느려지므로 정답입니다.', 'shift는 첫 번째 요소를 꺼냅니다.', '순서는 올바르게 유지됩니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="노드 20만 개가 일직선으로 이어진 트리에서 재귀 DFS가 RangeError를 냈습니다. 가장 알맞은 해결은?"
+  options={['메모리 옵션 max-old-space-size를 크게 올린다', '직접 만든 스택을 쓰는 반복 DFS로 바꾼다', 'console.log로 깊이를 출력한다', 'visited 배열을 Set으로 바꾼다']}
+  correctAnswer={2}
+  explanation="깊이가 노드 수에 비례하는 재귀는 호출 스택 한계를 넘습니다. 직접 만든 스택은 힙 메모리를 쓰므로 호출 스택 한계가 없습니다. max-old-space-size는 힙 크기라서 호출 스택 한계와 무관하고, 출력이나 자료구조 교체는 깊이를 줄이지 못합니다."
+  optionExplanations={['힙 크기 옵션은 호출 스택 한계와 상관없습니다.', '호출 스택 대신 힙의 스택을 쓰므로 정답입니다.', '출력은 깊이를 줄이지 못합니다.', '자료구조를 바꿔도 재귀 깊이는 그대로입니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="const g = Array(3).fill([]); g[0].push(1); 을 실행한 뒤 g[1]의 값은?"
+  options={['빈 배열', '1이 들어 있는 배열', 'undefined', '에러가 발생한다']}
+  correctAnswer={2}
+  explanation="fill은 전달된 배열 하나를 모든 칸에 넣으므로 g의 세 칸이 같은 배열을 가리킵니다. 그래서 g[0].push(1)이 g[1]과 g[2]에도 보입니다. 행마다 새 배열이 필요하면 Array.from으로 각 행을 새로 만듭니다."
+  optionExplanations={['세 칸이 같은 배열이라 비어 있지 않습니다.', '같은 배열을 공유하므로 정답입니다.', 'g[1]도 배열을 가리킵니다.', '에러 없이 실행됩니다.']}
+/>
+
+## 참고 자료
+
+- [Node.js — Releases](https://nodejs.org/en/about/previous-releases)
+- [Node.js — Worker threads (resourceLimits, stackSizeMb)](https://nodejs.org/api/worker_threads.html)
+- [Node.js — Command-line API (--max-old-space-size)](https://nodejs.org/api/cli.html)
+- [MDN — RangeError: Maximum call stack size exceeded](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Errors/Too_much_recursion)
+- [MDN — Array.prototype.sort()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/sort)
+- [MDN — TypedArray](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/TypedArray)
+- [MDN — Map](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map)
+- [MDN — Function.prototype.apply() (인수 개수 한계)](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Function/apply)
+- [MDN — Set](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set)

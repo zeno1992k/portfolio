@@ -1,0 +1,431 @@
+---
+title: '19. 컴포넌트 Public API 설계'
+description: '속성과 프로퍼티의 역할 분담, 반영(reflection) 패턴, 기본값·검증, 업그레이드 전 프로퍼티 보존, 메서드·이벤트·CSS 변수까지 포함한 공개 API와 하위 호환성을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 커스텀 요소의 속성·프로퍼티·메서드를 용도에 맞게 나누어 설계하고, 반영 규칙과 기본값·검증을 일관되게 구현하며, 공개 API를 호환성을 지키며 바꿀 수 있습니다.
+</Callout>
+
+## HTML Attribute를 API로 보기
+
+속성(attribute)은 마크업에 쓰는 선언형 설정입니다. 값은 항상 문자열이고, 요소의 속성 목록에 저장됩니다.
+
+```html
+<user-card name="Kim" size="large" disabled></user-card>
+```
+
+- HTML 작성자와 서버 렌더링 결과물이 쓸 수 있는 유일한 입구입니다. JavaScript 없이도 설정할 수 있습니다.
+- CSS 속성 선택자(`user-card[size="large"]`)와 접근성 도구가 읽을 수 있고, `outerHTML`과 `cloneNode`에도 따라갑니다.
+- 값이 바뀌면 `attributeChangedCallback`으로 감지할 수 있습니다(자세히는 18편).
+- 문자열만 담을 수 있어서 객체나 함수는 전달하지 못합니다.
+
+## JavaScript Property를 API로 보기
+
+프로퍼티(property)는 요소 객체에 정의한 JavaScript 값입니다. 클래스의 접근자(getter와 setter)로 만들며 어떤 타입이든 담을 수 있습니다.
+
+```js
+class UserCard extends HTMLElement {
+  #user = null
+  get user() { return this.#user }
+  set user(v) { this.#user = v; this.#render() }
+}
+card.user = { name: 'Kim', age: 20 }
+```
+
+- 명령형 설정의 입구입니다. 객체, 배열, 함수, 숫자, 불리언을 그대로 주고받습니다.
+- 값이 바뀌어도 브라우저가 알려 주지 않습니다. 변경 시점에 로직을 실행하려면 setter로 만들어야 합니다.
+- 마크업에 나타나지 않고 `cloneNode`나 `outerHTML`로 복사되지 않습니다.
+- `HTMLElement`가 이미 가진 이름(`title`, `hidden`, `lang`, `style`, `tabIndex` 등)을 다른 의미로 재정의하지 않습니다.
+
+## Attribute vs Property
+
+두 입구는 서로 대체재가 아니라 역할이 다릅니다.
+
+| 항목 | 속성 | 프로퍼티 |
+|------|------|----------|
+| 값의 타입 | 문자열 | 모든 타입 |
+| 설정 위치 | 마크업, `setAttribute` | JavaScript 코드 |
+| 변경 감지 | `attributeChangedCallback` | setter |
+| 복제·직렬화 | 포함 | 포함하지 않음 |
+| CSS 선택자 | 사용 가능 | 불가 |
+| 정의 전에 설정 | 유지됨 | 요소 자체의 데이터 프로퍼티로 남음(아래 "업그레이드 전에 설정된 프로퍼티 보존") |
+
+선택 기준은 다음과 같습니다.
+
+- 문자열·숫자·불리언 같은 원시 값 설정: 속성과 프로퍼티를 모두 제공하고 서로 반영합니다.
+- 객체·배열·함수 같은 복합 데이터: 프로퍼티만 제공합니다. 직렬화·역직렬화 비용이 크기 때문입니다.
+- 스타일링과 접근성에 필요한 상태(`open`, `disabled`): 속성으로 노출합니다.
+- 내부 상태: 둘 다 공개하지 않습니다(자세히는 20편).
+
+## 속성 이름 표기 규칙
+
+속성 이름은 소문자와 하이픈(kebab-case), 프로퍼티 이름은 camelCase로 씁니다.
+
+| 속성 | 프로퍼티 |
+|------|----------|
+| `max-value` | `maxValue` |
+| `show-label` | `showLabel` |
+| `disabled` | `disabled` |
+
+- HTML 문서에서 파서와 `setAttribute`는 속성 이름을 소문자로 바꿉니다. `maxValue`라는 속성 이름은 존재할 수 없고, `observedAttributes`에도 쓸 수 없습니다(자세히는 18편).
+- 내장 요소는 `maxlength`와 `maxLength`, `tabindex`와 `tabIndex`처럼 단어를 붙여 쓴 속성 이름을 씁니다. 새 컴포넌트는 단어 경계를 하이픈으로 구분하는 편이 읽기 쉽습니다.
+- 속성 이름과 프로퍼티 이름의 변환 규칙을 정해 두고 전체 컴포넌트에 적용합니다. 변환이 규칙적이어야 사용자가 추측할 수 있습니다.
+- 자율형 요소는 규칙에 맞는 임의의 속성 이름을 쓸 수 있습니다. 확장형은 내장 요소의 속성 규칙을 따르므로 사용자 정의 속성에는 `data-*`를 씁니다.
+
+## Boolean Attribute
+
+불리언 속성은 값이 아니라 존재 여부로 참과 거짓을 나타냅니다. 있으면 참, 없으면 거짓입니다.
+
+```html
+<user-card disabled></user-card>
+<user-card disabled=""></user-card>
+<user-card disabled="false"></user-card> <!-- 이것도 참 -->
+```
+
+- 값은 의미가 없습니다. `disabled="false"`도 속성이 있으므로 참입니다.
+- 프로퍼티는 불리언으로 노출합니다. getter는 `hasAttribute`, setter는 `toggleAttribute`로 만듭니다.
+
+```js
+get disabled() { return this.hasAttribute('disabled') }
+set disabled(v) {
+  this.toggleAttribute('disabled', Boolean(v))
+}
+```
+
+- `toggleAttribute(name, force)`는 `force`가 참이면 빈 문자열 값으로 추가하고 거짓이면 제거합니다.
+- 속성이 없는 상태가 거짓이므로, 기본이 켜짐인 옵션은 불리언 속성으로 표현할 수 없습니다. 끄는 쪽을 속성으로 만들거나(`no-animation`) 열거형 속성으로 만듭니다.
+
+## 문자열 / 숫자 / 객체 Property
+
+프로퍼티 타입에 따라 속성과의 변환이 달라집니다.
+
+문자열은 속성 값을 그대로 쓰되, 속성이 없으면 빈 문자열이나 기본값을 돌려줍니다.
+
+```js
+get name() { return this.getAttribute('name') ?? '' }
+set name(v) { this.setAttribute('name', v) }
+```
+
+숫자는 읽을 때 파싱하고 쓸 때 문자열로 바꿉니다. 속성이 없을 때 `Number(null)`은 `0`이므로 주의해야 합니다.
+
+```js
+get max() {
+  const n = parseFloat(this.getAttribute('max'))
+  return Number.isNaN(n) ? 100 : n
+}
+set max(v) { this.setAttribute('max', String(v)) }
+```
+
+열거형은 허용 값 목록을 두고, 목록에 없으면 기본값을 돌려줍니다.
+
+```js
+const SIZES = ['small', 'medium', 'large']
+get size() {
+  const v = this.getAttribute('size')
+  return SIZES.includes(v) ? v : 'medium'
+}
+set size(v) { this.setAttribute('size', v) }
+```
+
+객체와 배열은 프로퍼티만 제공하고 속성으로 반영하지 않습니다.
+
+```js
+get items() { return this.#items }
+set items(v) { this.#items = [...v]; this.#render() }
+```
+
+- 객체를 받으면 복사해서 저장하거나 변경하지 않는 값으로 다룹니다. 호출자가 원본 배열을 나중에 고쳐도 컴포넌트는 알 수 없습니다(자세히는 20편).
+- 객체 값을 JSON 문자열 속성으로 받는 방식은 직렬화·파싱 비용과 오류 처리를 떠안으므로 보조 입구로만 씁니다.
+
+## 내장 요소의 반영 규칙 사례
+
+HTML 표준은 내장 요소의 속성과 프로퍼티를 연결하는 규칙(reflect)을 타입별로 정해 두었습니다. 컴포넌트가 내장 요소처럼 동작하게 하려면 이 규칙을 본뜹니다.
+
+| 타입 | 규칙 | 예 |
+|------|------|----|
+| 문자열 | 없으면 빈 문자열 | `el.title` |
+| 불리언 | 존재 여부. 설정하면 빈 값 속성 추가·삭제 | `input.disabled = true` |
+| 열거형 | 알려진 값만 돌려주고 잘못되면 기본 상태의 키워드 | `input.type` |
+| 정수 | 파싱 실패나 범위 밖이면 기본값 | `input.size` |
+| 0 이상 정수 | 속성이 없으면 −1 | `input.maxLength` |
+| URL | 문서 기준의 절대 URL로 변환해서 돌려줌 | `a.href` |
+
+```js
+// <input type="bogus">
+input.type                    // 'text' (알려진 값만 돌려줌)
+input.getAttribute('type')    // 'bogus' (작성자가 쓴 값 그대로)
+input.size                    // 20 (속성이 없을 때의 기본값)
+input.maxLength               // -1 (속성이 없음)
+input.size = 0                // IndexSizeError (양수만 허용)
+```
+
+```js
+// 문서 주소가 https://example.com/x 일 때
+// <a href="/docs">
+a.href                        // 'https://example.com/docs'
+a.getAttribute('href')        // '/docs'
+```
+
+- 프로퍼티 getter는 정규화된 값을, `getAttribute`는 작성자가 쓴 원문을 돌려줍니다. 정규화는 읽을 때 하고 속성 값은 고치지 않습니다.
+- 마크업은 잘못된 값을 기본값으로 처리하지만, 프로퍼티 setter는 허용되지 않는 값(`size = 0`)에 예외를 던지는 경우가 있습니다.
+
+## Property → Attribute 반영
+
+프로퍼티를 설정할 때 같은 값을 속성에도 쓰는 것이 속성 반영(reflection)입니다.
+
+```js
+set disabled(v) {
+  this.toggleAttribute('disabled', Boolean(v))
+}
+```
+
+- 반영하면 속성 선택자 스타일링, 접근성 도구, 복제와 직렬화, 개발자 도구의 요소 검사에서 상태가 보입니다.
+- 반영된 속성도 `attributeChangedCallback`을 호출합니다. 렌더링을 이 콜백 한 곳에 두면 속성이 바뀌든 프로퍼티가 바뀌든 같은 경로를 탑니다.
+- 모든 프로퍼티를 반영할 필요는 없습니다. 객체와 배열은 반영하지 않고, 자주 바뀌는 값(스크롤 위치, 입력 중인 값)은 속성 갱신 비용 때문에 반영하지 않는 편이 낫습니다.
+
+## Attribute → Property 반영
+
+속성이 바뀔 때 프로퍼티가 같은 값을 돌려주게 하는 것이 반대 방향의 반영입니다. 가장 단순한 구현은 getter가 매번 속성을 읽는 것입니다. 앞의 `name`, `max`, `size` 예가 이 방식입니다.
+
+파싱 비용이 크거나 내부 필드에 저장해야 하면 `attributeChangedCallback`에서 갱신합니다.
+
+```js
+static observedAttributes = ['max']
+#max = 100
+attributeChangedCallback(name, oldV, newV) {
+  if (name === 'max') {
+    const n = parseFloat(newV)
+    this.#max = Number.isNaN(n) ? 100 : n
+    this.#render()
+  }
+}
+```
+
+- 업그레이드나 파서 생성 때 이미 있던 속성도 이 콜백으로 들어옵니다. 속성이 없을 때(제거되었을 때)의 기본값 처리를 반드시 넣습니다.
+- 콜백은 연결되기 전에 호출될 수 있으므로 렌더링 로직이 연결 여부와 무관하게 안전해야 합니다.
+
+## Reflection 패턴
+
+가장 안전한 기본 패턴은 속성을 단일 진실 공급원으로 두는 것입니다. setter는 속성만 바꾸고, 그 결과로 호출되는 `attributeChangedCallback`이 렌더링합니다.
+
+```js
+class UserCard extends HTMLElement {
+  static observedAttributes = ['name']
+  get name() { return this.getAttribute('name') ?? '' }
+  set name(v) { this.setAttribute('name', v) }
+  attributeChangedCallback() { this.#render() }
+}
+```
+
+- 프로퍼티와 속성이 따로 저장되지 않으므로 어긋날 수 없습니다.
+- 내부 필드에 따로 저장하는 방식에서는 두 방향의 갱신이 서로를 호출하는 무한 루프가 생길 수 있습니다. `attributeChangedCallback`은 같은 값이어도 호출되기 때문입니다. 그때는 setter에서 값이 다를 때만 속성을 씁니다.
+
+```js
+set max(v) {
+  const s = String(v)
+  if (this.getAttribute('max') !== s) {
+    this.setAttribute('max', s)
+  }
+  // 콜백이 #max를 갱신하므로 여기서 갱신하지 않음
+}
+```
+
+- 속성으로 표현할 수 없는 값(객체)은 내부 필드가 진실 공급원이고 속성은 없습니다.
+- 사용자 이벤트로 바뀐 상태(체크박스 클릭)는 컴포넌트가 직접 속성에 반영합니다. 이때 `change` 이벤트는 사용자 동작에서만 발생시키고 프로퍼티 설정에서는 발생시키지 않습니다(자세히는 25편).
+
+## 기본값과 유효성 검사
+
+기본값은 getter가 돌려줍니다. 속성을 추가하는 방식으로 기본값을 채우지 않습니다.
+
+- 생성자에서 속성을 추가하는 것은 금지입니다. `connectedCallback`에서 `role`이나 `tabindex` 같은 속성을 채울 때도 작성자가 이미 쓴 값은 덮어쓰지 않도록 `hasAttribute`로 확인합니다.
+- 속성이 없거나 잘못된 값이면 getter가 기본값을 돌려줍니다. 앞의 `max`, `size` 예가 그렇습니다.
+- 마크업 입구(`attributeChangedCallback`)는 예외를 던지지 않습니다. 잘못된 값은 기본값으로 처리하고, 필요하면 `console.warn`으로 알립니다. HTML은 잘못된 값을 오류로 만들지 않는 언어이기 때문입니다.
+- 프로퍼티 입구(setter)는 프로그래머의 실수가 분명한 값에 예외를 던질 수 있습니다. 내장 요소 `input.size = 0`이 `IndexSizeError`를 던지는 것이 그 예입니다. 예외를 던질지 기본값으로 조용히 바꿀지 한 컴포넌트 안에서 통일합니다.
+- 범위가 있는 값은 getter에서 범위 안으로 고정(clamp)합니다.
+
+```js
+get value() {
+  const n = parseFloat(this.getAttribute('value')) || 0
+  return Math.min(this.max, Math.max(0, n))
+}
+```
+
+## 업그레이드 전에 설정된 프로퍼티 보존
+
+정의가 로드되기 전에 설정한 프로퍼티는 요소 객체 자체의 데이터 프로퍼티로 남습니다. 업그레이드되어 클래스의 접근자가 생겨도 요소 자신의 프로퍼티가 프로토타입의 접근자보다 우선하므로 setter는 영원히 호출되지 않습니다.
+
+```js
+const el = document.querySelector('user-card') // 정의 전
+el.user = { name: 'Kim' }   // 요소 자신의 프로퍼티
+customElements.define('user-card', UserCard)
+el.user = { name: 'Lee' }   // setter가 아니라 덮어쓰기
+```
+
+프레임워크가 지연 로딩된 정의의 요소에 프로퍼티를 먼저 전달하는 경우에 생기는 문제입니다(자세히는 77편). 해결은 지연 프로퍼티 패턴으로, 업그레이드 시점에 요소 자신의 프로퍼티를 지우고 값을 다시 설정해 접근자를 거치게 합니다.
+
+```js
+#upgradeProperty(prop) {
+  if (Object.hasOwn(this, prop)) {
+    const value = this[prop]
+    delete this[prop]
+    this[prop] = value
+  }
+}
+connectedCallback() {
+  this.#upgradeProperty('user')
+  this.#upgradeProperty('max')
+}
+```
+
+- 요소 자신이 가진 프로퍼티일 때만 처리하고, 값을 읽어 둔 뒤 삭제하고 같은 이름으로 다시 대입합니다.
+- 공개 프로퍼티마다 한 번씩 호출합니다. 위 예처럼 `connectedCallback`에서 호출하므로, 연결되지 않은 채 업그레이드된 요소는 연결될 때 처리됩니다.
+- 속성은 이 문제가 없습니다. 속성은 업그레이드 때 `attributeChangedCallback`으로 전달됩니다.
+
+## 메서드를 통한 Imperative API
+
+메서드는 동작(action)을 명령하는 입구입니다. 상태를 나타내는 값은 프로퍼티로, 상태를 바꾸는 행위는 메서드로 나눕니다.
+
+```js
+open() { this.toggleAttribute('open', true) }
+close() { this.toggleAttribute('open', false) }
+toggle(force) { return this.toggleAttribute('open', force) }
+```
+
+- 이름은 동사로 짓습니다(`open`, `reset`, `focus`, `validate`). 내장 요소 이름과 같은 의미를 따릅니다.
+- 연결 여부와 무관하게 동작해야 합니다. 요소가 떼어져 있을 때 호출해도 예외 없이 상태만 바꾸고, 연결될 때 반영합니다.
+- 같은 호출을 반복해도 결과가 같게(멱등) 만듭니다. `open()`을 두 번 불러도 한 번 연 것과 같아야 합니다.
+- 애니메이션처럼 끝나는 시점이 있는 동작은 완료되면 이행되는 `Promise`를 돌려줍니다.
+- 정의되기 전에는 메서드가 존재하지 않아 호출하면 TypeError입니다. 호출하기 전에 `customElements.whenDefined`로 기다립니다(자세히는 17편).
+- 프로퍼티로 표현되는 상태와 같은 일을 하는 메서드를 중복해서 만들지 않습니다. `open` 프로퍼티가 있다면 `open()`은 편의 메서드로만 둡니다.
+
+## 읽기 전용 상태 노출
+
+외부에서 읽을 수만 있어야 하는 값은 getter만 정의합니다.
+
+```js
+class UserCard extends HTMLElement {
+  #loading = false
+  get loading() { return this.#loading }
+}
+card.loading = true // strict 모드 코드에서는 TypeError
+```
+
+- setter가 없는 접근자에 대입하면 대입을 실행하는 코드가 strict 모드일 때 TypeError, 아니면 조용히 무시됩니다. 모듈은 항상 strict 모드입니다.
+- 내부 객체를 그대로 돌려주면 외부가 고쳐 버릴 수 있습니다. 복사본이나 동결한 객체(`Object.freeze`)를 돌려주는 편이 안전합니다.
+- 속성으로 읽기 전용 상태를 노출하면(`loading` 속성) 외부가 속성을 바꿀 수 있어서 읽기 전용이 되지 않습니다. 외부에서 쓸 수 없는 상태는 `ElementInternals`의 사용자 정의 상태로 노출합니다(자세히는 20편).
+- 내장 요소의 `input.validity`, `form.elements`가 같은 형태의 읽기 전용 프로퍼티입니다.
+
+## 이벤트와 CSS 사용자 정의 속성도 public API
+
+속성·프로퍼티·메서드만 API가 아닙니다. 사용자가 의존할 수 있는 모든 것이 공개 API입니다.
+
+| 표면 | 예 | 자세히 |
+|------|----|--------|
+| 속성 | `size`, `disabled` | 이 편 |
+| 프로퍼티 | `value`, `items` | 이 편 |
+| 메서드 | `open()`, `reset()` | 이 편 |
+| 이벤트 | 이름, `detail` 형태, 버블링 여부 | 25편 |
+| slot | 이름과 기대하는 내용 | 22편 |
+| `part` | 외부에서 꾸밀 수 있는 부분 | 23편 |
+| CSS 사용자 정의 속성 | `--card-gap` | 24편 |
+| 사용자 정의 상태 | `:state(loading)` | 20편 |
+
+- 이벤트는 컴포넌트 내부 동작에 대한 응답으로만 발생시킵니다. 호스트가 프로퍼티를 설정했다는 이유로 이벤트를 발생시키면 설정하는 쪽의 리스너와 무한 루프가 생길 수 있습니다.
+- 위 표의 항목은 모두 이름, 값의 형태, 기본값을 문서화합니다. 문서에 없는 것은 바꿔도 되는 구현 세부사항이라고 명시합니다.
+
+## API 변경과 하위 호환성
+
+공개 API를 바꾸면 이를 쓰는 모든 페이지가 영향을 받습니다. 변경은 호환되는 것과 깨지는 것으로 나눕니다.
+
+| 변경 | 호환 여부 |
+|------|-----------|
+| 선택 속성·프로퍼티·메서드·이벤트 추가 | 호환 |
+| 열거형 값 추가 | 보통 호환(값을 빠짐없이 분기하는 쪽은 영향) |
+| 이름 변경이나 삭제 | 깨짐 |
+| 기본값 변경 | 깨짐 |
+| 타입이나 이벤트 `detail` 형태 변경 | 깨짐 |
+| 입력 검증을 강화해서 예전에 통과하던 값을 거부 | 깨짐 |
+| 이벤트 발생 시점이나 횟수 변경 | 깨짐 |
+
+이름을 바꿔야 한다면 옛 이름을 일정 기간 별칭으로 남깁니다.
+
+```js
+static observedAttributes = ['size', 'dimension']
+get size() {
+  return this.getAttribute('size')
+    ?? this.getAttribute('dimension') // 옛 이름
+    ?? 'medium'
+}
+```
+
+- 옛 이름을 쓰면 한 번만 `console.warn`으로 알리고, 다음 주 버전에서 제거합니다.
+- 새 이름과 옛 이름이 동시에 있으면 새 이름이 우선하도록 정합니다.
+- 변경 기록과 버전 정책은 73편, 패키지 진입점은 72편에서 다룹니다.
+
+## 타입 선언 개요
+
+TypeScript에서는 `HTMLElementTagNameMap`이 태그 이름과 요소 타입을 연결하는 전역 인터페이스입니다. `document.createElement`와 `querySelector`가 이 맵의 키로 반환 타입을 정합니다. `customElements.define`은 이 맵을 자동으로 갱신하지 않아서 직접 선언을 추가합니다.
+
+```ts
+declare global {
+  interface HTMLElementTagNameMap {
+    'user-card': UserCard
+  }
+}
+const el = document.querySelector('user-card')
+// UserCard | null
+```
+
+- 전역 증강(global augmentation)은 TypeScript의 선언 병합 기능입니다.
+- 속성은 문자열이라 선언 파일로 타입을 표현할 수 없고, 프로퍼티와 메서드의 타입이 공개 타입의 중심입니다.
+- 패키지로 배포할 때는 선언 파일(`.d.ts`)도 함께 제공합니다(자세히는 72편). JSX에서의 타입은 77편에서 다룹니다.
+
+## 핵심 정리
+
+- 속성은 문자열이고 마크업·CSS·복제에 보이는 선언형 입구이며, 프로퍼티는 모든 타입을 담는 명령형 입구입니다. 원시 값은 둘 다 제공하고 객체는 프로퍼티만 제공합니다.
+- 속성 이름은 소문자와 하이픈, 프로퍼티는 camelCase로 쓰고, 불리언 속성은 존재 여부로 판단하며 `disabled="false"`도 참입니다.
+- 반영은 속성을 단일 진실 공급원으로 두는 것이 가장 안전하며, `attributeChangedCallback`이 같은 값에도 호출되므로 양방향 갱신에는 값 비교로 루프를 막습니다.
+- 기본값과 검증은 getter에서 처리하고 속성 입구는 예외를 던지지 않으며, 정의 전에 설정된 프로퍼티는 지연 프로퍼티 패턴으로 접근자를 거치게 합니다.
+- 메서드는 동사로 짓고 멱등하게, 읽기 전용 상태는 getter만 두며, 이벤트·slot·part·CSS 변수도 공개 API로 문서화합니다.
+- 이름 변경·기본값 변경·검증 강화는 깨지는 변경이므로 별칭과 경고 기간을 거쳐 주 버전에서 제거합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="user-card 요소에 disabled=false 라고 쓴 마크업이 있다. disabled 불리언 프로퍼티(hasAttribute로 구현)의 값은?"
+  options={['false', 'true', 'null', 'undefined']}
+  correctAnswer={2}
+  explanation="불리언 속성은 값이 아니라 존재 여부로 판단하므로 disabled=false도 속성이 있어서 hasAttribute가 true를 돌려줍니다. 거짓으로 만들려면 속성을 제거해야 합니다."
+  optionExplanations={['값 문자열은 의미가 없고 존재 여부만 보므로 거짓이 아닙니다.', '속성이 존재하므로 참입니다.', 'hasAttribute는 항상 불리언을 돌려줍니다.', 'hasAttribute는 항상 불리언을 돌려줍니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="프레임워크가 정의가 로드되기 전의 user-card 요소에 el.user = obj 를 설정했다. 이후 define이 실행되어 업그레이드되었는데 user의 setter가 호출되지 않는다. 원인과 해결로 옳은 것은?"
+  options={['setter는 업그레이드 시 자동으로 호출되므로 원인은 프레임워크 버그다', '요소 자신의 데이터 프로퍼티가 프로토타입의 접근자를 가리므로, 값을 읽어 삭제한 뒤 다시 대입하는 지연 프로퍼티 패턴을 쓴다', 'user를 속성으로만 제공하면 항상 해결된다', 'constructor에서 this.user를 읽으면 setter가 호출된다']}
+  correctAnswer={2}
+  explanation="정의 전에 대입한 값은 요소 객체 자신의 데이터 프로퍼티로 남고, 이것이 클래스의 접근자보다 우선합니다. 업그레이드 후 own 프로퍼티를 읽어 두고 delete한 다음 다시 대입하면 접근자를 거치게 됩니다. 객체는 속성으로 담을 수 없고, 단순히 읽는 것만으로는 setter가 호출되지 않습니다."
+  optionExplanations={['업그레이드가 기존 프로퍼티에 대해 setter를 호출하지는 않습니다.', '자신의 프로퍼티를 삭제하고 다시 설정해야 접근자가 동작합니다.', '객체는 문자열 속성으로 전달할 수 없습니다.', '읽기만으로는 setter가 호출되지 않고 데이터 프로퍼티는 그대로 남습니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="다음 중 컴포넌트 공개 API에서 하위 호환성을 깨는 변경은?"
+  options={['선택 속성 하나를 새로 추가한다', '새 메서드를 추가한다', '속성의 기본값을 medium에서 large로 바꾼다', '새 이벤트를 추가한다']}
+  correctAnswer={3}
+  explanation="기본값 변경은 기존 사용자가 속성을 쓰지 않았을 때의 결과를 바꾸므로 호환성을 깨는 변경입니다. 선택 속성, 메서드, 이벤트의 추가는 기존 사용 방식에 영향이 없는 호환 변경입니다."
+  optionExplanations={['선택 속성의 추가는 기존 사용에 영향이 없습니다.', '메서드 추가는 기존 호출에 영향이 없습니다.', '기본값이 바뀌면 속성을 생략한 기존 사용처의 동작이 바뀝니다.', '이벤트 추가는 기존 사용에 영향이 없습니다.']}
+/>
+
+## 참고 자료
+
+- [HTML Standard — Reflecting content attributes in IDL attributes](https://html.spec.whatwg.org/multipage/common-dom-interfaces.html#reflecting-content-attributes-in-idl-attributes)
+- [HTML Standard — The input element (size, maxLength, type)](https://html.spec.whatwg.org/multipage/input.html)
+- [HTML Standard — Custom elements](https://html.spec.whatwg.org/multipage/custom-elements.html)
+- [DOM Standard — setAttribute](https://dom.spec.whatwg.org/#dom-element-setattribute)
+- [web.dev — Custom element best practices](https://web.dev/articles/custom-elements-best-practices)
+- [MDN — Using custom elements](https://developer.mozilla.org/en-US/docs/Web/API/Web_components/Using_custom_elements)
+- [TypeScript Handbook — Declaration Merging (global augmentation)](https://www.typescriptlang.org/docs/handbook/declaration-merging.html#global-augmentation)
+- [TypeScript lib.dom.d.ts](https://unpkg.com/typescript@5/lib/lib.dom.d.ts)

@@ -1,0 +1,395 @@
+---
+title: '14. NestJS 기초'
+description: 'NestJS의 모듈·컨트롤러·프로바이더, 의존성 주입, 데코레이터, DTO 검증, 요청 생명주기, ConfigModule, 예외 필터, CLI와 폴더 구조를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** NestJS 애플리케이션의 구성 요소와 요청이 거치는 단계를 설명하고, 모듈 하나를 컨트롤러·서비스·DTO·설정·예외 처리까지 갖춰 읽고 쓸 수 있습니다.
+</Callout>
+
+## 모듈·컨트롤러·프로바이더
+
+NestJS는 TypeScript로 서버 애플리케이션의 구조를 강제하는 프레임워크입니다. 기본 HTTP 플랫폼은 Express(`@nestjs/platform-express`)이고 Fastify도 쓸 수 있습니다(15편). 이 문서는 npm의 현재 버전인 12.x를 기준으로 하며, 실행하려면 Node.js 20.19 이상, 22.12 이상 또는 24 이상이 필요합니다. 12부터 코어 패키지는 ESM으로 배포됩니다. 구성 요소는 세 가지입니다.
+
+| 요소 | 선언 | 역할 |
+|------|------|------|
+| 모듈 | `@Module()` | 관련 컨트롤러와 프로바이더를 묶는 단위 |
+| 컨트롤러 | `@Controller()` | 요청을 받아 응답을 돌려줌(라우팅) |
+| 프로바이더 | `@Injectable()` | 업무 규칙 등 주입해서 쓰는 객체(서비스·저장소·헬퍼) |
+
+13편의 router·controller·service 구분이 그대로 대응합니다. 컨트롤러가 router와 controller를, 프로바이더가 service를 맡습니다.
+
+```ts
+@Injectable()
+export class CatsService {
+  private readonly cats: string[] = []
+  create(name: string) {
+    this.cats.push(name)
+    return { name }
+  }
+  findAll() { return this.cats }
+}
+
+@Controller('cats') // 경로 접두사 /cats
+export class CatsController {
+  constructor(private readonly catsService: CatsService) {}
+  @Get() findAll() { return this.catsService.findAll() }
+}
+```
+
+모듈은 네 가지 속성으로 구성을 선언합니다.
+
+```ts
+@Module({
+  imports: [],                     // 필요한 다른 모듈
+  controllers: [CatsController],   // 이 모듈의 컨트롤러
+  providers: [CatsService],        // 이 모듈이 만드는 프로바이더
+  exports: [CatsService],          // 다른 모듈에 공개할 프로바이더
+})
+export class CatsModule {}
+```
+
+- 모든 애플리케이션에는 루트 모듈이 있고, 기능 모듈을 `imports`에 올려 트리를 만듭니다.
+- 프로바이더는 모듈 안에서만 보입니다. 다른 모듈이 쓰게 하려면 `exports`에 넣고, 쓰는 쪽 모듈이 그 모듈을 `imports`합니다.
+- 모듈은 기본적으로 싱글턴입니다. 한 번 만들어진 모듈 인스턴스를 여러 모듈이 공유합니다.
+- `@Global()`을 붙이면 `imports` 없이 어디서나 쓸 수 있지만, 의존 관계가 숨으므로 공통 설정 같은 소수에만 씁니다.
+- 컨트롤러와 프로바이더를 모듈에 등록하지 않으면 라우트가 만들어지지 않고 주입도 안 됩니다.
+
+컨트롤러의 핵심 데코레이터입니다.
+
+| 데코레이터 | 용도 |
+|------------|------|
+| `@Get()`, `@Post()`, `@Put()`, `@Patch()`, `@Delete()`, `@All()` | HTTP 메서드와 경로 |
+| `@Param('id')`, `@Query('q')`, `@Body()`, `@Headers()` | 요청에서 값 추출 |
+| `@HttpCode(204)`, `@Header(name, value)`, `@Redirect()` | 응답 설정 |
+| `@Req()`, `@Res()` | 플랫폼의 `req`, `res` 직접 접근 |
+
+- 핸들러가 반환한 값을 Nest가 직렬화해 응답합니다(객체는 JSON). 기본 상태 코드는 200이고 `@Post()`만 201입니다. async 함수와 Promise 반환도 그대로 지원합니다.
+- `@Res()`를 주입하면 Express 방식으로 직접 응답해야 하고 인터셉터 등 Nest의 응답 처리 기능이 꺼집니다. 응답 헤더만 만지려면 `@Res({ passthrough: true })`를 쓰고 반환값 방식은 유지합니다.
+
+**흔한 실수:** 서비스를 `providers`에 등록하지 않고 주입하는 것, 다른 모듈의 서비스를 쓰면서 그 모듈이 `exports`하지 않은 것입니다. 시작할 때 `Nest can't resolve dependencies of the ...` 에러가 나고 어느 모듈에서 무엇이 빠졌는지 알려 줍니다.
+
+## 의존성 주입과 IoC
+
+제어의 역전(IoC, Inversion of Control)은 객체를 직접 `new`로 만들지 않고 컨테이너에 맡기는 방식입니다. 의존성 주입(DI, Dependency Injection)은 그 컨테이너가 필요한 객체를 생성자 인자로 넣어 주는 기법입니다. Nest 런타임이 IoC 컨테이너입니다.
+
+```ts
+@Controller('cats')
+export class CatsController {
+  constructor(private readonly catsService: CatsService) {}
+  // Nest가 CatsService 인스턴스를 만들어 넣어 준다
+}
+```
+
+- 생성자 매개변수의 타입이 곧 주입할 프로바이더를 가리킵니다. `private readonly`는 매개변수 선언과 필드 대입을 동시에 합니다.
+- 프로바이더는 기본적으로 싱글턴입니다. 애플리케이션 수명 동안 인스턴스가 하나이고 이를 쓰는 모든 클래스가 공유합니다. 스코프를 바꾸는 방법은 15편입니다.
+- 클래스가 아닌 값(설정 객체, 외부 라이브러리 인스턴스)은 문자열이나 심볼 토큰으로 등록하고 `@Inject(토큰)`으로 받습니다.
+- 속성에 `@Inject()`를 붙이는 속성 주입도 가능하지만 생성자 주입을 권장합니다.
+- `@Optional()`을 붙이면 등록되지 않은 의존성에 `undefined`가 들어가고 시작이 실패하지 않습니다. 12부터는 하위 클래스가 `@Optional()`을 상속하지 않으므로 다시 선언해야 합니다.
+
+커스텀 프로바이더는 `provide`(토큰)와 만드는 방식으로 등록합니다.
+
+| 방식 | 의미 | 용도 |
+|------|------|------|
+| `useClass` | 지정한 클래스로 인스턴스 생성 | 환경별 구현 교체 |
+| `useValue` | 이미 있는 값을 그대로 사용 | 상수, 테스트용 mock |
+| `useFactory` | 함수가 반환한 값을 사용, `inject` 배열로 의존성 주입 | 비동기·설정 기반 생성 |
+| `useExisting` | 이미 등록된 프로바이더의 별칭 | 같은 인스턴스를 다른 토큰으로 노출 |
+
+```ts
+providers: [
+  CatsService, // useClass 형태의 축약
+  { provide: 'API_URL', useValue: 'https://api.test' },
+  {
+    provide: 'CONNECTION',
+    useFactory: (o: OptionsService) => connect(o.get()),
+    inject: [OptionsService],
+  },
+]
+// 사용: constructor(@Inject('API_URL') url: string) {}
+```
+
+**흔한 실수:** 데코레이터 메타데이터 설정이 빠진 것입니다. 타입 기반 주입은 `tsconfig.json`의 `emitDecoratorMetadata`에 의존합니다. 이 옵션이 꺼져 있으면 컴파일러가 생성자 타입 정보를 내보내지 않아 주입이 비어 `undefined`가 되고, 시작은 되지만 메서드를 부르는 요청에서 500이 납니다. `@Inject(CatsService)`로 명시하면 옵션 없이도 동작합니다. Nest가 만드는 프로젝트는 이 옵션이 이미 켜져 있습니다.
+
+## 데코레이터
+
+데코레이터는 `@이름`으로 클래스, 메서드, 속성, 매개변수에 붙여 메타데이터를 달거나 동작을 덧붙이는 함수입니다. Nest는 데코레이터로 라우트, 주입, 검증 규칙을 선언합니다.
+
+| 위치 | 예 | 선언하는 것 |
+|------|----|-------------|
+| 클래스 | `@Controller('cats')`, `@Injectable()`, `@Module({})` | 클래스의 역할 |
+| 메서드 | `@Get()`, `@HttpCode(204)`, `@UseGuards(G)` | 라우트와 부가 동작 |
+| 매개변수 | `@Body()`, `@Param('id')`, `@Inject(TOKEN)` | 값의 출처 |
+| 속성 | `@IsEmail()`(class-validator) | 필드별 규칙 |
+
+- Nest는 TypeScript의 실험적 데코레이터(`experimentalDecorators`)와 `reflect-metadata`를 씁니다. 데코레이터가 클래스에 메타데이터를 저장하고, Nest가 시작할 때 그 메타데이터를 읽어 라우트 테이블과 주입 그래프를 만듭니다.
+- 한 대상에 여러 개를 쓰면 아래에서 위로 적용됩니다. `@A() @B() method()`이면 B가 먼저 적용되고 A가 그다음입니다.
+- 직접 만드는 매개변수 데코레이터와 조합은 15편에서 다룹니다.
+- 데코레이터 문법은 TypeScript 컴파일 단계를 거쳐야 합니다. Node의 타입 제거 실행(`node file.ts`)은 `@` 문법을 해석하지 못하므로 `tsc`나 SWC 같은 빌더로 변환해 실행합니다(Nest CLI가 이 빌드를 맡습니다).
+- ESM에서는 상대 경로 import에 확장자를 `.js`로 적어야 합니다(`import { CatsService } from './cats.service.js'`).
+
+## DTO와 ValidationPipe
+
+DTO(Data Transfer Object)는 요청 본문의 형태를 정의한 클래스입니다. 인터페이스는 컴파일 후 사라지지만 클래스는 런타임에 남으므로, 파이프가 클래스에 붙은 규칙을 읽어 검증할 수 있습니다.
+
+```ts
+import {
+  IsEmail, IsInt, Min, MinLength,
+} from 'class-validator'
+
+export class CreateUserDto {
+  @IsEmail() email: string
+  @MinLength(8) password: string
+  @IsInt() @Min(0) age: number
+}
+```
+
+`class-validator`와 `class-transformer`를 설치하고, `ValidationPipe`를 전역으로 등록합니다.
+
+```ts
+// main.ts
+const app = await NestFactory.create(AppModule)
+app.useGlobalPipes(new ValidationPipe({ whitelist: true }))
+await app.listen(process.env.PORT ?? 3000)
+```
+
+```ts
+@Post() // 컨트롤러: 검증을 통과한 dto만 도착
+create(@Body() dto: CreateUserDto) {}
+```
+
+| `ValidationPipe` 옵션 | 효과 |
+|-----------------------|------|
+| `whitelist` | 검증 데코레이터가 없는 속성을 제거 |
+| `forbidNonWhitelisted` | 그런 속성이 있으면 거부(400) |
+| `transform` | 평문 객체를 DTO 클래스 인스턴스로 변환 |
+| `stopAtFirstError` | 속성마다 첫 위반만 보고 |
+| `disableErrorMessages` | 상세 메시지를 숨김 |
+| `errorHttpStatusCode` | 실패 상태 코드 변경(기본 400) |
+
+- 검증 실패는 `400 Bad Request`이고 본문은 `{ statusCode, error, message: [...] }`입니다. `message`는 위반마다 한 줄인 배열입니다(예: `email must be an email`).
+- `whitelist`가 없으면 DTO에 없는 필드도 그대로 핸들러에 도달합니다. 사용자가 `isAdmin: true` 같은 필드를 끼워 보내는 대량 할당(mass assignment)을 막으려면 켭니다.
+- 경로 매개변수 변환·검증은 파이프를 매개변수에 붙입니다. `@Param('id', ParseIntPipe) id: number`는 정수가 아니면 400으로 응답합니다. 내장 파이프에는 `ParseFloatPipe`, `ParseBoolPipe`, `ParseUUIDPipe`, `ParseEnumPipe`, `ParseArrayPipe`, `ParseDatePipe`, `DefaultValuePipe`가 있습니다.
+- 수정용 DTO는 `@nestjs/mapped-types`의 `PartialType(CreateUserDto)`로 모든 속성을 선택으로 바꿔 만듭니다.
+- 파이프가 던진 예외는 핸들러 실행 전에 예외 필터가 처리합니다. 핸들러는 호출되지 않습니다.
+
+12는 클래스 기반 대신 스키마 기반 검증도 내장합니다. `StandardSchemaValidationPipe`는 Standard Schema를 구현한 Zod, Valibot, ArkType 스키마를 받고, 스키마에서 타입을 추론합니다(8편의 Zod 검증과 같은 방식).
+
+```ts
+const schema = z.object({
+  email: z.email(),
+  password: z.string().min(8),
+})
+type CreateUserDto = z.infer<typeof schema>
+
+app.useGlobalPipes(new StandardSchemaValidationPipe())
+// @Post() create(@Body({ schema }) dto: CreateUserDto) {}
+```
+
+**흔한 실수:** DTO를 `interface`나 `type`으로 선언하는 것입니다. 런타임에 형태 정보가 없어 `ValidationPipe`가 검증할 수 없고 요청이 그대로 통과합니다. class-validator 방식에서는 클래스로 선언합니다.
+
+## 요청 생명주기
+
+요청은 정해진 순서로 구성 요소를 지나갑니다.
+
+| 순서 | 단계 | 주 용도 |
+|------|------|---------|
+| 1 | Middleware | 로깅, 헤더 처리 등 Express식 처리 |
+| 2 | Guard | 접근 허용 여부 결정(인증·인가) |
+| 3 | Interceptor(진입) | 핸들러 전후 처리, 응답 변환 |
+| 4 | Pipe | 매개변수 변환·검증 |
+| 5 | Handler | 컨트롤러 메서드, 서비스 호출 |
+| 6 | Interceptor(복귀) | 응답을 가공(진입의 역순) |
+| 7 | Exception Filter | 던져진 예외를 응답으로 변환 |
+
+예외가 어느 단계에서 나든 흐름은 예외 필터로 건너뜁니다. 예를 들어 Guard가 거부하면 Interceptor와 Pipe는 실행되지 않습니다.
+
+- Guard, Interceptor, Pipe는 전역 → 컨트롤러 → 라우트 순으로 실행됩니다. 인터셉터의 복귀 단계는 반대로 라우트 → 컨트롤러 → 전역입니다.
+- Pipe는 여러 매개변수를 마지막 것부터 처리합니다.
+- 예외 필터는 가장 가까운 곳부터입니다. 라우트 → 컨트롤러 → 전역 순으로 맞는 필터를 찾습니다.
+- Middleware에서 난 예외는 라우트 핸들러가 정해지기 전이라 전역 필터만 처리합니다.
+- 필터는 잡히지 않은 예외에만 반응합니다. 핸들러 안에서 `try/catch`로 삼키면 필터에 닿지 않습니다.
+- Middleware는 Express의 `(req, res, next)` 미들웨어와 같습니다(13편). Guard, Interceptor는 15편에서 다룹니다.
+
+Nest의 미들웨어는 모듈의 `configure()`에서 경로를 지정해 등록합니다.
+
+```ts
+@Module({ controllers: [CatsController] })
+export class CatsModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer
+      .apply(LoggerMiddleware)
+      .forRoutes('cats') // 또는 컨트롤러 클래스, 메서드 지정
+  }
+}
+```
+
+- 클래스 미들웨어(`NestMiddleware`)는 `@Injectable()`로 DI를 받을 수 있고, DI가 필요 없으면 함수 미들웨어가 간단합니다.
+- 전역 미들웨어는 `app.use(fn)`으로 붙입니다. 이 경우 DI 컨테이너에 접근할 수 없습니다.
+- `exclude()`로 일부 경로를 제외하고, 와일드카드는 Express 5 문법(`'abcd/*splat'`)을 씁니다.
+
+## ConfigModule
+
+`@nestjs/config`의 `ConfigModule`은 `.env` 파일과 환경 변수를 읽어 `ConfigService`로 제공합니다. 설정을 코드와 분리하는 원리는 25편입니다.
+
+```ts
+@Module({
+  imports: [ConfigModule.forRoot({ isGlobal: true })],
+})
+export class AppModule {}
+
+// 사용
+constructor(private readonly config: ConfigService) {}
+const port = this.config.get<number>('PORT', 3000)
+const secret = this.config.getOrThrow<string>('JWT_SECRET')
+```
+
+| `forRoot()` 옵션 | 의미 |
+|------------------|------|
+| `isGlobal` | 모든 모듈에서 `imports` 없이 사용 |
+| `envFilePath` | `.env` 파일 경로(문자열 또는 배열), 기본은 프로젝트 루트의 `.env` |
+| `ignoreEnvFile` | 파일을 읽지 않고 프로세스 환경 변수만 사용 |
+| `load` | 설정 팩토리 배열(`registerAs`로 네임스페이스화) |
+| `validationSchema` | 시작 시 환경 변수를 스키마로 검증(Zod, Valibot, ArkType) |
+| `validate` | 직접 만든 동기 검증 함수 |
+| `cache`, `expandVariables` | 접근 캐시, `${VAR}` 확장 |
+
+- 값은 프로세스 환경 변수가 `.env` 파일보다 우선합니다. `.env` 파일을 커밋하지 않는 것은 25편의 시크릿 원칙과 같습니다.
+- `get(key, default)`는 없으면 기본값을 돌려주고, `getOrThrow(key)`는 없으면 예외를 던집니다. 필수 설정은 `getOrThrow`로 시작할 때 드러내는 편이 낫습니다.
+- `registerAs('database', () => ({ host: ... }))`로 묶고 `load`에 넘기면 `config.get('database.host')`처럼 점 표기로 읽습니다.
+- `validationSchema`에 Zod 스키마를 주면 `z.coerce.number().default(3000)`처럼 문자열인 환경 변수를 숫자로 변환하고 기본값을 채웁니다. 12는 Standard Schema 방식을 쓰고, 이전의 Joi는 v18 이상에서 계속 지원됩니다.
+- 환경 변수는 모두 문자열입니다. 변환 없이 `get('PORT')`를 숫자로 가정하면 안 됩니다.
+
+## 예외 필터
+
+예외 필터는 던져진 예외를 HTTP 응답으로 바꾸는 계층입니다. Nest에는 기본 필터가 있어서 평소에는 `HttpException`을 던지기만 하면 됩니다.
+
+```ts
+throw new HttpException('Forbidden', HttpStatus.FORBIDDEN)
+// 403 {"statusCode":403,"message":"Forbidden"}
+throw new NotFoundException('user not found')
+// 404 {"message":"user not found","error":"Not Found",...}
+throw new Error('x')
+// 500 {"statusCode":500,"message":"Internal server error"}
+```
+
+- 내장 예외는 `BadRequestException`, `UnauthorizedException`, `ForbiddenException`, `NotFoundException`, `ConflictException`, `PayloadTooLargeException`, `InternalServerErrorException` 등이며 모두 `HttpException`을 상속합니다.
+- `HttpException`이 아닌 예외(일반 `Error`)는 상세를 숨기고 500 `Internal server error`로 응답합니다.
+- 서비스가 `NotFoundException` 같은 내장 예외를 직접 던져도 되고, 서비스가 HTTP를 모르게 하려면 도메인 에러를 던지고 필터에서 변환합니다.
+
+커스텀 필터는 `@Catch()`로 대상 예외를 지정하고 `ExceptionFilter`를 구현합니다.
+
+```ts
+@Catch(HttpException)
+export class HttpFilter implements ExceptionFilter {
+  catch(exception: HttpException, host: ArgumentsHost) {
+    const ctx = host.switchToHttp()
+    const status = exception.getStatus()
+    ctx.getResponse().status(status).json({
+      statusCode: status,
+      path: ctx.getRequest().url,
+    })
+  }
+}
+```
+
+- `ArgumentsHost`는 HTTP, WebSocket, 마이크로서비스 문맥의 인자를 꺼내는 도구이고 HTTP는 `switchToHttp()`로 접근합니다.
+- `@Catch()`에 인자가 없으면 모든 예외를 잡습니다. 인자로 지정한 클래스의 예외만 잡는 필터는 그 밖의 예외(일반 `Error`)를 기본 처리에 맡깁니다.
+- 기본 동작을 유지하면서 일부만 바꾸려면 `BaseExceptionFilter`를 상속합니다.
+
+적용 범위는 세 가지입니다.
+
+| 범위 | 방법 |
+|------|------|
+| 메서드, 컨트롤러 | `@UseFilters(HttpFilter)` |
+| 전역(DI 없음) | `app.useGlobalFilters(new HttpFilter())` |
+| 전역(DI 사용) | 모듈 `providers`에 `{ provide: APP_FILTER, useClass: HttpFilter }` |
+
+**흔한 실수:** 필터 안에서 `res.json()`을 부르지 않고 로그만 남기는 것입니다. 필터가 응답을 보내지 않으면 요청이 끝나지 않습니다. 에러 응답 형식을 통일하려면 전역 필터 한 곳에서 응답을 만듭니다(8편의 에러 응답 형식).
+
+## CLI와 폴더 구조
+
+Nest CLI(`@nestjs/cli`)는 프로젝트 생성, 코드 생성, 빌드, 실행을 맡습니다. CLI 자체는 Node.js 20.11 이상이 필요하고 코드 생성기(schematics)는 22.22.3 이상, 24.15 이상 또는 26 이상이 필요합니다.
+
+| 명령 | 동작 |
+|------|------|
+| `nest new 이름` | 새 프로젝트 생성(ESM과 Vitest 또는 CommonJS와 Jest를 선택) |
+| `nest generate`(별칭 `g`) | schematic으로 코드 생성 |
+| `nest build` | 출력 폴더로 컴파일 |
+| `nest start --watch` | 실행, 변경 시 재시작 |
+| `nest info` | 설치된 패키지와 시스템 정보 |
+
+- 자주 쓰는 schematic은 `module`, `controller`, `service`, `resource`, `guard`, `pipe`, `interceptor`, `filter`, `middleware`, `decorator`입니다. 예: `nest g module cats`.
+- `nest g resource cats`는 CRUD 한 벌을 만듭니다. 모듈, 컨트롤러, 서비스, `dto/create-cat.dto.ts`, `dto/update-cat.dto.ts`, `entities/cat.entity.ts`와 spec 파일이 생깁니다.
+- 빌더는 `tsc`(기본), `swc`, `rspack`, `webpack`이며 `nest-cli.json`에서 설정합니다. 12에서 Webpack은 deprecated이고 모노레포의 기본이 Rspack입니다.
+- 12의 ESM 프로젝트 기본 테스트 도구는 Vitest입니다(24편).
+
+`nest new`가 만드는 `src/` 파일입니다.
+
+| 파일 | 역할 |
+|------|------|
+| `main.ts` | 진입점. `NestFactory.create(AppModule)`로 앱을 만들고 `listen` |
+| `app.module.ts` | 루트 모듈 |
+| `app.controller.ts` | 라우트 하나가 있는 예제 컨트롤러 |
+| `app.service.ts` | 예제 서비스 |
+| `app.controller.spec.ts` | 컨트롤러 단위 테스트 |
+
+- 신규 프로젝트는 TypeScript `strict` 모드가 켜져 있습니다. 끄려면 `tsconfig.json`에서 `"strict": false`로 바꿉니다.
+- 기능마다 폴더를 두는 구성이 관례입니다. `src/cats/` 아래에 `cats.module.ts`, `cats.controller.ts`, `cats.service.ts`, `dto/`, `entities/`를 둡니다. 파일 이름에 역할(`.controller`, `.service`, `.module`)을 붙여 찾기 쉽게 합니다.
+- 기능 폴더 구성은 13편의 계층 분리를 모듈 단위로 올린 모양입니다. 의존은 `imports`/`exports`로만 맺습니다.
+
+## 핵심 정리
+
+- Nest는 모듈(묶음), 컨트롤러(라우팅), 프로바이더(업무 로직)로 앱을 구성하고, 프로바이더는 `providers`에 등록하고 다른 모듈에 쓰려면 `exports`합니다.
+- IoC 컨테이너가 생성자 매개변수 타입을 보고 싱글턴 인스턴스를 주입합니다. 타입 기반 주입에는 `emitDecoratorMetadata`가 필요합니다.
+- DTO는 클래스로 선언하고 `ValidationPipe`(`whitelist` 권장)로 검증하며, 실패는 400으로 응답합니다.
+- 요청 순서는 Middleware, Guard, Interceptor, Pipe, Handler, Interceptor(복귀)이고 예외는 Exception Filter가 처리합니다.
+- `ConfigModule.forRoot()`와 `ConfigService`로 환경 설정을 읽고 `validationSchema`로 시작 시 검증합니다.
+- `nest g resource`와 기능별 폴더 구성으로 모듈 단위 구조를 만듭니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="모듈 A의 서비스를 모듈 B의 컨트롤러에서 주입받으려면 필요한 것은?"
+  options={['A가 서비스를 exports에 넣고 B가 A를 imports에 넣는다', 'B의 providers에 A의 컨트롤러를 넣는다', 'A의 서비스를 @Optional()로 선언한다', '두 모듈을 같은 파일에 선언한다']}
+  correctAnswer={1}
+  explanation="프로바이더는 선언한 모듈 안에서만 보입니다. 다른 모듈이 쓰려면 선언한 모듈이 exports로 공개하고, 쓰는 모듈이 그 모듈을 imports에 넣어야 합니다. 둘 중 하나가 빠지면 시작할 때 의존성을 해결하지 못했다는 에러가 납니다."
+  optionExplanations={['exports와 imports가 짝으로 필요합니다.', '컨트롤러를 providers에 넣어도 서비스가 공개되지는 않습니다.', 'Optional은 의존성이 없어도 시작을 허용할 뿐 공개 범위와 무관합니다.', '파일 위치는 모듈 경계와 무관합니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="DTO를 interface로 선언하고 ValidationPipe를 전역 등록했을 때 결과로 옳은 것은?"
+  options={['컴파일이 실패한다', '인터페이스의 타입을 보고 정상적으로 검증한다', '런타임에 형태 정보가 없어 검증이 일어나지 않고 요청이 통과한다', '모든 요청이 400으로 거부된다']}
+  correctAnswer={3}
+  explanation="인터페이스는 컴파일 후 사라지고 class-validator 데코레이터도 붙일 수 없어, ValidationPipe가 읽을 규칙이 없습니다. 그래서 검증 없이 통과합니다. class-validator 방식에서는 DTO를 클래스로 선언합니다."
+  optionExplanations={['컴파일은 정상적으로 됩니다.', '타입 정보는 런타임에 남지 않습니다.', '클래스가 아니면 파이프가 읽을 메타데이터가 없습니다.', '규칙이 없으면 거부할 근거도 없습니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="Nest의 요청 처리 순서로 옳은 것은?"
+  options={['Pipe, Guard, Middleware, Interceptor, Handler', 'Middleware, Guard, Interceptor, Pipe, Handler', 'Guard, Middleware, Pipe, Interceptor, Handler', 'Middleware, Interceptor, Guard, Pipe, Handler']}
+  correctAnswer={2}
+  explanation="순서는 Middleware, Guard, Interceptor(진입), Pipe, Handler이고, 이후 Interceptor(복귀)를 거칩니다. 예외가 나면 Exception Filter가 처리합니다. Guard가 Interceptor보다 먼저라 접근이 거부된 요청은 인터셉터와 파이프에 도달하지 않습니다."
+  optionExplanations={['Pipe가 가장 먼저 오지 않습니다.', '올바른 순서입니다.', 'Middleware가 Guard보다 먼저입니다.', 'Guard가 Interceptor보다 먼저입니다.']}
+/>
+
+## 참고 자료
+
+- [NestJS — First steps](https://docs.nestjs.com/first-steps)
+- [NestJS — Modules](https://docs.nestjs.com/modules)
+- [NestJS — Controllers](https://docs.nestjs.com/controllers)
+- [NestJS — Providers](https://docs.nestjs.com/providers)
+- [NestJS — Custom providers](https://docs.nestjs.com/fundamentals/custom-providers)
+- [NestJS — Custom decorators](https://docs.nestjs.com/custom-decorators)
+- [NestJS — Pipes](https://docs.nestjs.com/pipes)
+- [NestJS — Validation](https://docs.nestjs.com/techniques/validation)
+- [NestJS — Middleware](https://docs.nestjs.com/middleware)
+- [NestJS — Exception filters](https://docs.nestjs.com/exception-filters)
+- [NestJS — Request lifecycle](https://docs.nestjs.com/faq/request-lifecycle)
+- [NestJS — Configuration](https://docs.nestjs.com/techniques/configuration)
+- [NestJS — CLI overview](https://docs.nestjs.com/cli/overview)
+- [NestJS — CRUD generator](https://docs.nestjs.com/recipes/crud-generator)
+- [NestJS — Migration guide (v12)](https://docs.nestjs.com/migration-guide)

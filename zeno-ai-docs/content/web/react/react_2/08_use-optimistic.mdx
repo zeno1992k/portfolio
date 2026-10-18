@@ -1,0 +1,350 @@
+---
+title: '08. useOptimistic'
+description: 'useOptimistic으로 서버 응답 전에 화면을 먼저 갱신하는 구조, 낙관적 state의 수명과 자동 복구, reducer와 updater, 좋아요·댓글·리스트 예제, Action 조합과 TanStack Query 비교를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** `useOptimistic`의 낙관적 state가 Action이 진행되는 동안만 유지되고 끝나면 실제 값으로 수렴한다는 규칙을 이해하고, 좋아요·댓글·리스트 추가를 Action 안에서 구현하며 TanStack Query 방식과 구분합니다.
+</Callout>
+
+## Optimistic UI
+
+Optimistic UI는 서버 응답을 기다리지 않고 요청이 성공했다고 가정해 화면을 먼저 바꾸는 기법입니다. 사용자는 클릭 즉시 결과를 보고, 요청이 실패하면 화면을 원래대로 되돌립니다.
+
+| 항목 | 낙관적 갱신 없음 | 낙관적 갱신 있음 |
+|------|------------------|------------------|
+| 클릭 직후 | 로딩 표시나 변화 없음 | 결과가 바로 보임 |
+| 성공 | 응답 도착 후 화면 변경 | 이미 보이던 결과가 확정 |
+| 실패 | 에러 표시 | 먼저 보인 결과를 되돌리고 에러 표시 |
+
+- 어울리는 곳은 성공할 가능성이 높고 결과를 클라이언트가 예측할 수 있는 동작입니다. 좋아요, 댓글 추가, 항목 삭제, 이름 변경이 해당합니다.
+- 서버만 알 수 있는 결과(결제 승인, 서버가 계산하는 값)나 실패했을 때 되돌리기 곤란한 동작에는 맞지 않습니다.
+- 구현하려면 "임시 값을 보여 주는 규칙"과 "실패 시 되돌리는 규칙"이 필요합니다. React 19는 이 둘을 `useOptimistic`과 Action으로 제공합니다.
+
+## useOptimistic
+
+`useOptimistic`은 Action이 진행되는 동안만 임시 값을 보여 주는 Hook입니다. React 19에서 정식 기능이 되었습니다.
+
+```jsx
+import { useOptimistic } from 'react'
+
+const [optimisticState, setOptimistic] =
+  useOptimistic(value, reducer?)
+```
+
+| 인자·반환 | 의미 |
+|-----------|------|
+| `value` | 진행 중인 Action이 없을 때 반환되는 값. 보통 props나 state |
+| `reducer` | 선택. 현재 값과 전달된 값으로 낙관적 state를 계산하는 순수 함수 |
+| `optimisticState` | 현재 낙관적 state |
+| `setOptimistic` | Action 안에서 낙관적 state를 바꾸는 함수 |
+
+```jsx
+const [optName, setOptName] = useOptimistic(name)
+// 진행 중인 Action이 없으면 optName === name
+```
+
+- Hook이므로 컴포넌트 최상위에서 부릅니다.
+- `setOptimistic`은 반드시 Action 안에서 호출합니다(아래 "서버 응답 전 반영").
+- 이름은 예시일 뿐이고 관례적으로 `setOptimisticXxx`나 `addOptimisticXxx`로 짓습니다.
+
+## 낙관적 State
+
+낙관적 state는 Action이 진행 중일 때만 렌더링에 쓰이는 임시 값입니다. 평소에는 `value`가 그대로 반환됩니다.
+
+```jsx
+const [value, setValue] = useState('a')
+const [optimistic, setOptimistic] = useOptimistic(value)
+
+startTransition(async () => {
+  setOptimistic('b')          // 1. 즉시 'b'로 렌더링
+  const saved = await save('b') // 2. 기다리는 동안 'b' 유지
+  startTransition(() => setValue(saved)) // 3. 실제 값 갱신
+})
+// 4. Transition이 끝나면 optimistic도 saved가 됨
+```
+
+- 실제 state와 낙관적 state는 같은 렌더링에서 수렴합니다. 낙관적 값을 지우려는 별도 렌더링은 없습니다.
+- 서버가 `'c'`를 돌려주면 둘 다 `'c'`가 됩니다. 낙관적으로 보였던 `'b'`가 남지 않습니다.
+- 그래서 실제 state(`setValue`)는 같은 Action 안에서 갱신해야 합니다. 갱신하지 않으면 Action이 끝나는 순간 화면이 이전 값으로 되돌아갑니다.
+- `value`로 무엇을 넘기느냐가 Action 후의 화면을 정합니다.
+
+| `value` 유형 | Action 후 |
+|--------------|-----------|
+| 상수 `useOptimistic(false)` | 항상 `false`로 복귀. 진행 중 표시 같은 임시 플래그에 적합 |
+| props·state `useOptimistic(isLiked)` | 부모가 갱신한 새 값 반영 |
+| reducer와 목록 `useOptimistic(items, fn)` | `items`가 중간에 바뀌면 새 목록 위에 reducer를 다시 적용 |
+
+- 낙관적 값이 실제와 다른지 알려면 `optimistic !== value`로 비교하면 진행 중임을 알 수 있습니다.
+
+## Update Function
+
+낙관적 state를 어떻게 계산할지 정하는 방법은 둘입니다. reducer를 `useOptimistic`의 둘째 인자로 주거나, setter에 함수(updater)를 넘깁니다.
+
+```jsx
+// reducer: 계산 규칙을 Hook에 두고 setter에 값만 전달
+const [items, addItem] = useOptimistic(
+  list,
+  (current, newItem) => [...current, newItem],
+)
+addItem(item)
+
+// updater: useState의 updater처럼 setter에 함수를 전달
+const [likes, setLikes] = useOptimistic(count)
+setLikes((current) => current + 1)
+```
+
+| 방식 | 쓰는 때 |
+|------|---------|
+| 값 직접 전달 | 다음 값이 이미 정해져 있을 때(`setOptimistic(true)`) |
+| updater 함수 | 현재 값에서 계산하는 단순 갱신(토글, 증감) |
+| reducer | 전달할 데이터가 있거나(추가할 항목) 갱신 종류가 여럿일 때 |
+
+- reducer와 updater는 순수 함수여야 합니다.
+- reducer는 Action이 진행되는 동안 `value`가 바뀌면 새 `value`로 다시 실행됩니다. 다른 사용자가 목록에 항목을 추가했어도 내 낙관적 항목이 최신 목록 위에 얹힙니다. updater는 Action 시작 시점의 상태만 봅니다.
+- 같은 Action 안에서 setter를 여러 번 부르면 `useState`처럼 순서대로 큐에 쌓입니다.
+- 값 직접 전달은 base가 바뀌어도 그 값 그대로입니다. `setOptimistic(5)`는 base가 달라져도 항상 5입니다. 증감은 reducer로 `adjust(1)`처럼 상대값으로 표현합니다.
+
+```jsx
+const [count, adjust] = useOptimistic(
+  base,
+  (current, delta) => current + delta,
+)
+adjust(1) // 항상 현재 값에 1을 더함
+```
+
+## 서버 응답 전 반영
+
+낙관적 갱신은 Action의 맨 앞, 요청을 보내기 전에 호출합니다. 호출은 Action 안에서만 유효합니다.
+
+```jsx
+startTransition(async () => {
+  setOptimistic(next)     // 요청 전에 먼저 반영
+  await saveToServer(next) // 그다음 요청
+})
+```
+
+- Action 안이란 `startTransition`에 넘긴 함수 안이거나 Action prop(`form`의 `action`, `Action`으로 끝나는 props) 안입니다. Action prop은 이미 Transition 안에서 호출되므로 `startTransition`이 필요 없습니다.
+- Action 밖에서 부르면 개발 모드에서 "An optimistic state update occurred outside a Transition or Action" 경고가 나오고, 낙관적 state가 잠깐 보였다가 즉시 원래 값으로 돌아갑니다.
+- 렌더링 중에 부르면 "Cannot update optimistic state while rendering" 에러입니다. 이벤트 핸들러나 Action 안에서 호출합니다.
+- `await` 앞에서 호출해야 합니다. 요청 뒤에 부르면 응답을 기다린 만큼 낙관적 효과가 사라집니다.
+
+```jsx
+function handleClick() {
+  setOptimistic(next) // ❌ Action 밖: 잠깐 보였다 사라짐
+}
+```
+
+## 실패 시 복구
+
+Action이 에러를 던져도 Transition은 끝납니다. 끝나면 낙관적 state는 사라지고 `value`가 렌더링되는데, `value`는 성공했을 때만 갱신되므로 실패하면 낙관적 갱신 전 화면으로 자동으로 돌아갑니다. 되돌리는 코드를 따로 쓰지 않습니다.
+
+```jsx
+startTransition(async () => {
+  removeOptimistic(id)
+  try {
+    await deleteItem(id)
+  } catch (e) {
+    setError(e.message) // 항목은 자동으로 다시 나타남
+  }
+})
+```
+
+- 복구는 자동이지만 사용자에게 실패를 알리는 일은 직접 해야 합니다. 에러 메시지 state를 `try`/`catch`에서 설정합니다.
+- 에러를 잡지 않고 던지면 Error Boundary가 처리합니다(13편). 그러면 이전 화면이 아니라 fallback이 보입니다.
+- 에러를 잡은 뒤에도 실제 state를 갱신해 버리면 복구가 일어나지 않습니다. 성공했을 때만 실제 state를 갱신합니다.
+- 복구된 화면에서 사용자 입력까지 지워졌다면 다시 입력해야 합니다. 폼이면 제출 값을 state로 되돌려 주는 방식(07편)을 함께 설계합니다.
+
+## 댓글
+
+댓글 추가는 새 댓글을 목록 끝에 임시 항목으로 먼저 붙이고, 전송 중임을 표시하는 패턴입니다. 목록은 reducer로 갱신합니다.
+
+```jsx
+function Comments({ comments, addComment }) {
+  const [shown, addShown] = useOptimistic(
+    comments,
+    (current, c) => [...current, { ...c, sending: true }],
+  )
+  async function formAction(formData) {
+    const text = formData.get('text')
+    const c = { id: crypto.randomUUID(), text }
+    addShown(c)
+    await addComment(c)
+  }
+  // shown을 map으로 렌더링하고 sending이면 "전송 중" 표시
+}
+```
+
+부모의 `addComment`는 서버 저장이 끝나면 실제 목록을 갱신합니다.
+
+```jsx
+async function addComment(c) {
+  const saved = await api.post(c)
+  startTransition(() => {
+    setComments((list) => [...list, saved])
+  })
+}
+```
+
+- 임시 ID(`crypto.randomUUID()`)는 reducer 안이 아니라 Action 안에서 만들어 넘깁니다. reducer는 순수해야 하고 같은 입력에 같은 값을 돌려줘야 합니다.
+- 서버가 돌려준 `saved`로 교체되면 같은 항목이 `sending` 없이 확정된 모습으로 렌더링됩니다.
+- 실제 목록 갱신은 `await` 뒤이므로 `startTransition`으로 한 번 더 감쌉니다(09편).
+- `form`의 `action`에 넘기면 제출 후 입력창이 비제어일 때 자동으로 리셋됩니다(06편).
+
+## 좋아요
+
+좋아요 버튼은 눌림 여부와 개수가 함께 바뀝니다. 한 객체로 묶고 reducer로 둘을 같이 갱신하면 화면이 어긋나지 않습니다.
+
+```jsx
+const [opt, setLiked] = useOptimistic(
+  { liked, count },
+  (cur, nextLiked) => ({
+    liked: nextLiked,
+    count: cur.count + (nextLiked ? 1 : -1),
+  }),
+)
+```
+
+```jsx
+function handleClick() {
+  const next = !opt.liked
+  startTransition(async () => {
+    setLiked(next)
+    await likeAction(next) // 부모가 실제 liked·count 갱신
+  })
+}
+```
+
+- 낙관적 값(`opt.liked`)에서 다음 값을 계산합니다. 연타하면 각 클릭이 직전 낙관적 값을 기준으로 이어집니다.
+- 버튼 문구는 `opt.liked`와 `opt.count`로 그립니다.
+- 부모의 `likeAction`은 서버 요청 후 같은 Action 안에서 실제 값을 갱신해야 합니다. 갱신이 없으면 Action이 끝나는 순간 이전 값으로 돌아갑니다.
+- 단순 토글이라면 `useOptimistic(liked)`와 `setLiked(!opt)` 같은 값 전달만으로도 되지만, 개수를 함께 바꾸려면 reducer가 안전합니다.
+
+## 리스트 추가
+
+항목을 목록에 추가할 때는 `pending` 표시를 항목에 붙이고 reducer로 목록 끝에 더합니다.
+
+```jsx
+const [shown, addShown] = useOptimistic(
+  todos,
+  (cur, todo) => [...cur, { ...todo, pending: true }],
+)
+```
+
+```jsx
+<ul>
+  {shown.map((t) => (
+    <li key={t.id}>
+      {t.text} {t.pending && '(추가 중)'}
+    </li>
+  ))}
+</ul>
+```
+
+- `key`는 임시 ID여야 합니다. 인덱스를 쓰면 확정 후 항목 순서가 바뀔 때 상태가 엉킵니다(key는 기초 7편).
+- 서버가 확정한 목록이 오면 같은 `id`의 항목이 `pending` 없이 렌더링됩니다.
+- 삭제는 항목을 제거하거나, `deleting: true` 플래그를 붙여 흐리게 보이는 방식 중 고릅니다. 후자는 실패했을 때 되돌아오는 변화가 자연스럽습니다.
+- 한 reducer에서 추가·삭제·수정을 `action.type`으로 분기해 처리할 수 있습니다. 갱신 종류가 늘면 `switch`로 정리합니다.
+
+## Action과 조합
+
+`useOptimistic`은 Action 안에서 쓰도록 설계되어 다른 Action 도구와 이어집니다.
+
+| 조합 | 구조 |
+|------|------|
+| `form` `action` + `useOptimistic` | Action 시작에서 setter 호출 후 `await`(위 댓글 예제) |
+| `useActionState` + `useOptimistic` | `useActionState`로 서버 결과 state, `useOptimistic`으로 임시 값 |
+| `startTransition` + `useOptimistic` | 폼이 아닌 클릭 핸들러(좋아요 예제) |
+| Action prop | 부모가 `xxxAction` 함수를 내려주고 자식이 낙관적 갱신을 담당 |
+
+`useActionState`와 합칠 때는 낙관적 값을 먼저 반영한 뒤 `dispatchAction`을 반환합니다.
+
+```jsx
+const [count, dispatch] = useActionState(updateCart, 0)
+const [shown, setShown] = useOptimistic(count)
+
+async function formAction(formData) {
+  setShown((c) => c + 1)   // 먼저 낙관적으로
+  return dispatch(formData) // 서버 처리와 state 갱신
+}
+```
+
+- `useActionState`의 Action은 큐에서 순차 실행되므로 연타하면 응답을 기다리는 시간이 쌓입니다. 낙관적 갱신이 이 대기를 가려 줍니다.
+- 진행 중인지 알아야 하면 세 가지 방법이 있습니다. `optimistic !== value`로 비교, `useTransition`의 `isPending`, reducer에서 항목에 `pending` 플래그를 붙이는 것입니다.
+- 진행 중 표시만 필요하면 `useOptimistic(false)`로 임시 플래그를 만들 수 있습니다. Action이 끝나면 자동으로 `false`가 됩니다.
+
+```jsx
+const [isPending, setPending] = useOptimistic(false)
+startTransition(async () => {
+  setPending(true)
+  await action()
+})
+```
+
+## TanStack Query의 낙관적 업데이트와 비교
+
+TanStack Query에서도 낙관적 업데이트를 할 수 있고, 방식이 둘입니다(자세히는 28편, 서버 상태는 26편).
+
+| 방식 | 구조 |
+|------|------|
+| UI 방식 | `useMutation`의 `isPending`과 `variables`로 임시 항목을 렌더링. 완료되면 사라짐 |
+| 캐시 방식 | `onMutate`에서 요청을 취소하고, 이전 데이터를 보관하고, `setQueryData`로 캐시를 직접 갱신. 실패하면 `onError`에서 되돌림 |
+
+| 항목 | `useOptimistic` | TanStack Query 캐시 방식 |
+|------|-----------------|--------------------------|
+| 낙관적 값의 위치 | 컴포넌트 안의 임시 state | 쿼리 캐시 |
+| 복구 | Action이 끝나면 자동 | `onError`에서 보관한 값으로 직접 복구 |
+| 다른 컴포넌트 반영 | 그 `useOptimistic`을 쓰는 곳만 | 같은 쿼리를 쓰는 모든 곳 |
+| 서버 상태 관리 | 없음. 실제 값은 직접 관리 | 캐싱, 재조회, 무효화 제공 |
+
+- TanStack Query 공식 문서는 낙관적 결과를 보여 줄 곳이 한 군데라면 `variables`로 UI를 직접 갱신하는 쪽이 코드가 적다고 설명합니다. 화면 여러 곳이 그 변화를 알아야 하면 캐시를 직접 갱신하는 쪽이 자동으로 처리해 줍니다.
+- `useOptimistic`은 서버 상태 도구가 아닙니다. 데이터를 가져오고 캐싱하는 일은 하지 않고 "Action 동안 보이는 임시 값"만 책임집니다.
+- 서버 데이터를 TanStack Query로 관리하는 앱에서도 한 컴포넌트에 국한된 임시 표시라면 `useOptimistic`을 쓸 수 있습니다. 여러 화면이 공유하는 목록의 낙관적 갱신은 캐시 쪽이 맞습니다.
+- 이 과목은 React 기본기를 다루므로 선택 기준만 알아 둡니다. 캐시 방식의 구현은 28편에서 이어집니다.
+
+## 핵심 정리
+
+- Optimistic UI는 응답 전에 성공을 가정해 화면을 먼저 바꾸고, 실패하면 되돌리는 기법입니다.
+- `useOptimistic(value, reducer?)`는 Action이 진행 중일 때만 임시 값을 보여 주고, 평소에는 `value`를 반환합니다.
+- setter는 Action 안에서 요청을 보내기 전에 호출해야 하며, 밖에서 부르면 값이 잠깐 보였다 사라지고 경고가 납니다.
+- Action이 끝나면 낙관적 state는 자동으로 사라지고 `value`가 렌더링되므로 실제 state는 같은 Action 안에서 갱신하고, 실패하면 이전 화면으로 자동 복구됩니다.
+- 목록과 개수처럼 전달할 데이터가 있거나 `value`가 중간에 바뀔 수 있으면 reducer를 쓰고, 항목에 `pending` 플래그를 붙여 진행 중임을 표시합니다.
+- TanStack Query의 캐시 방식과 달리 `useOptimistic`은 컴포넌트 안의 임시 값만 다루므로 여러 화면이 공유하는 서버 상태에는 캐시 방식이 맞습니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="useOptimistic의 setter를 호출해야 하는 올바른 위치는?"
+  options={['컴포넌트 본문(렌더링 중)', 'useEffect의 의존성 배열 계산 안', 'startTransition에 넘긴 Action이나 form의 action 함수 안', 'Action이 끝난 뒤의 then 콜백']}
+  correctAnswer={3}
+  explanation="낙관적 setter는 Action 안에서만 유효합니다. 렌더링 중 호출은 에러이고, Action 밖에서 호출하면 경고가 나며 낙관적 state가 잠깐 보였다가 즉시 원래 값으로 돌아갑니다. form의 action 함수는 이미 Transition 안에서 호출되므로 startTransition 없이 호출해도 됩니다."
+  optionExplanations={['렌더링 중에 호출하면 Cannot update optimistic state while rendering 에러가 납니다.', 'Effect의 계산 안은 Action이 아닙니다. Action 안에서만 의미가 있습니다.', '정답입니다. Action 안에서 요청을 보내기 전에 호출합니다.', 'Action이 끝나면 낙관적 state가 이미 사라진 뒤라 의미가 없습니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="Action 안에서 낙관적 갱신 후 서버 요청이 에러를 던졌고 실제 state는 갱신하지 않았다. 화면은 어떻게 되는가?"
+  options={['낙관적 값이 그대로 남는다', '낙관적 값이 사라지고 갱신 전의 value가 렌더링된다', '화면이 빈 값으로 초기화된다', '컴포넌트가 언마운트된다']}
+  correctAnswer={2}
+  explanation="Action이 에러를 던져도 Transition은 끝나고, 끝나면 낙관적 state가 사라져 value가 렌더링됩니다. value는 성공할 때만 갱신되므로 갱신 전 화면으로 자동 복구됩니다. 사용자에게 실패를 알리는 메시지는 try와 catch로 직접 처리해야 합니다."
+  optionExplanations={['낙관적 state는 Action이 끝나면 사라집니다.', '정답입니다. 복구 코드를 따로 쓰지 않아도 자동으로 이전 화면이 됩니다.', '빈 값이 아니라 value가 렌더링됩니다.', '에러만으로 컴포넌트가 언마운트되지 않습니다. 잡지 않으면 Error Boundary가 처리합니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="useOptimistic에 reducer를 쓰는 가장 큰 이유는?"
+  options={['Action이 진행되는 동안 value가 바뀌면 새 value 위에 낙관적 갱신을 다시 적용하기 위해', 'Action이 끝난 뒤에도 낙관적 값을 영구 보관하기 위해', '서버 요청을 자동으로 보내기 위해', '쿼리 캐시를 갱신하기 위해']}
+  correctAnswer={1}
+  explanation="reducer를 쓰면 value가 Action 도중 바뀌었을 때 React가 새 value로 reducer를 다시 실행해 낙관적 항목을 최신 목록 위에 얹습니다. 낙관적 state는 Action이 끝나면 사라지며, 요청 전송이나 캐시 갱신은 useOptimistic의 역할이 아닙니다."
+  optionExplanations={['정답입니다. updater나 값 직접 전달은 시작 시점 기준이라 이런 변화를 반영하지 못합니다.', '낙관적 state는 임시 값이며 Action이 끝나면 사라집니다.', 'useOptimistic은 요청을 보내지 않습니다. 요청은 Action 안에서 직접 보냅니다.', '쿼리 캐시는 TanStack Query의 영역입니다.']}
+/>
+
+## 참고 자료
+
+- [React — useOptimistic](https://react.dev/reference/react/useOptimistic)
+- [React — useTransition (Actions)](https://react.dev/reference/react/useTransition)
+- [React — form](https://react.dev/reference/react-dom/components/form)
+- [React — useActionState](https://react.dev/reference/react/useActionState)
+- [React Blog — React 19](https://react.dev/blog/2024/12/05/react-19)
+- [TanStack Query — Optimistic Updates](https://tanstack.com/query/latest/docs/framework/react/guides/optimistic-updates)

@@ -1,0 +1,502 @@
+---
+title: '36. fetch와 HTTP 메시지'
+description: 'HTTP 메시지 구조와 메서드 의미, fetch의 이행·거부 규칙, Request·Response·Headers와 옵션, JSON 송수신, 상태 코드 처리, XMLHttpRequest 업로드 진행률, sendBeacon과 fetchLater를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** HTTP 요청·응답 메시지의 구성과 `fetch`가 이를 다루는 방식을 설명하고, 오류 상태 처리, 본문 읽기, 헤더 제약, 업로드 진행률, 페이지 이탈 시 전송을 올바르게 구현할 수 있습니다.
+</Callout>
+
+## HTTP 메시지 구조
+
+HTTP는 클라이언트가 요청(request) 메시지를 보내고 서버가 응답(response) 메시지를 돌려주는 방식으로 동작합니다. 두 메시지는 같은 네 부분으로 이뤄집니다.
+
+```text
+POST /orders HTTP/1.1
+Host: example.com
+Content-Type: application/json
+
+{"item":"book"}
+```
+
+```text
+HTTP/1.1 201 Created
+Content-Type: application/json
+Location: /orders/7
+
+{"id":7}
+```
+
+| 부분 | 요청 | 응답 |
+|------|------|------|
+| 시작 줄 | 메서드, 요청 대상, 프로토콜 버전 | 프로토콜 버전, 상태 코드, 설명 문구 |
+| 헤더 | 이름과 값 쌍(이름은 대소문자 무시) | 같음 |
+| 빈 줄 | 헤더의 끝 | 같음 |
+| 본문 | 선택. 보내는 데이터 | 선택. 돌려주는 데이터 |
+
+- HTTP/1.1은 텍스트로, HTTP/2 이상은 이진 프레임으로 전송하지만 시작 줄, 헤더, 본문이라는 모델은 같습니다. 브라우저 개발자 도구의 Network 탭이 이 모델로 메시지를 보여 줍니다(자세히는 70편).
+- 요청 대상은 보통 경로와 쿼리(`/orders?page=2`)입니다. 호스트는 `Host` 헤더가 알려 줍니다.
+- 본문의 형식은 `Content-Type` 헤더가, 길이는 `Content-Length` 헤더가 알려 줍니다.
+- 브라우저의 `fetch`는 이 메시지를 `Request`와 `Response` 객체로 다룹니다.
+
+## 메서드의 의미
+
+메서드는 요청이 서버에서 하려는 일을 나타냅니다. 웹 앱에서 주로 쓰는 다섯 가지는 다음과 같습니다.
+
+| 메서드 | 용도 | 요청 본문 | 안전 | 멱등 |
+|--------|------|-----------|------|------|
+| GET | 리소스 조회 | 없음 | 예 | 예 |
+| POST | 생성, 처리 요청 | 있음 | 아니오 | 아니오 |
+| PUT | 리소스 전체 교체 | 있음 | 아니오 | 예 |
+| PATCH | 리소스 일부 수정 | 있음 | 아니오 | 아니오 |
+| DELETE | 리소스 삭제 | 보통 없음 | 아니오 | 예 |
+
+- 안전(safe)은 서버 상태를 바꾸지 않는다는 뜻입니다. 안전한 메서드는 캐시, 미리 가져오기, 크롤러가 마음대로 호출해도 됩니다. 그래서 GET으로 삭제나 결제를 하면 안 됩니다.
+- 멱등(idempotent)은 같은 요청을 여러 번 보내도 서버 상태가 한 번 보낸 결과와 같다는 뜻입니다. 멱등이면 응답을 못 받았을 때 안심하고 다시 보낼 수 있습니다(자세히는 37편).
+- POST는 멱등이 아니라서 재시도하면 주문이 두 건 생기는 식의 문제가 생깁니다. PATCH도 일반적으로 멱등이 아닙니다(예: 수량 1 증가).
+- DELETE는 멱등입니다. 두 번째 호출이 404를 돌려줘도 서버 상태는 같습니다.
+- PUT은 전체를 교체하므로 보내지 않은 필드는 사라질 수 있고, 일부만 바꾸려면 PATCH를 씁니다.
+
+## fetch
+
+`fetch(resource, options)`는 HTTP 요청을 보내고, 응답이 도착하면 `Response`로 이행하는 약속(Promise)을 돌려줍니다. Baseline 2017입니다.
+
+```js
+const res = await fetch('/api/orders')
+const orders = await res.json()
+```
+
+- `resource`: 문자열, `URL` 객체, `Request` 객체입니다. 상대 URL은 문서의 기준 URL로 해석합니다(자세히는 34편).
+- 두 번째 인수는 옵션 객체입니다. 기본은 GET입니다.
+- 약속은 응답의 헤더를 받으면 이행합니다. 본문은 아직 다 오지 않았을 수 있고, 본문은 읽는 메서드가 따로 기다립니다.
+- 이행과 거부의 경계를 아는 것이 가장 중요합니다(다음 절).
+
+## HTTP 오류 상태에서 fetch가 거부하지 않는 이유
+
+`fetch`는 404나 500 응답을 받아도 거부하지 않고 이행합니다. HTTP 응답이 도착했다면 요청 전달 자체는 성공했기 때문입니다. 거부는 응답을 받지 못한 경우에만 일어납니다.
+
+| 상황 | fetch 약속 | 비고 |
+|------|------------|------|
+| 404, 500 등 오류 상태 | 이행 | `res.ok`가 `false` |
+| 네트워크 끊김, DNS 실패 | `TypeError`로 거부 | |
+| CORS 위반, 혼합 콘텐츠 차단 | `TypeError`로 거부 | 원인을 구별할 수 없음 |
+| `abort()`로 취소 | `AbortError`로 거부 | |
+| 옵션이 잘못됨(GET에 본문 등) | `TypeError`로 거부 | |
+
+- 오류 상태 응답의 본문에는 검증 오류 목록처럼 쓸모 있는 정보가 들어 있으므로 읽을 수 있어야 합니다. 이행시키는 이유 중 하나입니다.
+- 브라우저는 보안상 CORS 실패 원인을 스크립트에 알려 주지 않습니다. 모두 같은 `TypeError`이고 자세한 사유는 개발자 도구 콘솔에서만 볼 수 있습니다(자세히는 62편).
+- 가장 흔한 실수는 `res.ok`를 확인하지 않고 `res.json()`을 부르는 것입니다. 오류 응답의 본문이 오류 객체라서 성공 데이터인 것처럼 흘러 들어갑니다.
+
+```js
+class HttpError extends Error {
+  constructor(res) {
+    super(`HTTP ${res.status}`)
+    this.status = res.status
+    this.res = res
+  }
+}
+async function request(url, init) {
+  const res = await fetch(url, init)
+  if (!res.ok) throw new HttpError(res)
+  return res
+}
+```
+
+- 위 래퍼가 오류 상태를 예외로 바꿔 줍니다. 호출하는 쪽은 `try`/`catch` 한 곳에서 네트워크 오류(`TypeError`), 취소(`AbortError`), HTTP 오류(`HttpError`)를 가릅니다.
+
+## Request 객체와 옵션
+
+`Request`는 요청 하나를 객체로 만든 것입니다. `fetch()`에 직접 옵션을 줘도 같은 효과이고, 재사용하거나 서비스 워커에서 요청을 받을 때 `Request`를 씁니다(자세히는 56편).
+
+```js
+const req = new Request('/api/orders', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ item: 'book' }),
+})
+const res = await fetch(req)
+```
+
+- `Request`의 `url`은 절대 URL로 정리되어 있고 `method`, `headers`, `body`, `signal` 같은 속성을 읽을 수 있습니다. `new Request(oldRequest, { ...변경 })`으로 일부만 바꾼 복사본을 만들 수 있고, `fetch()`에 준 옵션이 `Request`의 옵션보다 우선합니다.
+- 본문은 한 번만 소비됩니다. 재전송이 필요하면 `req.clone()`을 먼저 만듭니다.
+- 표준 메서드 이름은 자동으로 대문자로 바뀝니다. 그러나 `PATCH`는 바뀌지 않으므로 직접 대문자로 씁니다.
+- GET과 HEAD에 본문을 넣으면 `TypeError`입니다.
+- 본문 값에 따라 `Content-Type`이 자동으로 붙습니다: 문자열은 `text/plain;charset=UTF-8`, `URLSearchParams`는 `application/x-www-form-urlencoded`, `FormData`는 `multipart/form-data`(경계 문자열 포함), `Blob`은 `blob.type`. `FormData`일 때 `Content-Type`을 직접 쓰면 경계 문자열이 빠져 서버가 해석하지 못합니다. 직접 쓰지 않습니다(자세히는 11편).
+
+옵션은 다음과 같습니다.
+
+| 옵션 | 값(기본값) | 뜻 |
+|------|-----------|----|
+| `mode` | `cors`(기본), `no-cors`, `same-origin` | 교차 출처 요청 방식 |
+| `credentials` | `same-origin`(기본), `omit`, `include` | 쿠키·인증 정보 전송 범위 |
+| `cache` | `default`(기본), `no-store`, `reload`, `no-cache`, `force-cache`, `only-if-cached` | HTTP 캐시 사용 방식 |
+| `redirect` | `follow`(기본), `error`, `manual` | 리다이렉트 처리 |
+| `referrerPolicy` | Referrer-Policy 값 | `Referer` 헤더에 담는 정보 |
+| `integrity` | `sha256-`, `sha384-`, `sha512-`로 시작하는 해시 | 응답 무결성 검증 |
+| `keepalive` | `false`(기본), `true` | 페이지가 닫혀도 요청을 계속 |
+| `priority` | `auto`(기본), `high`, `low` | 요청 우선순위 힌트 |
+| `signal` | `AbortSignal` | 취소(자세히는 37편) |
+
+- `mode`: 기본 `cors`는 교차 출처 응답을 CORS 규칙으로 허용할 때만 읽게 합니다. `same-origin`은 다른 출처 요청을 `TypeError`로 막고, `no-cors`는 응답을 읽을 수 없는 불투명 응답을 만듭니다(아래 절).
+- `credentials`: 기본 `same-origin`은 같은 출처 요청에만 쿠키를 보냅니다. `include`는 교차 출처에도 보내며 서버의 CORS 허용이 필요합니다. `omit`은 어디에도 보내지 않습니다(자세히는 40편, 62편).
+- `cache`: `default`는 신선한 캐시를 쓰고 오래되면 조건부 요청으로 확인합니다. `no-store`는 캐시를 쓰지도 갱신하지도 않습니다. `reload`는 캐시를 건너뛰고 새로 받아 캐시를 갱신합니다. `no-cache`는 캐시가 있어도 서버에 확인합니다. `force-cache`는 오래됐어도 캐시를 우선 씁니다. `only-if-cached`는 캐시만 쓰고 없으면 504이며 `mode: 'same-origin'`이 필요합니다.
+- `redirect`: `follow`는 자동으로 따라가고 `error`는 `TypeError`로 거부하며, `manual`은 리다이렉트 응답을 불투명 리다이렉트로 돌려줘 직접 처리하게 합니다.
+- `integrity`: 받은 본문의 해시가 맞지 않으면 요청이 네트워크 오류로 끝나 약속이 거부됩니다. CDN에서 받는 자원의 변조를 막을 때 씁니다(자세히는 63편).
+- `keepalive`: 문서가 사라져도 요청을 끝까지 보냅니다. 본문 크기에 한도(64 KiB)가 있어 큰 데이터에는 쓸 수 없습니다.
+- `priority`: 브라우저가 다른 요청과의 순서를 정할 때 참고하는 힌트로, 지시가 아닙니다. Baseline 2024입니다(자세히는 15편).
+
+## Response 객체
+
+`Response`는 응답을 나타냅니다. 헤더를 받은 시점에 속성이 정해지고, 본문은 읽는 메서드로 가져옵니다.
+
+| 속성 | 뜻 |
+|------|----|
+| `status` | 상태 코드 숫자 |
+| `statusText` | 설명 문구. HTTP/2 이상은 빈 문자열일 수 있음 |
+| `ok` | `status`가 200–299이면 `true` |
+| `redirected` | 리다이렉트를 거쳤는지 |
+| `url` | 리다이렉트를 모두 따라간 최종 URL |
+| `type` | 응답의 종류(아래 절) |
+| `headers` | `Headers` 객체 |
+| `body` | 본문 `ReadableStream`(자세히는 38편) |
+| `bodyUsed` | 본문을 읽기 시작했는지 |
+
+- `ok`는 2xx 전체를 뜻합니다. 201, 204도 `true`입니다. 304는 `ok`가 `false`이지만 브라우저가 캐시 검증으로 처리한 304는 스크립트에 보이지 않습니다.
+- `redirected`가 `true`이면 `res.url`이 요청한 URL과 다릅니다. 로그인 페이지로 리다이렉트된 응답을 데이터로 오해하지 않을 때 검사합니다.
+
+## Response.type
+
+`type`은 응답을 스크립트가 얼마나 볼 수 있는지를 나타냅니다.
+
+| type | 언제 | 읽을 수 있는 것 |
+|------|------|-----------------|
+| `basic` | 같은 출처 요청 | `Set-Cookie`를 뺀 모든 헤더, 본문 |
+| `cors` | CORS를 통과한 교차 출처 요청 | CORS 안전 응답 헤더와 서버가 노출한 헤더, 본문 |
+| `opaque` | `mode: 'no-cors'`로 보낸 교차 출처 요청 | 아무것도 없음(`status` 0, 본문 `null`, 빈 헤더) |
+| `opaqueredirect` | `redirect: 'manual'`에서 리다이렉트됨 | 아무것도 없음 |
+| `error` | 네트워크 오류 | 빈 응답(`status` 0) |
+
+- `cors` 응답에서 스크립트가 읽는 응답 헤더는 `Cache-Control`, `Content-Language`, `Content-Length`, `Content-Type`, `Expires`, `Last-Modified`, `Pragma`와 서버가 `Access-Control-Expose-Headers`로 열어 준 것뿐입니다. 서버가 정한 사용자 지정 헤더를 읽지 못하면 이 헤더를 확인합니다(자세히는 62편).
+- `opaque` 응답은 이미지나 스크립트를 캐시에 넣거나 서비스 워커로 전달하는 용도로만 쓸 수 있고 내용을 읽을 수 없습니다. 교차 출처 API를 읽으려고 `no-cors`로 바꾸는 것은 해결이 아닙니다. 서버에 CORS를 허용하게 해야 합니다.
+
+## 본문 읽기
+
+본문은 형식에 맞는 메서드로 읽습니다. 모두 약속을 돌려줍니다.
+
+| 메서드 | 결과 | 용도 |
+|--------|------|------|
+| `json()` | 파싱된 값 | JSON 응답 |
+| `text()` | 문자열(UTF-8) | HTML, 일반 텍스트 |
+| `blob()` | `Blob` | 이미지, 파일 |
+| `arrayBuffer()` | `ArrayBuffer` | 이진 데이터 가공 |
+| `bytes()` | `Uint8Array` | 이진 데이터 가공. Baseline 2025 |
+| `formData()` | `FormData` | 폼 형식 응답 |
+
+- 본문은 한 번만 읽을 수 있습니다. 읽기 시작하면 `bodyUsed`가 `true`가 되고, 다시 읽으려 하면 `TypeError`입니다.
+- 두 번 읽거나 두 곳에 나눠 주려면 읽기 전에 `res.clone()`으로 복제합니다. 복제는 본문을 둘로 나누는 것이라 한쪽을 천천히 읽으면 나머지 데이터가 메모리에 쌓입니다.
+- `json()`은 본문이 비었거나 JSON이 아니면 `SyntaxError`로 거부됩니다. 204 응답은 본문이 없으므로 `status`를 먼저 확인합니다.
+- `text()`는 항상 UTF-8로 디코딩합니다. 다른 인코딩은 `arrayBuffer()`와 `TextDecoder`로 처리합니다(자세히는 38편).
+- 큰 응답은 `res.body`로 조각 단위로 읽어 진행률을 표시하거나 부분 처리를 할 수 있습니다(자세히는 38편).
+
+```js
+const res = await fetch('/api/orders/7')
+const copy = res.clone()
+const data = await res.json()    // 원본은 JSON으로
+const raw = await copy.text()    // 복제본은 문자열로
+res.bodyUsed                     // true
+await res.json()                 // TypeError (이미 읽음)
+```
+
+## Headers
+
+`Headers`는 헤더 이름과 값의 목록을 다루는 객체입니다. `Request`와 `Response`의 `headers`가 이 타입이고, 옵션의 `headers`에는 객체 리터럴이나 `Headers`를 줍니다.
+
+```js
+const h = new Headers({ Accept: 'application/json' })
+h.append('X-Trace', 'a')
+h.append('X-Trace', 'b')
+h.get('x-trace')   // 'a, b' (같은 이름은 쉼표로 이어 붙임)
+h.has('accept')    // true (대소문자 무시)
+h.set('Accept', 'text/html') // 덮어쓰기
+```
+
+| 메서드 | 동작 |
+|--------|------|
+| `append(n, v)` | 값을 추가. 같은 이름이 있으면 값이 둘이 됨 |
+| `set(n, v)` | 같은 이름의 값을 지우고 하나로 설정 |
+| `get(n)` | 값을 반환. 없으면 `null` |
+| `has(n)`, `delete(n)` | 존재 확인, 삭제 |
+| `entries()`, `keys()`, `values()`, `forEach()` | 순회. 이름은 소문자로 정렬되어 나옴 |
+| `getSetCookie()` | `Set-Cookie` 값 배열 |
+
+- 이름은 대소문자를 구별하지 않고, 값 앞뒤 공백은 제거됩니다. 이름이 유효하지 않으면 `TypeError`입니다.
+- `fetch`가 돌려준 응답의 `headers`는 수정할 수 없습니다. 요청 쪽 `Headers`는 금지 헤더를 설정할 수 없습니다(다음 절).
+- 브라우저의 `fetch` 응답에서는 `Set-Cookie`를 읽을 수 없습니다. `getSetCookie()`는 서버나 서비스 워커처럼 헤더가 노출되는 환경에서 쓰입니다.
+
+## 금지 헤더와 CORS 안전 헤더
+
+요청 헤더는 모두 마음대로 설정할 수 없습니다. 두 가지 규칙이 있습니다.
+
+금지 헤더(forbidden request header)는 브라우저가 직접 관리해서 스크립트가 설정할 수 없는 헤더입니다. 설정해도 조용히 무시됩니다.
+
+- 이름이 `Sec-`나 `Proxy-`로 시작하는 헤더 전부.
+- `Accept-Charset`, `Accept-Encoding`, `Access-Control-Request-Headers`, `Access-Control-Request-Method`, `Connection`, `Content-Length`, `Cookie`, `Date`, `DNT`, `Expect`, `Host`, `Keep-Alive`, `Origin`, `Referer`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Via`.
+- `Referer`는 헤더가 아니라 `referrer` 옵션과 `referrerPolicy` 옵션으로 조절합니다. `Cookie`는 `credentials` 옵션으로, `Origin`은 브라우저가 붙입니다.
+
+CORS 안전 헤더(CORS-safelisted request header)는 교차 출처 요청에 포함해도 사전 요청(preflight)을 일으키지 않는 헤더입니다.
+
+| 헤더 | 조건 |
+|------|------|
+| `Accept` | 값에 제어 문자와 일부 기호(`"():<>?@[\]{}`)가 없을 것 |
+| `Accept-Language`, `Content-Language` | 영숫자, 공백, `*,-.;=`만 포함 |
+| `Content-Type` | `application/x-www-form-urlencoded`, `multipart/form-data`, `text/plain` 중 하나 |
+| `Range` | 단일 바이트 범위(`bytes=0-99`) |
+
+- 모든 값은 128바이트 이하여야 합니다.
+- 이 목록에 없는 헤더(`Authorization`, 사용자 지정 `X-` 헤더)나 조건에 맞지 않는 값이 있으면 브라우저가 본 요청 전에 `OPTIONS` 사전 요청을 보냅니다. 특히 JSON을 보내려고 `Content-Type: application/json`을 쓰면 안전 헤더가 아니라서 교차 출처에서는 사전 요청이 발생합니다(자세히는 62편).
+
+## JSON 요청과 응답
+
+JSON을 보낼 때는 `JSON.stringify()`로 본문을 만들고 `Content-Type: application/json` 헤더를 붙입니다. 받을 때는 `res.json()`을 씁니다.
+
+```js
+const res = await fetch('/api/orders', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+  },
+  body: JSON.stringify({ item: 'book', qty: 2 }),
+})
+const created = await res.json() // { id: 7, ... }
+```
+
+- 문자열 본문은 `Content-Type`이 `text/plain`으로 붙으므로 JSON이면 헤더를 명시해야 서버가 JSON으로 읽습니다.
+- `JSON.stringify()`는 `undefined`, 함수, 심벌 값을 가진 프로퍼티를 버리고 `Date`를 문자열로 바꾸며 `BigInt`에는 `TypeError`를 던집니다.
+- 응답에서는 상태와 본문 형식을 확인한 뒤 파싱합니다.
+
+```js
+async function getJson(url, init) {
+  const res = await fetch(url, init)
+  if (!res.ok) throw new HttpError(res)
+  if (res.status === 204) return null
+  return res.json()
+}
+```
+
+- 서버가 오류 상태에서도 JSON 본문을 주는 경우가 많으므로 `HttpError`에 응답을 담아 두면 호출하는 쪽이 `err.res.json()`으로 오류 내용을 읽을 수 있습니다.
+- 서버가 HTML 오류 페이지를 돌려주면 `res.json()`이 `SyntaxError`로 거부됩니다. `Content-Type` 헤더로 먼저 확인할 수 있습니다.
+
+## HTTP 상태 코드 처리
+
+상태 코드는 첫 자리 숫자로 종류를 나눕니다. 앱은 코드마다 정해 둔 반응을 한곳에서 처리합니다.
+
+| 범위 | 의미 | fetch에서의 처리 |
+|------|------|------------------|
+| 2xx | 성공 | `ok`가 `true` |
+| 3xx | 리다이렉트 | 기본은 자동으로 따라감 |
+| 4xx | 클라이언트 오류 | 이행하되 `ok`가 `false` |
+| 5xx | 서버 오류 | 이행하되 `ok`가 `false` |
+
+주요 코드와 대응은 다음과 같습니다.
+
+| 코드 | 뜻 | 앱의 반응 |
+|------|----|-----------|
+| 200 | 성공 | 본문 사용 |
+| 201 | 생성됨 | `Location` 헤더나 본문의 새 리소스 사용 |
+| 204 | 성공, 본문 없음 | `json()`을 부르지 않음 |
+| 301, 308 | 영구 이동 | 자동으로 따라감. 요청 메서드 유지는 308 |
+| 302, 307 | 임시 이동 | 자동으로 따라감. 요청 메서드 유지는 307 |
+| 303 | GET으로 다른 곳 조회 | 자동으로 GET으로 따라감 |
+| 304 | 수정 없음 | 브라우저 캐시가 처리. 조건부 헤더를 직접 보냈을 때만 보임 |
+| 400 | 잘못된 요청 | 본문의 검증 오류를 표시 |
+| 401 | 인증 필요 | 로그인 화면으로 보내거나 토큰 갱신 |
+| 403 | 권한 없음 | 접근 불가 안내 |
+| 404 | 없음 | Not Found 화면(자세히는 35편) |
+| 405 | 메서드 허용 안 됨 | 코드 오류로 보고 개발 중 수정 |
+| 409 | 충돌 | 최신 상태를 다시 불러와 사용자에게 선택을 요청 |
+| 413, 415 | 본문이 너무 큼, 형식 미지원 | 파일 크기·형식 안내 |
+| 422 | 형식은 맞지만 처리 불가 | 필드별 오류 표시 |
+| 429 | 요청 과다 | `Retry-After`만큼 기다려 재시도(자세히는 37편) |
+| 500, 502, 503, 504 | 서버·게이트웨이 오류 | 안전한 요청이면 재시도, 아니면 오류 안내 |
+
+- 4xx는 요청을 고치지 않으면 반복해도 같은 결과이므로 재시도하지 않고, 5xx와 429는 재시도 후보입니다. 단 POST는 멱등이 아니므로 신중해야 합니다.
+- 401과 403을 구별합니다. 401은 신원을 모르는 상태이고 403은 신원을 알지만 권한이 없는 상태입니다.
+- 코드마다 `if`를 흩뿌리지 말고 요청 래퍼(`request()`) 한곳에서 상태별 정책을 정합니다(자세히는 37편의 데이터 계층).
+
+## GET·POST·PUT·PATCH·DELETE 호출
+
+메서드별 호출은 `method`, 헤더, 본문의 조합입니다.
+
+```js
+const json = { 'Content-Type': 'application/json' }
+const send = (method, url, data) => fetch(url, {
+  method, headers: json, body: JSON.stringify(data),
+})
+
+fetch('/api/orders?status=open')            // GET (본문 없음)
+send('POST', '/api/orders', order)         // 201 + Location
+send('PUT', '/api/orders/7', order)         // 전체 교체
+send('PATCH', '/api/orders/7', { qty: 3 })  // 일부 수정
+fetch('/api/orders/7', { method: 'DELETE' }) // 204
+```
+
+- GET의 조건은 쿼리 문자열로 전달하고, 만들 때는 `URLSearchParams`를 씁니다(자세히는 34편).
+- GET에는 본문을 못 넣고, 본문이 필요한 조회는 보통 POST로 설계하거나 쿼리를 줄입니다.
+- 서버가 `Allow` 헤더로 알려 주는 허용 메서드 밖이면 405입니다.
+- `PATCH`는 표준 메서드 이름 정규화 대상이 아니라서 `'patch'`를 소문자로 쓰면 서버가 인식하지 못할 수 있습니다.
+
+## Response.json()과 Response.error()
+
+`Response`의 정적 메서드는 응답 객체를 직접 만듭니다. 서비스 워커와 테스트에서 가짜 응답을 만들 때 씁니다(자세히는 56편, 68편).
+
+```js
+const ok = Response.json({ id: 7 }, { status: 201 })
+ok.headers.get('Content-Type') // 'application/json'
+await ok.json()                // { id: 7 }
+
+const err = Response.error()
+err.type   // 'error'
+err.status // 0
+```
+
+- `Response.json(data, options)`는 `data`를 JSON 본문으로 가지고 `Content-Type`이 `application/json`인 `Response`를 만듭니다. `options`로 `status`, `statusText`, `headers`를 줍니다. Baseline 2023입니다.
+- `Response.error()`는 네트워크 오류를 나타내는 응답(`type`이 `error`, `status` 0)을 만듭니다. 서비스 워커의 `fetch` 핸들러에서 이 응답을 돌려주면 페이지의 요청이 네트워크 오류처럼 실패합니다.
+- 이 값은 `new Response(body, init)`로 만든 일반 응답과 달리 `error` 유형이라서 `ok`가 `false`이고 본문이 없습니다.
+
+## XMLHttpRequest와 업로드 진행률
+
+`XMLHttpRequest`(XHR)는 `fetch` 이전의 요청 API로, 이벤트 방식입니다. 지금도 `fetch`에 없는 기능이 하나 있습니다. 업로드 진행률입니다. `fetch`는 업로드 진행 이벤트를 제공하지 않습니다.
+
+```js
+const xhr = new XMLHttpRequest()
+xhr.upload.addEventListener('progress', (e) => {
+  if (e.lengthComputable) {
+    bar.value = e.loaded / e.total
+  }
+})
+xhr.addEventListener('load', () => done(xhr.status))
+xhr.addEventListener('error', fail)
+xhr.open('POST', '/api/upload')
+xhr.send(formData)
+```
+
+- 업로드 진행은 `xhr.upload`의 이벤트이고 다운로드 진행은 `xhr` 자신의 이벤트입니다. 이벤트는 `loadstart`, `progress`, `load`, `error`, `abort`, `timeout`, `loadend`입니다.
+- `xhr.upload`의 `load`는 본문을 다 보냈다는 뜻이고 서버의 응답 완료는 `xhr`의 `load`입니다.
+- 진행 이벤트를 받으려면 리스너를 `open()`을 호출하기 전에 붙입니다.
+- 응답 형식은 `responseType`(`'json'`, `'blob'`, `'arraybuffer'`, `'text'`)으로 지정하고 `response`로 읽습니다. 시간 제한은 `timeout`(밀리초)과 `timeout` 이벤트, 취소는 `abort()`입니다.
+- 오류 상태(404)도 XHR은 `load`로 끝나고 `error`는 네트워크 실패에만 발생합니다. 이 점은 `fetch`와 같습니다.
+- 메인 스레드의 동기 XHR(`open`의 세 번째 인수가 `false`)은 화면을 멈추므로 폐기되었습니다. 쓰지 않습니다.
+
+### ProgressEvent
+
+진행 이벤트는 `ProgressEvent` 객체입니다.
+
+| 속성 | 뜻 |
+|------|----|
+| `loaded` | 지금까지 전송된 바이트 수 |
+| `total` | 전체 바이트 수. 모르면 0 |
+| `lengthComputable` | 전체 크기를 아는지 |
+
+- `lengthComputable`이 `false`이면 비율을 계산할 수 없으므로 진행 표시줄 대신 불확정 상태 표시를 씁니다. 서버가 `Content-Length` 없이 조각으로 보내는 응답에서 그렇습니다.
+- 업로드 진행률이 100퍼센트여도 본문 전송이 끝났다는 뜻일 뿐 서버가 처리를 마쳤다는 뜻이 아닙니다.
+- 다운로드 진행률은 `fetch`에서 `res.body`를 조각 단위로 읽어 누적 바이트를 `Content-Length`와 비교해 얻을 수 있습니다. 압축된 응답이면 `Content-Length`가 압축된 크기라서 읽은 바이트와 맞지 않을 수 있습니다(자세히는 38편). 파일 업로드 UI의 전체 구성은 48편에서 다룹니다.
+
+## navigator.sendBeacon()
+
+`navigator.sendBeacon(url, data)`는 응답이 필요 없는 작은 데이터를 페이지가 닫혀도 보내도록 브라우저에 맡기는 API입니다. Baseline 2018입니다.
+
+```js
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    const blob = new Blob([JSON.stringify(stats)], {
+      type: 'application/json',
+    })
+    navigator.sendBeacon('/api/stats', blob)
+  }
+})
+```
+
+- 항상 POST이고 응답을 읽을 수 없습니다. 반환값은 전송 대기열에 넣었는지(`true`)이며 서버가 받았는지가 아닙니다.
+- 데이터는 문자열, `Blob`, `ArrayBuffer`와 타입 배열, `FormData`, `URLSearchParams`를 받습니다. `Content-Type`은 데이터 형식에서 정해집니다. JSON을 보낼 때는 `type`을 지정한 `Blob`으로 만듭니다.
+- 크기는 대략 64 KiB 이내여야 하고 넘으면 `false`를 돌려줍니다.
+- 페이지가 사라질 때 호출하는 시점은 `unload`가 아니라 `visibilitychange`입니다(자세히는 34편).
+- 메서드를 바꾸거나 헤더를 붙이거나 응답을 읽어야 하면 `fetch(url, { keepalive: true })`를 씁니다.
+
+## fetchLater()
+
+`fetchLater(request, options)`는 요청을 미리 등록해 두고 페이지를 떠날 때(또는 지정한 시간 뒤) 브라우저가 보내게 하는 API입니다. Chromium에서만 지원하며 Baseline이 아닙니다. 지원 여부는 `'fetchLater' in window`로 검사하고, 없으면 `sendBeacon`으로 대체합니다.
+
+```js
+const result = fetchLater('/api/stats', {
+  method: 'POST',
+  body: JSON.stringify(stats),
+  activateAfter: 60_000, // 1분 뒤 또는 이탈 시 중 먼저
+})
+result.activated // 이미 보냈는지
+```
+
+- 반환값은 `activated`(요청이 이미 전송되었는지) 속성을 가진 객체입니다. 응답은 받을 수 없습니다.
+- `sendBeacon`이 이탈하는 순간에 호출해야 하는 것과 달리 미리 등록해 두는 방식이며, `activateAfter` 시간이 지나면 이탈 전에도 보냅니다.
+- 보안 컨텍스트(HTTPS)에서만 쓸 수 있고, `ReadableStream` 본문은 쓸 수 없으며(`TypeError`), `keepalive` 할당량을 넘으면 `QuotaExceededError`입니다. 서드파티 스크립트에서 쓸 때는 `try`/`catch`로 감쌉니다.
+- CSP는 `connect-src` 지시어로 제어됩니다.
+
+## 핵심 정리
+
+- HTTP 메시지는 시작 줄, 헤더, 빈 줄, 본문으로 이뤄지고, 안전한 메서드(GET)는 상태를 바꾸지 않으며 멱등한 메서드(GET, PUT, DELETE)만 안심하고 재시도할 수 있습니다. POST와 PATCH는 멱등이 아닙니다.
+- `fetch`는 응답이 도착하면 오류 상태여도 이행하므로 `res.ok`를 직접 확인해야 하고, 네트워크 실패·CORS 차단·옵션 오류는 `TypeError`로, 취소는 `AbortError`로 거부됩니다.
+- 본문은 한 번만 읽을 수 있습니다(`bodyUsed`). 두 번 읽으려면 읽기 전에 `clone()`합니다. `json()`은 빈 본문(204)에서 거부됩니다.
+- `Response.type`이 `opaque`이면 상태와 본문을 읽을 수 없고, `cors`이면 안전 응답 헤더만 읽을 수 있습니다. 금지 헤더는 설정이 무시되고, `application/json` 등 안전 목록 밖의 헤더는 교차 출처에서 사전 요청을 부릅니다.
+- JSON은 `JSON.stringify()`와 `Content-Type: application/json`으로 보내고, `FormData`에는 `Content-Type`을 직접 쓰지 않습니다.
+- 업로드 진행률은 `XMLHttpRequest`의 `upload` 이벤트(`ProgressEvent`)로, 페이지 이탈 시 전송은 `sendBeacon`이나 `keepalive`로, 미리 등록하는 `fetchLater()`는 Chromium 전용입니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="fetch('/api/items/999')를 호출했는데 서버가 404를 응답했다. 이때의 동작으로 옳은 것은?"
+  options={['TypeError로 거부된다', 'Response로 이행하고 res.ok는 false, res.status는 404이다', 'Response로 이행하고 res.ok는 true이다', 'AbortError로 거부된다']}
+  correctAnswer={2}
+  explanation="fetch는 응답이 도착하면 상태 코드와 관계없이 Response로 이행합니다. 404는 2xx가 아니므로 ok가 false이고 status가 404입니다. 거부(TypeError)는 네트워크 실패나 CORS 차단처럼 응답을 받지 못한 경우이며, AbortError는 취소한 경우입니다. 그래서 res.ok를 직접 확인해야 합니다."
+  optionExplanations={['TypeError는 응답을 받지 못했을 때의 거부입니다.', '정답입니다. 오류 상태 응답도 이행하며 본문을 읽을 수 있습니다.', '404는 200–299 범위가 아니라서 ok가 false입니다.', 'AbortError는 abort로 취소했을 때입니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="const data = await res.json(); 다음에 await res.text()를 호출하면 어떻게 되는가?"
+  options={['본문 문자열을 다시 돌려준다', '빈 문자열을 돌려준다', 'TypeError로 거부된다', '응답을 다시 요청한다']}
+  correctAnswer={3}
+  explanation="Response 본문은 스트림이라 한 번만 읽을 수 있습니다. 읽기 시작하면 bodyUsed가 true가 되고 다시 읽으려 하면 TypeError입니다. 두 번 읽어야 하면 읽기 전에 res.clone()으로 복제해 한쪽씩 읽습니다."
+  optionExplanations={['본문은 이미 소비되어 다시 읽을 수 없습니다.', '빈 문자열이 아니라 오류가 발생합니다.', '정답입니다. 이미 읽은 본문이라서 TypeError입니다.', '자동으로 다시 요청하지 않습니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="다른 출처 API를 fetch(url, { mode: 'no-cors' })로 호출해 얻은 응답에 대한 설명으로 옳은 것은?"
+  options={['type은 cors이고 JSON 본문을 읽을 수 있다', 'type은 opaque이고 status가 0이며 본문과 헤더를 읽을 수 없다', 'type은 basic이고 모든 헤더를 읽을 수 있다', 'CORS를 우회하므로 서버 설정 없이 데이터를 읽을 수 있다']}
+  correctAnswer={2}
+  explanation="no-cors로 보낸 교차 출처 요청의 응답은 불투명(opaque) 응답이라 status가 0이고 본문이 null이며 헤더가 비어 있습니다. 서비스 워커로 전달하거나 캐시에 넣는 용도로만 쓸 수 있고, 데이터를 읽으려면 서버가 CORS를 허용해야 합니다."
+  optionExplanations={['cors 응답은 CORS 허용을 통과했을 때의 유형입니다.', '정답입니다.', 'basic은 같은 출처 요청의 응답입니다.', 'no-cors는 CORS 검사를 우회해 읽게 해 주는 옵션이 아니라 읽기를 막는 옵션입니다.']}
+/>
+
+## 참고 자료
+
+- [Fetch Standard](https://fetch.spec.whatwg.org/)
+- [MDN — fetch()](https://developer.mozilla.org/en-US/docs/Web/API/Window/fetch)
+- [MDN — Using the Fetch API](https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API/Using_Fetch)
+- [MDN — RequestInit](https://developer.mozilla.org/en-US/docs/Web/API/RequestInit)
+- [MDN — Request cache](https://developer.mozilla.org/en-US/docs/Web/API/Request/cache)
+- [MDN — Response](https://developer.mozilla.org/en-US/docs/Web/API/Response)
+- [MDN — Response.type](https://developer.mozilla.org/en-US/docs/Web/API/Response/type)
+- [MDN — Response.bytes()](https://developer.mozilla.org/en-US/docs/Web/API/Response/bytes)
+- [MDN — Response.json()](https://developer.mozilla.org/en-US/docs/Web/API/Response/json_static)
+- [MDN — Headers](https://developer.mozilla.org/en-US/docs/Web/API/Headers)
+- [MDN — Forbidden request header](https://developer.mozilla.org/en-US/docs/Glossary/Forbidden_request_header)
+- [MDN — CORS-safelisted request header](https://developer.mozilla.org/en-US/docs/Glossary/CORS-safelisted_request_header)
+- [MDN — HTTP 메시지](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Messages)
+- [MDN — HTTP 요청 메서드](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Methods)
+- [MDN — HTTP 상태 코드](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status)
+- [MDN — Using XMLHttpRequest](https://developer.mozilla.org/en-US/docs/Web/API/XMLHttpRequest_API/Using_XMLHttpRequest)
+- [MDN — Navigator.sendBeacon()](https://developer.mozilla.org/en-US/docs/Web/API/Navigator/sendBeacon)
+- [MDN — fetchLater()](https://developer.mozilla.org/en-US/docs/Web/API/Window/fetchLater)
+- [web-features 데이터 패키지](https://cdn.jsdelivr.net/npm/web-features/data.json)

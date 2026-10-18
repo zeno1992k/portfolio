@@ -1,0 +1,767 @@
+---
+title: '38. Set·Map·Weak 컬렉션'
+description: 'Set·Map의 동작 규칙, ES2025 집합 메서드, Map.groupBy, ES2026 getOrInsert, WeakMap·WeakSet·WeakRef·FinalizationRegistry를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** Set·Map·WeakMap·WeakSet이 값을 비교하고 보관하는 규칙을 설명하고, 상황에 맞는 컬렉션을 고르며, 약한 참조(WeakRef·FinalizationRegistry)를 써도 되는 경우와 안 되는 경우를 구분할 수 있습니다.
+</Callout>
+
+## SameValueZero와 키 비교
+
+Set의 값과 Map의 키가 같은지 판단하는 알고리즘은 SameValueZero입니다. `===`와 결과가 같되 `NaN`을 `NaN`과 같다고 봅니다.
+
+| 알고리즘 | NaN과 NaN | +0과 -0 | 쓰이는 곳 |
+|----------|-----------|---------|-----------|
+| `===` (엄격 동등) | 다름 | 같음 | 일반 비교, `indexOf` |
+| SameValue | 같음 | 다름 | `Object.is` |
+| SameValueZero | 같음 | 같음 | Set, Map, `includes` |
+
+```js
+const nums = [NaN]
+nums.includes(NaN)         // true
+nums.indexOf(NaN)          // -1
+new Set([NaN, NaN]).size   // 1
+new Set([1, '1']).size     // 2
+new Set([{}, {}]).size     // 2
+```
+
+- 원시 값은 값으로, 객체는 참조로 비교합니다. 내용이 같은 객체 리터럴 두 개는 다른 값입니다(자세히는 10편).
+- 타입 변환이 없으므로 숫자 `1`과 문자열 `'1'`은 다른 값입니다.
+- Set의 값과 Map의 **키**로 들어온 `-0`은 `+0`으로 바뀌어 저장됩니다. Map의 **값**은 바뀌지 않습니다.
+
+```js
+const set = new Set([-0])
+Object.is([...set][0], -0)                // false (+0 저장)
+Object.is(new Map([[1, -0]]).get(1), -0)  // true (값은 그대로)
+```
+
+## Set의 개념과 생성
+
+Set은 중복 없는 값을 삽입 순서대로 보관하는 컬렉션입니다(ES2015). 같은 값(SameValueZero)은 하나만 저장되고, 인덱스와 `length`는 없습니다.
+
+```js
+new Set()              // Set {}
+new Set([1, 2, 2, 3])  // Set {1, 2, 3}
+new Set('hello')       // Set {'h', 'e', 'l', 'o'}
+new Set(null)          // Set {}
+```
+
+주석의 `Set {…}`는 콘솔 출력 `Set(3) {1, 2, 3}`을 줄인 표기이며 리터럴 문법이 아닙니다.
+
+- `new`가 필수입니다. `Set()`처럼 호출하면 `TypeError`입니다.
+- 인수는 이터러블(자세히는 35편)이거나 `null`·`undefined`입니다. 이터러블이 아니면 `TypeError`입니다.
+- 이터러블의 요소가 순서대로 추가되고, 중복은 처음 나온 값만 남습니다.
+- `new Set(other)`는 얕은 복사입니다.
+- 값의 타입에는 제한이 없습니다. 객체, 함수, `undefined`, `NaN`도 넣을 수 있습니다.
+
+흔한 실수는 값을 여러 인수로 넘기는 것입니다.
+
+```js
+new Set(1, 2, 3)    // ❌ TypeError (첫 인수 1은 이터러블이 아님)
+new Set([1, 2, 3])  // ✅ Set {1, 2, 3}
+```
+
+## Set 메서드
+
+| 메서드 | 반환 | 동작 |
+|--------|------|------|
+| `add(value)` | Set 자신 | 값을 추가한다. 이미 있으면 아무 변화가 없다 |
+| `has(value)` | boolean | 값이 있는지 확인한다 |
+| `delete(value)` | boolean | 삭제했으면 `true`, 없던 값이면 `false` |
+| `clear()` | `undefined` | 모든 값을 삭제한다 |
+| `size` | 숫자 | 값의 개수. 읽기 전용 접근자 |
+
+```js
+const tags = new Set()
+tags.add('js').add('css').add('js')  // add가 Set을 반환하므로 체이닝
+tags.size                            // 2
+tags.has('css')                      // true
+tags.delete('css')                   // true
+tags.delete('css')                   // false
+```
+
+- 이미 있는 값을 `add`해도 순서는 바뀌지 않습니다.
+- `size`는 프로토타입의 접근자라 대입할 수 없습니다. 엄격 모드에서 `set.size = 3`은 `TypeError`이고, 비엄격 모드에서는 무시됩니다.
+- 값을 꺼내는 `get`이 없습니다. Set에서 값은 곧 키이므로 `has`로 존재만 확인합니다.
+- 명세는 해시 테이블, 또는 원소 수에 비해 평균 접근 시간이 선형보다 빠른 구조로 구현하라고 요구합니다. 그래서 `has`는 배열의 `includes`(선형 탐색)보다 대량 조회에 유리합니다.
+
+흔한 실수는 내용이 같은 객체로 조회하는 것입니다.
+
+```js
+const set = new Set()
+set.add({ id: 1 })
+set.has({ id: 1 })  // false (다른 객체)
+```
+
+## Set 순회
+
+Set은 이터러블이라 `for...of`, 스프레드, `Array.from`으로 값을 삽입 순서대로 순회합니다.
+
+| 방법 | 순회 내용 |
+|------|-----------|
+| `for...of`, `[...set]`, `Array.from(set)` | 값 |
+| `values()` | 값의 이터레이터 |
+| `keys()` | `values()`와 같은 함수 |
+| `entries()` | `[값, 값]` 쌍의 이터레이터 |
+| `forEach(cb)` | `cb(값, 값, set)` 호출 |
+
+```js
+const set = new Set(['a', 'b'])
+for (const v of set) console.log(v)  // a, b
+set.forEach((v, k, s) => {})         // v === k, s === set
+const pairs = [...set.entries()]  // [['a','a'], ['b','b']]
+```
+
+- `keys()`와 `entries()`가 있는 이유는 Set이 "키와 값이 같은 Map"처럼 보이도록 설계됐기 때문입니다. `Set.prototype.keys === Set.prototype.values`이고 `Set.prototype[Symbol.iterator]`도 같은 함수입니다.
+- `forEach` 콜백의 두 번째 인수가 키가 아니라 값인 것도 Map과 시그니처를 맞춘 결과입니다.
+- Set에는 `map`·`filter`가 없습니다. `[...set].map(...)`으로 배열로 바꿔 쓰거나 ES2025 이터레이터 헬퍼(`set.values().map(...)`)를 씁니다(자세히는 35편).
+- `set[0]` 같은 인덱스 접근은 없습니다. 첫 값은 `set.values().next().value`입니다.
+
+순회 중 수정은 다음 규칙을 따릅니다.
+
+- 아직 방문하지 않은 값을 삭제하면 방문하지 않습니다.
+- 순회 중 추가한 값은 나중에 방문합니다.
+- 현재 값을 삭제했다가 다시 추가하면 맨 뒤에 붙어 다시 방문하므로 무한 루프가 될 수 있습니다.
+
+```js
+const s = new Set([1, 2, 3])
+for (const v of s) {
+  if (v === 1) { s.delete(2); s.add(4) }
+  console.log(v)  // 1, 3, 4
+}
+```
+
+수정하면서 순회해야 하면 복사본을 순회합니다: `for (const v of [...s])`.
+
+## 중복 제거
+
+배열의 중복은 Set에 넣었다가 다시 배열로 펼쳐 제거합니다. 처음 나온 순서가 유지됩니다.
+
+```js
+const arr = [3, 1, 3, 2, 1]
+const unique = [...new Set(arr)]       // [3, 1, 2]
+const same = Array.from(new Set(arr))  // [3, 1, 2]
+const word = [...new Set('hello')].join('')  // 'helo'
+```
+
+- SameValueZero 규칙이 그대로 적용됩니다. `[0, -0, NaN, NaN]`은 `[0, NaN]`이 되고, `'a'`와 `'A'`는 다른 값입니다.
+- 문자열은 코드 포인트 단위로 쪼개집니다. `'😀😀a'`는 3글자이고 중복 제거 후 2개입니다.
+- 객체는 참조로 비교하므로 내용이 같아도 제거되지 않습니다.
+
+객체 배열을 특정 키 기준으로 중복 제거할 때는 두 가지 방식이 있습니다.
+
+마지막 값을 남기려면 Map을 거칩니다. 키는 유일하므로 뒤의 항목이 앞을 덮어씁니다.
+
+```js
+const users = [
+  { id: 1, n: 'a' }, { id: 2, n: 'b' }, { id: 1, n: 'c' },
+]
+const byId = new Map(users.map(u => [u.id, u]))
+const last = [...byId.values()]
+// [{ id: 1, n: 'c' }, { id: 2, n: 'b' }]
+```
+
+처음 값을 남기려면 본 키를 Set에 기록하며 `filter`합니다.
+
+```js
+const seen = new Set()
+const first = users.filter(u => {
+  if (seen.has(u.id)) return false
+  seen.add(u.id)
+  return true
+})  // [{ id: 1, n: 'a' }, { id: 2, n: 'b' }]
+```
+
+- Map 방식에서 덮어쓴 항목의 위치는 처음 나온 위치에 남습니다. 값만 마지막 값으로 바뀝니다.
+- `filter`와 `indexOf`를 조합한 방식은 항목마다 배열을 훑으므로 원소 수의 제곱에 비례해 느려집니다. Set은 조회가 평균적으로 빨라 원소 수에 비례합니다.
+
+## 집합 연산과 Set 메서드 7종
+
+ES2025가 Set.prototype에 집합 연산 메서드 7종을 추가했습니다(Baseline 2024). 이전에는 스프레드와 `filter`로 직접 만들었습니다. 모든 메서드가 원본을 바꾸지 않습니다.
+
+### 새 Set을 반환하는 4종
+
+| 메서드 | 결과 | 수학 표기 |
+|--------|------|-----------|
+| `a.union(b)` | a 또는 b에 있는 값 | 합집합 |
+| `a.intersection(b)` | 둘 다에 있는 값 | 교집합 |
+| `a.difference(b)` | a에만 있는 값 | 차집합 |
+| `a.symmetricDifference(b)` | 한쪽에만 있는 값 | 대칭차집합 |
+
+```js
+const a = new Set([1, 2, 3])
+const b = new Set([3, 4])
+a.union(b)                // Set {1, 2, 3, 4}
+a.intersection(b)         // Set {3}
+a.difference(b)           // Set {1, 2}
+b.difference(a)           // Set {4}
+a.symmetricDifference(b)  // Set {1, 2, 4}
+```
+
+`difference`는 순서가 중요합니다. `a.difference(b)`와 `b.difference(a)`는 다른 결과입니다.
+
+### boolean을 반환하는 3종
+
+| 메서드 | `true`가 되는 조건 | 수학 표기 |
+|--------|--------------------|-----------|
+| `a.isSubsetOf(b)` | a의 모든 값이 b에 있다 | a는 b의 부분집합 |
+| `a.isSupersetOf(b)` | b의 모든 값이 a에 있다 | a는 b의 상위집합 |
+| `a.isDisjointFrom(b)` | 공통 값이 하나도 없다 | 서로소 |
+
+```js
+const a = new Set([1, 2, 3])
+a.isSubsetOf(new Set([1, 2, 3, 4]))  // true
+a.isSupersetOf(new Set([1, 2]))      // true
+a.isDisjointFrom(new Set([7, 8]))    // true
+new Set().isSubsetOf(a)              // true (빈 Set)
+a.isSubsetOf(a)                      // true (자기 자신)
+```
+
+- 빈 Set은 모든 Set의 부분집합이면서 모든 Set과 서로소입니다.
+- 두 Set이 같은지 비교하는 메서드는 없습니다. `a.size === b.size && a.isSubsetOf(b)`로 확인합니다.
+
+### 결과 순서
+
+| 메서드 | 결과의 순서 |
+|--------|-------------|
+| `union` | this의 값, 이어서 other에만 있는 값 |
+| `intersection` | 더 작은 쪽의 순서. 크기가 같으면 this |
+| `difference` | this의 순서 |
+| `symmetricDifference` | this에만 있는 값(this 순서), 이어서 other에만 있는 값(other 순서) |
+
+```js
+const x = new Set([1, 2, 3])
+const y = new Set([3, 2, 1])
+x.intersection(y)  // Set {1, 2, 3} (크기가 같으면 x 순서)
+y.intersection(x)  // Set {3, 2, 1}
+const big = new Set([1, 2, 3, 4])
+big.intersection(new Set([4, 2]))  // Set {4, 2} (작은 쪽 순서)
+```
+
+`intersection`은 두 Set 중 작은 쪽만 훑도록 최적화되어 있어서 순서가 이렇게 정해집니다.
+
+### 인수: set-like 객체
+
+인수는 Set일 필요가 없고 **set-like** 객체면 됩니다. set-like 객체는 세 가지를 갖춘 객체입니다.
+
+- `size`: 숫자로 바꿨을 때 `NaN`이 아닌 값
+- `has(value)`: 포함 여부를 알려 주는 함수
+- `keys()`: 값을 내놓는 이터레이터를 반환하는 함수
+
+| 조건 | 결과 |
+|------|------|
+| `size`가 없거나 숫자로 바꾼 값이 `NaN` | `TypeError` |
+| `size`가 음수 | `RangeError` |
+| `has`나 `keys`가 함수가 아님 | `TypeError` |
+
+```js
+const a = new Set([1, 2, 3])
+a.union([4, 5])           // ❌ TypeError (배열은 set-like가 아님)
+a.union(new Set([4, 5]))  // ✅ Set {1, 2, 3, 4, 5}
+a.union(new Map([[10, 'x']]))  // Set {1, 2, 3, 10} (Map 키)
+```
+
+- Set과 Map은 `size`·`has`·`keys`를 모두 갖추어 인수로 쓸 수 있습니다. Map을 넘기면 키가 값으로 쓰입니다.
+- 배열에는 `size`와 `has`가 없으므로 `new Set(arr)`로 감싸서 넘깁니다.
+- 직접 만든 객체도 세 가지만 갖추면 됩니다. `{ size: 2, has: v => v === 1 || v === 9, keys: () => [1, 9].values() }`는 `a.intersection(...)`에서 `Set {1}`을 만듭니다.
+- 메서드를 호출하는 쪽(this)은 진짜 Set이어야 합니다.
+- 반환값은 항상 일반 Set입니다. Set을 상속한 클래스에서 호출해도 그 클래스의 인스턴스가 아닙니다.
+
+### ES2025 이전 환경
+
+```js
+const union = new Set([...a, ...b])
+const inter = new Set([...a].filter(v => b.has(v)))
+const diff = new Set([...a].filter(v => !b.has(v)))
+```
+
+`b`가 Set이라는 전제입니다. 새 메서드는 구형 환경에서 폴리필(core-js 등)로 채울 수 있습니다.
+
+## Map의 개념과 생성
+
+Map은 키와 값의 쌍을 삽입 순서대로 보관하는 컬렉션입니다(ES2015). 키는 어떤 값이든 쓸 수 있고, SameValueZero로 유일합니다.
+
+```js
+new Map()                      // Map {}
+new Map([['a', 1], ['b', 2]])  // Map {'a' => 1, 'b' => 2}
+new Map(Object.entries({x: 1}))  // Map {'x' => 1}
+new Map([[1, 'a'], [1, 'b']])  // Map {1 => 'b'}
+```
+
+- `new`가 필수입니다. `Map()`은 `TypeError`입니다.
+- 인수는 `[키, 값]` 쌍을 내놓는 이터러블이거나 `null`·`undefined`입니다.
+- 항목이 객체가 아니면 `TypeError`입니다. `new Map([1, 2])`가 해당합니다.
+- 일반 객체를 그대로 넘기면 이터러블이 아니므로 `TypeError`입니다. `Object.entries(obj)`로 바꿔서 넘깁니다.
+- 쌍의 길이가 1이면 값은 `undefined`입니다. `new Map([[1]])`은 키 `1`이 있고 값은 `undefined`입니다.
+- 같은 키가 반복되면 뒤의 값이 앞의 값을 덮어쓰고, 위치는 처음 나온 곳에 남습니다.
+- `new Map(other)`는 얕은 복사입니다.
+
+## Map 메서드
+
+| 메서드 | 반환 | 동작 |
+|--------|------|------|
+| `set(key, value)` | Map 자신 | 키가 있으면 값을 갱신하고, 없으면 끝에 추가한다 |
+| `get(key)` | 값 또는 `undefined` | 키에 대응하는 값을 반환한다 |
+| `has(key)` | boolean | 키가 있는지 확인한다 |
+| `delete(key)` | boolean | 삭제했으면 `true` |
+| `clear()` | `undefined` | 모든 항목을 삭제한다 |
+| `size` | 숫자 | 항목 수. 읽기 전용 접근자 |
+
+```js
+const m = new Map()
+m.set('a', 1).set({}, 2)  // set이 Map을 반환하므로 체이닝
+m.get('a')                // 1
+m.get('zzz')              // undefined
+m.has('a')                // true
+m.delete('a')             // true
+m.size                    // 1
+```
+
+- 이미 있는 키에 `set`하면 값만 바뀌고 순서는 그대로입니다.
+- 객체 키는 참조로 비교하므로 키로 쓴 객체의 참조를 보관해 둬야 값을 꺼낼 수 있습니다.
+- 키는 SameValueZero로 비교하므로 `NaN`도 키로 쓸 수 있습니다.
+
+흔한 실수는 세 가지입니다.
+
+```js
+const m = new Map()
+m['a'] = 1            // ❌ 항목이 아니라 일반 프로퍼티
+m.size                // 0
+m.has('a')            // false
+
+m.set({ id: 1 }, 'x')
+m.get({ id: 1 })      // ❌ undefined (다른 객체)
+
+m.set('k', undefined)
+m.get('k')            // undefined (값이 undefined인 항목)
+m.has('k')            // ✅ true (존재 여부는 has로 확인)
+```
+
+## Map 순회
+
+Map은 이터러블이며 기본 순회는 `[키, 값]` 쌍입니다.
+
+| 방법 | 순회 내용 |
+|------|-----------|
+| `for...of`, `[...map]`, `entries()` | `[키, 값]` 쌍 |
+| `keys()` | 키의 이터레이터 |
+| `values()` | 값의 이터레이터 |
+| `forEach(cb)` | `cb(값, 키, map)` 호출 |
+
+```js
+const m = new Map([['a', 1], ['b', 2]])
+for (const [k, v] of m) console.log(k, v)  // a 1, b 2
+const keys = [...m.keys()]                 // ['a', 'b']
+const vals = [...m.values()]               // [1, 2]
+m.forEach((v, k) => {})                    // 값이 먼저, 키가 두 번째
+```
+
+- `Map.prototype[Symbol.iterator]`는 `entries`와 같은 함수입니다.
+- `for (const [k, v] of m)`의 대괄호는 쌍을 변수 둘로 나누는 구조 분해입니다(자세히는 37편).
+- `keys()`·`values()`·`entries()`는 배열이 아니라 이터레이터를 반환합니다. 배열이 필요하면 `[...m.keys()]`로 바꿉니다.
+- 순서는 삽입 순서입니다. 기존 키를 갱신하면 위치가 유지되고, 삭제 후 다시 추가하면 맨 뒤로 갑니다.
+- 순회 중 수정 규칙은 Set과 같습니다. 방문 전 항목 삭제는 건너뛰고, 추가한 항목은 방문합니다.
+- Map에는 `sort`가 없습니다. 쌍 배열을 정렬해 새 Map을 만듭니다.
+
+```js
+const m = new Map([['b', 2], ['a', 1], ['c', 0]])
+new Map([...m].sort((p, q) => p[1] - q[1]))
+// Map {'c' => 0, 'a' => 1, 'b' => 2}  (값 기준 정렬)
+```
+
+```js
+const m = new Map([['a', 1]])
+m.set('b', 2).set('a', 9)
+// 순서 유지   Map {'a' => 9, 'b' => 2}
+m.delete('a')
+m.set('a', 3)
+// 맨 뒤로     Map {'b' => 2, 'a' => 3}
+```
+
+## Map.groupBy
+
+`Map.groupBy(items, callback)`는 이터러블의 요소를 콜백이 반환한 키별로 묶어 Map으로 반환합니다(ES2024). 각 값은 해당 키에 속한 요소의 배열입니다. 콜백은 `(요소, 인덱스)`를 받습니다.
+
+```js
+const nums = [1, 2, 3, 4, 5]
+const g = Map.groupBy(nums, n => (n % 2 ? 'odd' : 'even'))
+// Map {'odd' => [1, 3, 5], 'even' => [2, 4]}
+g.get('odd')  // [1, 3, 5]
+```
+
+- 키는 처음 나온 순서로, 각 그룹 안의 요소는 원래 순서로 정렬됩니다.
+- 첫 인수는 이터러블이면 되므로 Set도 넘길 수 있습니다.
+- `Object.groupBy`(ES2024)는 같은 일을 하는 객체 버전입니다.
+
+| | `Object.groupBy` | `Map.groupBy` |
+|---|------------------|---------------|
+| 반환 | 프로토타입이 없는 객체 | Map |
+| 키 | 문자열·심벌로 변환 | 변환 없이 그대로 |
+
+```js
+const f = n => (n < 2 ? 1 : '1')
+Map.groupBy([1, 2, 3], f)
+// Map {1 => [1], '1' => [2, 3]}
+Object.groupBy([1, 2, 3], f)
+// { '1': [1, 2, 3] }
+```
+
+객체나 불리언처럼 문자열로 바꾸면 의미가 사라지는 키로 묶을 때는 `Map.groupBy`를 씁니다. 객체 키로 묶은 결과를 꺼내려면 키로 쓴 객체의 참조를 가지고 있어야 합니다. MDN 기준으로 2024년 3월부터 주요 브라우저가 지원합니다.
+
+## getOrInsert와 getOrInsertComputed (ES2026)
+
+`getOrInsert`와 `getOrInsertComputed`는 키가 있으면 그 값을 반환하고, 없으면 값을 삽입한 뒤 그 값을 반환하는 메서드입니다. Map과 WeakMap에 모두 추가됐습니다. 제안 이름은 upsert이고 2026년 1월에 4단계가 되어 ES2026에 들어갔습니다.
+
+기존에는 존재 확인, 삽입, 조회를 따로 썼습니다.
+
+```js
+// 기존
+if (!groups.has(key)) groups.set(key, [])
+groups.get(key).push(item)
+
+// ES2026
+groups.getOrInsert(key, []).push(item)
+```
+
+| 메서드 | 두 번째 인수 | 값 계산 시점 |
+|--------|--------------|--------------|
+| `getOrInsert(key, value)` | 삽입할 값 | 호출 전에 항상 계산됨 |
+| `getOrInsertComputed(key, callback)` | `callback(key)` | 키가 없을 때만 호출됨 |
+
+```js
+function load(id) { console.log('load', id); return { id } }
+const cache = new Map()
+cache.getOrInsertComputed(1, load)  // 'load 1' 출력, 새 객체
+cache.getOrInsertComputed(1, load)  // 출력 없음, 같은 객체
+cache.getOrInsert(1, load(1))       // 키 1이 있어도 'load 1' 출력
+```
+
+- `getOrInsert`의 두 번째 인수는 일반 인수이므로 키가 이미 있어도 계산됩니다. 계산이 비싸거나 부작용이 있으면 `getOrInsertComputed`를 씁니다.
+- 콜백이 받는 인수는 키 하나뿐입니다. 콜백이 함수가 아니면 `TypeError`입니다.
+- 콜백 안에서 같은 키를 직접 `set`해도 콜백이 반환한 값이 최종 값이 됩니다. 명세는 콜백이 끝난 뒤 같은 키의 항목을 찾아 값을 덮어씁니다.
+- 키는 `set`과 같은 규칙으로 처리됩니다. `-0`은 `+0`으로 바뀝니다.
+- MDN 기준으로 2026년 2월부터 최신 브라우저가 지원합니다. Node.js 24 계열에서는 아직 정의되어 있지 않으므로 지원 표를 확인하고, 필요하면 core-js 같은 폴리필을 씁니다.
+
+## Map과 Object 비교
+
+| 항목 | Map | Object |
+|------|-----|--------|
+| 키 타입 | 모든 값 | 문자열·심벌. 나머지는 문자열로 변환 |
+| 키 비교 | SameValueZero | 문자열 비교 |
+| 순서 | 삽입 순서 | 정수 인덱스 형태의 키가 오름차순으로 먼저, 나머지는 삽입 순서 |
+| 크기 | `map.size` | `Object.keys(obj).length` |
+| 순회 | 바로 `for...of` | `Object.entries()` 등을 거쳐야 함 |
+| 기본 키 | 없음 | 프로토타입에서 상속(`toString` 등) |
+| JSON | `JSON.stringify` 결과가 `{}` | 그대로 변환됨 |
+| 접근 | `get`·`set` 메서드 | 점·대괄호 표기 |
+
+객체의 키 변환과 순서 규칙이 만드는 차이는 다음과 같습니다.
+
+```js
+const o = {}
+o[1] = 'a'
+o['1']                    // 'a' (숫자 1이 문자열 '1'로 바뀜)
+o[{}] = 'b'
+Object.keys(o)            // ['1', '[object Object]']
+const k = Object.keys({ b: 1, 2: 1, a: 1, 1: 1 })
+// ['1', '2', 'b', 'a'] (정수 형태 키가 먼저)
+```
+
+상속된 키와 `__proto__`도 함정입니다. 사용자 입력처럼 통제할 수 없는 문자열을 키로 쓰면 문제가 됩니다.
+
+```js
+const counts = {}
+'toString' in counts      // true (상속된 프로퍼티)
+counts['__proto__'] = 1   // 프로토타입 설정 구문이라 무시됨
+Object.keys(counts)       // []
+
+const m = new Map()
+m.set('__proto__', 1)
+m.get('__proto__')        // 1
+```
+
+객체를 쓰면서 막으려면 `Object.create(null)`이나 `Object.hasOwn`(자세히는 18편)을 씁니다.
+
+선택 기준은 다음과 같습니다.
+
+- 키 이름이 코드에 고정된 레코드(`{ name, age }`)는 객체를 씁니다. 점 표기와 JSON 변환이 그대로 됩니다.
+- 실행 중에 키가 늘고 줄어드는 사전, 키가 객체나 숫자인 경우, 삽입 순서가 중요한 경우, 외부 입력이 키인 경우는 Map을 씁니다.
+- MDN은 키를 자주 추가하고 삭제하는 경우 Map이 유리하다고 설명합니다. 실제 차이는 엔진과 데이터에 따라 다르므로 성능이 문제일 때만 측정해서 고릅니다.
+
+## Map·Object·배열 상호 변환
+
+| 변환 | 코드 | 주의 |
+|------|------|------|
+| 객체 → Map | `new Map(Object.entries(obj))` | 열거 가능한 문자열 키만 포함 |
+| Map → 객체 | `Object.fromEntries(map)` | 키가 문자열로 바뀌어 충돌·유실 |
+| Map → 쌍 배열 | `[...map]`, `Array.from(map)` | `[[키, 값], ...]` |
+| Map → 키·값 배열 | `[...map.keys()]`, `[...map.values()]` | |
+| 쌍 배열 → Map | `new Map(pairs)` | 중복 키는 뒤가 이김 |
+| 배열 → 키 기준 Map | `new Map(arr.map(o => [o.id, o]))` | 중복 키는 뒤가 이김 |
+| Set ↔ 배열 | `new Set(arr)`, `[...set]` | |
+| Map → Set | `new Set(map.keys())`, `new Set(map.values())` | |
+| Set → Map | `new Map([...set].map(v => [v, f(v)]))` | |
+
+```js
+const m = new Map(Object.entries({ x: 1, y: 2 }))
+// Map {'x' => 1, 'y' => 2}
+Object.fromEntries(m)  // { x: 1, y: 2 }
+Array.from(m, ([k, v]) => k + v)  // ['x1', 'y2']
+```
+
+- 객체 → Map에서 심벌 키와 열거 불가 프로퍼티는 `Object.entries`가 건너뛰므로 빠집니다.
+- Map → 객체에서 키가 문자열이나 심벌이 아니면 문자열로 바뀝니다. 서로 다른 키가 같은 문자열이 되면 하나로 합쳐집니다.
+
+```js
+const m = new Map([[1, 'a'], [{}, 'b'], [[1], 'c']])
+Object.fromEntries(m)
+// { '1': 'c', '[object Object]': 'b' }  (1과 [1]이 모두 '1')
+```
+
+Map과 Set은 `JSON.stringify`가 내용을 직렬화하지 않고 `{}`로 만듭니다(자세히는 39편). 쌍 배열로 바꿔 저장하고 `new Map`으로 복원합니다.
+
+```js
+const m = new Map([['a', 1]])
+JSON.stringify(m)                    // '{}'
+const json = JSON.stringify([...m])  // '[["a",1]]'
+new Map(JSON.parse(json))            // Map {'a' => 1}
+```
+
+## WeakMap
+
+WeakMap은 키를 약하게 참조하는 Map입니다(ES2015). 약한 참조는 그 참조만 남은 객체의 가비지 컬렉션(자세히는 49편)을 막지 않는 참조입니다. 키 객체가 다른 곳에서 더 이상 쓰이지 않으면 항목이 회수 대상이 됩니다.
+
+| 항목 | Map | WeakMap |
+|------|-----|---------|
+| 키 | 모든 값 | 객체, 등록되지 않은 심벌 |
+| 키 참조 | 강한 참조 (항목이 있는 동안 키가 회수되지 않음) | 약한 참조 |
+| `size`·순회·`clear` | 있음 | 없음 |
+| 메서드 | `set` `get` `has` `delete` 등 | `set` `get` `has` `delete`, ES2026의 `getOrInsert` 2종 |
+
+```js
+const meta = new WeakMap()
+let user = { name: 'Kim' }
+meta.set(user, { visits: 1 })
+meta.get(user)  // { visits: 1 }
+user = null     // 이 시점부터 { name: 'Kim' }과 항목이 회수 대상
+```
+
+- 키로 쓸 수 있는 것은 객체와 `Symbol.for`로 등록하지 않은 심벌(ES2023)입니다. 문자열·숫자 같은 원시 값과 등록된 심벌을 `set`하면 `TypeError`입니다. `get`·`has`·`delete`는 에러 없이 `undefined`·`false`를 반환합니다(자세히는 34편).
+- ES2026의 `getOrInsert`·`getOrInsertComputed`도 키 규칙이 같아서, 키가 원시 값이면 `TypeError`입니다.
+- 항목이 사라지는 시점은 엔진이 정합니다. 회수가 일어났는지 코드에서 알 방법이 없도록 `size`와 순회를 제공하지 않습니다. 키 목록이 가비지 컬렉션 상태에 따라 달라지면 실행 결과가 비결정적이 되기 때문입니다.
+- 값은 키가 살아 있는 동안만 유지됩니다(ephemeron 방식). 값이 키를 참조해도 키 회수를 막지 않습니다.
+- 약하게 참조되는 것은 키뿐입니다. 키를 다른 곳(전역 배열, 클로저, 일반 Map)이 쥐고 있으면 회수되지 않습니다.
+- 생성자는 `[키, 값]` 쌍의 이터러블을 받습니다.
+
+흔한 실수는 문자열을 키로 쓰는 것과 Map처럼 항목 수·목록을 기대하는 것입니다. 이런 용도에는 Map을 씁니다.
+
+```js
+const wm = new WeakMap()
+wm.set('id', 1)   // ❌ TypeError
+wm.get('id')      // undefined (get은 에러 없음)
+wm.size           // undefined (프로퍼티가 없음)
+```
+
+## WeakSet
+
+WeakSet은 값을 약하게 참조하는 Set입니다(ES2015). 값은 객체와 등록되지 않은 심벌만 가능합니다.
+
+- 메서드는 `add`, `has`, `delete` 세 개뿐입니다. `size`, 순회, `clear`가 없습니다.
+- 원시 값을 `add`하면 `TypeError`이고, `has`·`delete`는 `false`를 반환합니다.
+- 용도는 객체에 "표시"를 남기는 것입니다. 객체를 수정하지 않고, 표시가 객체의 수명을 늘리지 않습니다.
+
+순환 참조가 있는 그래프를 한 번씩만 방문하는 코드가 대표 예입니다.
+
+```js
+const visited = new WeakSet()
+function walk(node) {
+  if (visited.has(node)) return
+  visited.add(node)
+  for (const child of node.children) walk(child)
+}
+// n1.children에 n2, n2.children에 n1이 있어도 무한 재귀 없음
+```
+
+## WeakMap 활용 패턴
+
+### 객체 바깥에 데이터 붙이기
+
+객체에 프로퍼티를 추가하지 않고 부가 정보를 연결합니다. 프로퍼티 이름이 충돌하지 않고, `Object.keys`에 나타나지 않으며, 동결된 객체에도 붙일 수 있습니다.
+
+```js
+const meta = new WeakMap()
+const frozen = Object.freeze({ id: 1 })
+meta.set(frozen, { seen: true })
+meta.get(frozen)  // { seen: true }
+```
+
+라이브러리나 브라우저가 만든 객체처럼 직접 고칠 수 없는 객체에 상태를 연결할 때 씁니다. 객체가 사라지면 연결된 정보도 따라 사라집니다.
+
+### 객체 인수 캐시
+
+객체를 인수로 받는 함수의 결과를 캐시합니다. 인수 객체가 쓸모없어지면 캐시 항목도 회수 대상이 됩니다.
+
+```js
+const cache = new WeakMap()
+function area(shape) {
+  if (cache.has(shape)) return cache.get(shape)
+  const result = shape.w * shape.h
+  cache.set(shape, result)
+  return result
+}
+```
+
+ES2026의 `getOrInsertComputed`로 줄일 수 있습니다. 같은 `area` 함수는 `return cache.getOrInsertComputed(shape, s => s.w * s.h)` 한 줄이 됩니다.
+
+문자열이나 숫자 같은 원시 값이 인수라면 WeakMap을 쓸 수 없으므로 일반 Map에 캐시하고 크기를 직접 관리합니다.
+
+### 비공개 데이터
+
+클래스의 `#private` 필드(ES2022)가 나오기 전에는 인스턴스별 비공개 값을 모듈 안의 WeakMap에 두었습니다.
+
+```js
+const secret = new WeakMap()
+class Account {
+  constructor(pw) { secret.set(this, pw) }
+  check(pw) { return secret.get(this) === pw }
+}
+const acc = new Account('1234')
+acc.check('1234')  // true
+Object.keys(acc)   // [] (비밀번호가 인스턴스에 없음)
+```
+
+새 코드는 `#private`을 씁니다(자세히는 24편). 이 패턴은 기존 코드를 읽을 때와, 클래스 바깥에서 객체에 비공개 정보를 붙일 때 필요합니다.
+
+### 쓰지 않는 경우
+
+- 키를 나열하거나 개수를 세야 할 때: Map을 씁니다.
+- 키가 문자열·숫자 같은 원시 값일 때: WeakMap은 키로 받지 않습니다.
+- 값을 장기 보관해야 할 때: 키 객체가 사라지면 항목도 사라질 수 있습니다.
+
+## WeakRef
+
+WeakRef는 객체를 약하게 가리키는 참조 객체입니다(ES2021). `new WeakRef(target)`으로 만들고 `ref.deref()`로 대상을 꺼냅니다. 대상이 회수됐으면 `deref()`는 `undefined`를 반환합니다.
+
+```js
+let big = { data: new Array(1e6) }
+const ref = new WeakRef(big)
+ref.deref() === big  // true (big이 살아 있는 동안)
+big = null
+// 이후 어느 시점부터 ref.deref()는 undefined일 수 있다
+```
+
+- 대상은 객체나 등록되지 않은 심벌입니다. 원시 값은 `TypeError`입니다.
+- WeakRef를 만든 직후, 또는 `deref()`가 객체를 반환한 직후에는 현재 작업(job)이 끝날 때까지 그 객체가 회수되지 않습니다. 같은 동기 코드 안에서는 `deref()` 결과가 일관됩니다. `await`나 타이머 이후는 다른 작업이므로 다시 `deref()`해서 확인해야 합니다(자세히는 40편).
+- `deref()` 결과는 지역 변수에 담아 쓰고 `undefined`일 때의 경로를 반드시 둡니다.
+- 회수 시점과 회수 여부는 엔진, 버전, 실행 환경에 따라 다릅니다. 회수가 일어나지 않아도 프로그램이 정확해야 합니다.
+- 명세와 MDN은 꼭 필요한 경우가 아니면 쓰지 말라고 권고합니다.
+
+적합한 용도는 다시 만들 수 있는 큰 객체의 선택적 캐시입니다.
+
+```js
+const cache = new Map()  // key → WeakRef
+function getBig(key) {
+  const hit = cache.get(key)?.deref()
+  if (hit) return hit
+  const value = createBig(key)
+  cache.set(key, new WeakRef(value))
+  return value
+}
+```
+
+대상이 회수돼도 Map에는 `WeakRef` 객체와 키가 남습니다. 이 잔여 항목은 다음 절의 FinalizationRegistry로 정리합니다.
+
+## FinalizationRegistry
+
+FinalizationRegistry는 등록한 객체가 회수된 뒤에 콜백을 호출해 달라고 요청하는 객체입니다(ES2021). 회수 뒤의 정리 작업용 안전망입니다.
+
+```js
+const registry = new FinalizationRegistry(held => {
+  console.log('collected', held)  // held는 등록 때 넘긴 값
+})
+const target = {}
+const token = {}
+registry.register(target, 'my-id', token)  // 대상, 보관 값, 토큰
+registry.unregister(token)                 // true (등록 취소됨)
+```
+
+| 항목 | 규칙 |
+|------|------|
+| `new FinalizationRegistry(cb)` | 회수 후 호출할 콜백. 함수가 아니면 `TypeError` |
+| `register(target, held, token)` | `undefined` 반환. 토큰은 생략 가능 |
+| `unregister(token)` | 취소한 등록이 하나라도 있으면 `true`, 없으면 `false` |
+
+- `target`은 객체나 등록되지 않은 심벌이어야 하고, 아니면 `TypeError`입니다.
+- `held`가 `target`과 같으면 `TypeError`입니다. 레지스트리가 `held`를 강하게 쥐므로 대상이 영영 회수되지 않기 때문입니다.
+- 레지스트리는 `target`과 토큰을 약하게만 참조합니다. 토큰은 객체나 심벌이어야 하고, `unregister`에 원시 값을 넘기면 `TypeError`입니다.
+- 콜백은 대상 회수 이후 어느 시점에 호출됩니다. 대상이 사라진 같은 작업 안에서는 호출되지 않습니다.
+- 콜백이 호출된다는 보장이 없습니다. 프로그램이 먼저 끝나거나 레지스트리 자체가 회수되면 호출되지 않을 수 있습니다.
+
+그래서 정리가 꼭 일어나야 하는 작업(파일 닫기, 잠금 해제, 데이터 저장)에는 쓰지 않습니다. 그런 작업은 명시적인 `close()`나 `try...finally`로 처리합니다. 메모리 절약처럼 일어나지 않아도 정확성이 깨지지 않는 정리에만 씁니다.
+
+앞의 WeakRef 캐시를 완성하면 다음과 같습니다.
+
+```js
+const registry = new FinalizationRegistry(key => {
+  const ref = cache.get(key)
+  if (ref && !ref.deref()) cache.delete(key)
+})
+// getBig 안의 cache.set 다음 줄에 추가:
+// registry.register(value, key)
+```
+
+`!ref.deref()`를 확인하는 이유는 콜백이 호출되기 전에 같은 키로 새 값이 이미 들어왔을 수 있기 때문입니다. 확인 없이 지우면 살아 있는 새 항목이 사라집니다.
+
+## 핵심 정리
+
+- Set과 Map은 SameValueZero로 같은 값을 판단합니다. `NaN`은 `NaN`과 같고, `-0`은 `+0`으로 바뀌어 저장됩니다.
+- Set은 중복 없는 값을, Map은 키가 어떤 값이든 가능한 쌍을 삽입 순서대로 보관합니다. 배열 중복 제거는 `[...new Set(arr)]`입니다.
+- ES2025의 `union`·`intersection`·`difference`·`symmetricDifference`·`isSubsetOf`·`isSupersetOf`·`isDisjointFrom`은 원본을 바꾸지 않고, 인수로 set-like 객체(배열 제외)를 받습니다.
+- 키가 동적이거나 객체이거나 순서가 중요하면 Map, 고정 필드의 레코드이거나 JSON이 필요하면 객체를 씁니다. `Map.groupBy`는 키 변환 없이 묶고, ES2026 `getOrInsert`·`getOrInsertComputed`는 없을 때만 삽입합니다.
+- WeakMap·WeakSet은 키·값을 약하게 참조하고 `size`·순회가 없습니다. 객체에 붙이는 메타데이터와 객체 인수 캐시에 씁니다.
+- WeakRef와 FinalizationRegistry는 회수 시점과 호출 여부가 보장되지 않으므로 정확성이 그 동작에 의존하면 안 됩니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="빈 Map m에 m.set(NaN, 1), m.set(NaN, 2), m.set(-0, 3), m.set(0, 4)를 차례로 실행했다. m.size는?"
+  options={['1', '2', '3', '4']}
+  correctAnswer={2}
+  explanation="Map은 SameValueZero로 키를 비교합니다. NaN은 NaN과 같으므로 두 번째 set이 첫 항목의 값을 2로 덮어씁니다. -0은 +0으로 바뀌어 저장되므로 0과 같은 키이고 마지막 값 4가 남습니다. 키는 NaN과 0 두 개입니다. 1은 NaN과 0을 같은 키로 본 경우, 3은 -0과 0을 구분한 경우, 4는 NaN도 구분한 경우입니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="const a = new Set([1, 2, 3])일 때 옳은 설명은?"
+  options={['a.union([3, 4])는 1, 2, 3, 4를 가진 새 Set을 반환한다', 'a.union(new Set([3, 4]))는 a에 4를 추가하고 a를 반환한다', 'a.union([3, 4])는 배열이 set-like 객체가 아니므로 TypeError를 던진다', 'a.union(new Set([3, 4]))는 Set이 이터러블이어도 TypeError를 던진다']}
+  correctAnswer={3}
+  explanation="집합 메서드의 인수는 size, has, keys를 갖춘 set-like 객체여야 합니다. 배열에는 size와 has가 없어 TypeError입니다. Set은 set-like이므로 정상 동작하고, 원본 a를 바꾸지 않고 1, 2, 3, 4를 가진 새 Set을 반환합니다. 따라서 1번은 배열을 허용한다고 착각한 것이고, 2번은 원본이 바뀐다고 착각한 것이며, 4번은 Set이 인수로 안 된다고 착각한 것입니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="WeakMap, WeakSet, WeakRef, FinalizationRegistry에 대한 설명으로 옳은 것은?"
+  options={['WeakMap은 문자열을 키로 쓸 수 있다', 'WeakSet은 size로 값의 개수를 알려 준다', 'FinalizationRegistry의 콜백은 대상이 회수되면 반드시 호출된다', 'WeakRef의 deref()는 대상이 이미 회수됐다면 undefined를 반환한다']}
+  correctAnswer={4}
+  explanation="deref()는 대상이 살아 있으면 대상을, 회수됐으면 undefined를 반환합니다. WeakMap의 키는 객체나 등록되지 않은 심벌만 가능하고 문자열은 TypeError입니다. WeakSet에는 size와 순회가 없습니다. FinalizationRegistry의 콜백은 호출 시점도 호출 여부도 보장되지 않습니다."
+/>
+
+## 참고 자료
+
+- [ECMA-262 — Keyed Collections](https://tc39.es/ecma262/#sec-keyed-collections)
+- [ECMA-262 — Managing Memory (WeakRef, FinalizationRegistry)](https://tc39.es/ecma262/#sec-managing-memory)
+- [MDN — Set](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set)
+- [MDN — Set.prototype.union()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set/union)
+- [MDN — Map](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map)
+- [MDN — Map.groupBy()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map/groupBy)
+- [MDN — Map.prototype.getOrInsert()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map/getOrInsert)
+- [MDN — WeakMap](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/WeakMap)
+- [MDN — WeakSet](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/WeakSet)
+- [MDN — WeakRef](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/WeakRef)
+- [MDN — FinalizationRegistry](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/FinalizationRegistry)
+- [MDN — Equality comparisons and sameness](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Equality_comparisons_and_sameness)
+- [TC39 proposal-set-methods](https://github.com/tc39/proposal-set-methods)
+- [TC39 proposal-upsert](https://github.com/tc39/proposal-upsert)
+- [TC39 Finished Proposals](https://github.com/tc39/proposals/blob/main/finished-proposals.md)

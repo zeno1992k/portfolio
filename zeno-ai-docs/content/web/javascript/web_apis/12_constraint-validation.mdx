@@ -1,0 +1,469 @@
+---
+title: '12. Constraint Validation'
+description: '내장 제약 속성, ValidityState, setCustomValidity, invalid 이벤트, :user-invalid, 커스텀 오류 UI, 비동기 검증, 접근성 있는 오류 표시를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 브라우저가 폼 값을 검증하는 규칙과 API를 구분하고, 네이티브 검증을 유지하거나 대체하면서 접근성 있는 오류 UI와 비동기 검증을 구성할 수 있습니다.
+</Callout>
+
+## 내장 제약 속성
+
+제약 검증(constraint validation)은 HTML 속성과 입력 타입만으로 브라우저가 값을 검사하는 기능입니다. 자바스크립트 없이 동작하고, 위반하면 해당 요소가 `:invalid`가 되며 제출이 막힙니다. 폼 요소와 `FormData` 자체는 11편에서 다룹니다.
+
+| 속성 | 적용 대상 | 위반 시 플래그 |
+|------|-----------|----------------|
+| `required` | 대부분의 입력, `select`, `textarea` | `valueMissing` |
+| `pattern` | 텍스트 계열 입력 | `patternMismatch` |
+| `min` · `max` | 숫자·날짜·시간 계열, `range` | `rangeUnderflow` · `rangeOverflow` |
+| `step` | 숫자·날짜·시간 계열, `range` | `stepMismatch` |
+| `minlength` · `maxlength` | 텍스트 계열 입력, `textarea` | `tooShort` · `tooLong` |
+| `type` (`email`, `url`) | 해당 타입 입력 | `typeMismatch` |
+
+텍스트 계열은 `text`, `search`, `url`, `tel`, `email`, `password`입니다. 숫자·날짜·시간 계열은 `number`, `date`, `month`, `week`, `time`, `datetime-local`입니다.
+
+공통 규칙이 하나 있습니다. 값이 빈 문자열이면 `required`를 제외한 모든 제약은 검사하지 않습니다. 빈 칸을 막는 것은 `required`뿐입니다.
+
+### required
+
+값이 없으면 위반입니다. 타입마다 "없음"의 기준이 다릅니다.
+
+| 요소 | 위반 조건 |
+|------|-----------|
+| 텍스트·숫자·날짜 입력, `textarea` | 값이 빈 문자열 |
+| `checkbox` | 체크되지 않음 |
+| `radio` | 같은 `name` 그룹에서 하나도 선택되지 않음 |
+| `file` | 선택된 파일이 없음 |
+| `select` | 선택된 옵션이 없거나, 첫 `option`이 `value=""`인 플레이스홀더로 선택됨 |
+
+플레이스홀더 규칙은 단일 선택 `select`(`multiple` 아님, `size`가 1)에만 적용됩니다.
+
+### pattern
+
+정규식 하나로 값 전체를 검사합니다. 텍스트 계열 입력에만 적용되고 `textarea`에는 없습니다.
+
+```html
+<input pattern="[a-z]{4,8}" title="소문자 4~8자">
+<!-- "abc" → patternMismatch, "abcd" → 통과 -->
+<!-- "abcdefghi" → patternMismatch (일부만 맞아도 불일치) -->
+```
+
+- 속성값은 `^(?:패턴)$`로 감싼 것처럼 해석되어 값 전체가 일치해야 합니다. 슬래시와 플래그는 쓰지 않습니다.
+- 정규식은 `v` 플래그로 컴파일됩니다. 2023년 중반 이전에는 `u` 플래그였습니다. `v` 모드에서는 문자 클래스 안의 `(`, `)`, `[`, `{`, `}`, `/`, `-`, `|`를 리터럴로 쓰려면 이스케이프해야 합니다.
+- 속성이 없거나 비어 있거나 정규식으로 해석되지 않으면 검사하지 않습니다.
+- `title`은 패턴의 규칙을 설명하는 용도입니다. 호버로도 보이므로 "오류입니다" 같은 문장은 쓰지 않고, 화면에 보이는 안내문을 따로 둡니다.
+
+### min · max · step
+
+`min`과 `max`는 허용 범위의 경계값이고 경계 자체는 허용합니다. 값은 입력 타입의 형식으로 적습니다.
+
+```html
+<input type="number" min="1" max="10">
+<!-- 0 → rangeUnderflow, 10 → 통과, 11 → rangeOverflow -->
+<input type="date" min="2026-01-01" max="2026-12-31">
+```
+
+`step`은 허용되는 값의 간격입니다. 기준점(step base)에서 `step`의 정수배만큼 떨어진 값만 유효합니다.
+
+```html
+<input type="number" min="2" step="5">
+<!-- 2, 7, 12 → 통과 / 5 → stepMismatch -->
+```
+
+- 기준점은 `min`이 있으면 `min`, 없으면 `value` 속성값, 둘 다 없으면 타입의 기본 기준점입니다.
+- 기본 간격은 `number`·`range`가 1, `date`는 1일, `month`는 1개월, `week`는 1주, `time`·`datetime-local`은 60초입니다. `step` 없는 `number`에 `1.5`를 넣으면 `stepMismatch`입니다.
+- `step="any"`는 간격 제약을 끕니다.
+- `range`는 브라우저가 값을 범위 안으로 보정하므로 사용자가 위반 값을 만들 수 없습니다.
+
+### minlength · maxlength
+
+글자 수 제약입니다. 길이는 UTF-16 코드 유닛 수라서 이모지 하나가 2로 계산됩니다.
+
+```html
+<input minlength="3" maxlength="10">
+<!-- 사용자가 "ab" 입력 → tooShort -->
+<!-- 사용자가 "abc" 입력 → 통과 -->
+```
+
+- 두 제약은 사용자가 직접 편집한 값에만 적용됩니다. 스크립트가 `input.value = 'ab'`로 넣은 값은 `minlength`를 어겨도 `checkValidity()`가 `true`입니다.
+- `maxlength`는 입력 자체를 막으므로 사용자는 `tooLong`을 만들 수 없습니다. 스크립트로 넣은 긴 값도 `tooLong`이 아닙니다. Firefox에서는 `tooLong`이 `true`가 되는 일이 없습니다.
+- 빈 값은 `tooShort`가 아닙니다. 빈 칸 차단은 `required`가 합니다.
+
+### type
+
+입력 타입 자체가 형식 제약을 가집니다.
+
+| 타입 | 제약 | 위반 플래그 |
+|------|------|-------------|
+| `email` | 이메일 형식. `multiple`이면 쉼표 구분 목록 | `typeMismatch` |
+| `url` | 스킴을 포함한 절대 URL | `typeMismatch` |
+| `number` | 숫자로 해석 가능한 값 | `badInput` |
+| `date`·`time` 등 | 완성된 날짜·시간 | `badInput` |
+
+- `email` 검사는 표준에 정의된 느슨한 규칙입니다. `a@b`처럼 최상위 도메인이 없는 주소도 통과합니다. 실제 존재 여부는 서버가 확인해야 합니다.
+- `email`은 앞뒤 공백과 줄바꿈을 값에서 제거합니다.
+- `badInput`일 때 `value`는 빈 문자열입니다. 미완성 입력을 `value.length`로 판단하면 놓치므로 `validity.badInput`을 봅니다.
+- 각 속성은 `el.required`, `el.min`, `el.pattern`처럼 같은 이름의 프로퍼티로 읽고 쓸 수 있습니다. `minlength`·`maxlength`는 프로퍼티에서 `minLength`·`maxLength`로 대문자가 들어갑니다.
+
+## Constraint Validation API 핵심 멤버
+
+제약 검증 API는 폼 컨트롤(`input`, `select`, `textarea`, `button`, `fieldset`, `output`)과 `form`이 공유하는 멤버 모음입니다.
+
+| 멤버 | 종류 | 반환·역할 |
+|------|------|-----------|
+| `willValidate` | 프로퍼티 | 이 요소가 검증 대상인지 `boolean` |
+| `validity` | 프로퍼티 | `ValidityState` (플래그 객체) |
+| `validationMessage` | 프로퍼티 | 오류 메시지 문자열 |
+| `checkValidity()` | 메서드 | 유효하면 `true`. UI 없이 검사 |
+| `reportValidity()` | 메서드 | 유효하면 `true`. 오류 UI까지 표시 |
+| `setCustomValidity(msg)` | 메서드 | 커스텀 오류 설정·해제 |
+
+### willValidate
+
+`willValidate`는 요소가 제약 검증의 대상인지 알려 줍니다. 대상에서 제외되는 요소는 제약을 어겨도 `valid`이고 제출을 막지 않습니다.
+
+- `disabled` 요소(`disabled`인 `fieldset`의 자손 포함)
+- `readonly`인 `input`·`textarea`
+- `type`이 `hidden`, `reset`, `button`인 `input`과 `type="button"`·`reset`인 `button`
+- `datalist`의 자손
+- `fieldset`, `output`, `object`
+
+```js
+const field = document.querySelector('#nick')
+field.disabled = true
+field.willValidate // false
+field.checkValidity() // true (required가 있어도)
+```
+
+`readonly` 입력에 `required`를 달아 놓고 검증이 안 되는 것이 흔한 혼란입니다. 동적으로 `disabled`나 `readonly`를 바꾸면 검증 대상 여부도 같이 바뀝니다.
+
+### validity와 ValidityState 플래그 전체
+
+`validity`는 요소의 현재 검증 상태를 담은 `ValidityState` 객체입니다. 읽을 때마다 현재 상태가 반영되는 라이브 객체이고, 모든 프로퍼티는 읽기 전용 `boolean`입니다.
+
+| 플래그 | `true`가 되는 조건 |
+|--------|--------------------|
+| `valueMissing` | `required`인데 값이 없음 |
+| `typeMismatch` | `email`·`url` 형식이 아님 |
+| `patternMismatch` | `pattern`과 불일치 |
+| `tooLong` | `maxlength` 초과 (사용자 편집 한정) |
+| `tooShort` | `minlength` 미만 (사용자 편집 한정) |
+| `rangeUnderflow` | `min`보다 작음 |
+| `rangeOverflow` | `max`보다 큼 |
+| `stepMismatch` | `step` 간격에 맞지 않음 |
+| `badInput` | 브라우저가 해석하지 못하는 입력 |
+| `customError` | `setCustomValidity`로 비어 있지 않은 메시지를 설정함 |
+| `valid` | 위 10개가 모두 `false` |
+
+```js
+const age = document.querySelector('#age') // min=1 max=10
+age.value = '11'
+age.validity.rangeOverflow // true
+age.validity.valid // false
+```
+
+- 한 요소에서 플래그가 동시에 여러 개 `true`일 수 있습니다. 예를 들어 `required`와 `pattern`이 있어도 빈 값은 `valueMissing`만 `true`입니다(`pattern`은 빈 값을 검사하지 않음).
+- `valid`가 `false`일 때 `:invalid`가 매칭됩니다. `:valid`·`:invalid`와 `validity.valid`는 항상 같은 결과입니다.
+- `rangeUnderflow`·`rangeOverflow`·`tooLong`·`tooShort`는 `:out-of-range`에도 매칭됩니다.
+- 사용자에게 이유를 알리려면 플래그를 순서대로 검사해 메시지를 고릅니다(아래 커스텀 UI 패턴).
+
+### validationMessage
+
+`validationMessage`는 사용자에게 보여 줄 오류 문장입니다.
+
+- 요소가 검증 대상이 아니거나 유효하면 빈 문자열입니다.
+- `customError`가 있으면 `setCustomValidity`로 넣은 문자열 그대로입니다.
+- 그 외에는 브라우저가 만든 문장이며 브라우저 언어 설정을 따릅니다. 브라우저마다 표현이 달라 테스트 단언에 쓰지 않습니다.
+
+### checkValidity와 reportValidity
+
+둘 다 요소가 유효하면 `true`를 반환합니다. 차이는 사용자 UI입니다.
+
+| 구분 | `checkValidity()` | `reportValidity()` |
+|------|-------------------|--------------------|
+| 반환 | 유효하면 `true` | 유효하면 `true` |
+| `invalid` 이벤트 | 위반 요소마다 발생 | 위반 요소마다 발생 |
+| 오류 말풍선 | 표시하지 않음 | 첫 위반 요소에 표시 |
+| 포커스 | 이동하지 않음 | 첫 위반 요소로 이동 |
+
+```js
+const form = document.querySelector('form')
+form.checkValidity() // false, 화면 변화 없음
+form.reportValidity() // false, 첫 오류 요소에 말풍선과 포커스
+```
+
+- `form`에서 호출하면 폼에 속한 모든 검증 대상 컨트롤을 검사하고, 하나라도 위반이면 `false`입니다.
+- 이벤트는 위반 컨트롤 전부에 발생하지만 말풍선은 하나만 뜹니다.
+- 말풍선은 `invalid` 이벤트를 취소하면 표시되지 않습니다(아래 invalid 이벤트).
+- `checkValidity()`는 읽기에 가까워서 입력 중 실시간 검사에 알맞고, `reportValidity()`는 사용자를 오류로 안내해야 하는 시점에 씁니다.
+
+## setCustomValidity
+
+`setCustomValidity(message)`는 표준 제약으로 표현할 수 없는 규칙(비밀번호 확인 일치, 서버 중복 검사 결과)을 검증 상태에 넣는 메서드입니다.
+
+```js
+const pw2 = document.querySelector('#pw2')
+pw2.setCustomValidity('비밀번호가 다릅니다.')
+pw2.validity.customError // true
+pw2.validity.valid // false
+pw2.validationMessage // '비밀번호가 다릅니다.'
+```
+
+규칙은 하나입니다. 비어 있지 않은 문자열이면 오류를 설정하고, 빈 문자열이면 오류를 해제합니다.
+
+```js
+pw2.setCustomValidity('')
+pw2.validity.customError // false
+```
+
+- 커스텀 오류는 자동으로 풀리지 않습니다. 값이 바뀌어도 이전 메시지가 남아 있어 `:invalid` 상태와 제출 차단이 계속됩니다.
+- 그래서 `input` 이벤트마다 먼저 `setCustomValidity('')`로 초기화하고, 검사한 뒤 필요할 때만 다시 설정하는 순서가 관례입니다.
+- 흔한 실수는 오류 설정만 하고 해제 경로를 빠뜨리는 것입니다. 사용자는 값을 고쳤는데 제출이 영원히 막힙니다.
+- form-associated 커스텀 요소는 `ElementInternals.setValidity`로 같은 검증 모델에 참여합니다(26편).
+
+```js
+function checkMatch() {
+  pw2.setCustomValidity('') // 반드시 먼저 초기화
+  if (pw2.value !== pw1.value) {
+    pw2.setCustomValidity('비밀번호가 다릅니다.')
+  }
+}
+pw1.addEventListener('input', checkMatch)
+pw2.addEventListener('input', checkMatch)
+```
+
+비밀번호 확인은 상대 입력(`pw1`)이 바뀔 때도 다시 검사해야 하므로 두 입력 모두에 리스너를 겁니다.
+
+## invalid 이벤트
+
+`invalid`는 검증 대상 컨트롤이 제약을 위반했다고 판정될 때 그 요소에서 발생하는 이벤트입니다.
+
+- 발생 시점: `checkValidity()`, `reportValidity()`, 제출 시도 중 대화형 검증.
+- 취소 가능(`cancelable`)하고 버블링하지 않습니다.
+- 기본 동작은 오류 말풍선 표시입니다. `preventDefault()`로 말풍선만 억제할 수 있고, 제출 차단은 그대로입니다.
+
+```js
+form.addEventListener('invalid', (e) => {
+  e.preventDefault() // 말풍선 억제
+  console.log(e.target.name, e.target.validationMessage)
+}, true) // 캡처 단계로 받는다
+```
+
+- 버블링하지 않으므로 폼에 한 번만 달려면 세 번째 인자 `true`(캡처)가 필요합니다(7편의 이벤트 전파 규칙).
+- 말풍선을 취소하면 포커스도 이동하지 않습니다. 첫 오류 요소로 `focus()`를 직접 보내야 합니다.
+- `invalid`는 제출 중 검증에서 위반 요소마다 발생하므로, 한 핸들러가 여러 번 불립니다.
+
+## 제출 시 검증과 novalidate·formnovalidate
+
+제출 버튼을 누르면 브라우저가 대화형 검증(interactive validation)을 수행합니다. 위반이 있으면 `invalid`를 발생시키고 첫 위반 요소에 오류를 표시하며, `submit` 이벤트를 발생시키지 않고 제출을 중단합니다. 그래서 `submit` 핸들러가 불렸다면 네이티브 검증을 통과한 것입니다.
+
+| 제출 경로 | 검증 |
+|-----------|------|
+| submit 버튼 클릭, 입력에서 Enter | 수행 |
+| `form.requestSubmit()` | 수행 |
+| `form.requestSubmit(button)` | 수행. 단 `button`에 `formnovalidate`가 있으면 생략 |
+| `form.submit()` | 수행하지 않음 (`submit` 이벤트도 없음) |
+
+`novalidate`는 폼 단위, `formnovalidate`는 버튼 단위로 대화형 검증을 끕니다.
+
+```html
+<form novalidate> <!-- 이 폼 전체 -->
+<button formnovalidate> <!-- 이 버튼 제출만 -->
+```
+
+```js
+form.noValidate = true // novalidate 속성의 프로퍼티
+saveBtn.formNoValidate = true // formnovalidate 속성의 프로퍼티
+```
+
+- 두 속성이 끄는 것은 제출 시점의 대화형 검증뿐입니다. `validity`, `checkValidity()`, `:invalid`는 그대로 동작합니다.
+- `novalidate`를 쓰면 `submit` 핸들러에서 `form.checkValidity()`를 직접 확인하고 `preventDefault()`해야 합니다. 안 하면 잘못된 값이 그대로 제출됩니다.
+- `formnovalidate`는 "임시 저장"처럼 불완전한 데이터를 허용하는 버튼에 씁니다.
+- 클라이언트 검증은 UX 장치이고 보안 경계가 아닙니다. 개발자 도구나 직접 요청으로 우회되므로 서버가 반드시 다시 검증합니다.
+
+## :valid·:invalid와 :user-valid·:user-invalid
+
+CSS 의사 클래스로 검증 상태를 스타일링합니다.
+
+| 의사 클래스 | 매칭 조건 |
+|-------------|-----------|
+| `:valid` | 검증 대상이고 모든 제약을 만족 |
+| `:invalid` | 검증 대상이고 제약을 하나 이상 위반 |
+| `:user-valid` | 유효하며, 사용자가 조작한 뒤 |
+| `:user-invalid` | 위반이며, 사용자가 조작한 뒤 |
+
+`:invalid`는 페이지가 열린 순간부터 적용됩니다. `required` 빈 칸은 아무것도 입력하지 않았는데도 처음부터 오류 스타일이 보입니다.
+
+```css
+input:invalid { border-color: red; }        /* 로드 직후부터 빨강 */
+input:user-invalid { border-color: red; }   /* 조작 후에만 빨강 */
+input:user-valid { border-color: green; }
+```
+
+- `:user-valid`·`:user-invalid`는 사용자가 값을 바꾸고 포커스를 벗어나거나 제출을 시도한 뒤부터 매칭됩니다. 사용자가 다시 조작하면 상태가 새로 평가됩니다.
+- Baseline 2023입니다. 2023년 11월부터 핵심 브라우저 전체가 지원합니다.
+- `:valid`·`:invalid`는 `form`과 `fieldset`에도 걸려서, 자손 중 하나라도 위반이면 `form:invalid`입니다. 제출 버튼 스타일 연동에 씁니다.
+- 스크립트가 `value`를 바꾼 경우에는 사용자 조작으로 보지 않으므로 `:user-invalid`가 켜지지 않습니다.
+- 범위 계열은 `:in-range`·`:out-of-range`, 필수 여부는 `:required`·`:optional`로 따로 구분합니다.
+- 흔한 실수는 `:invalid`로 오류 스타일을 걸어 첫 화면부터 모든 필드가 빨갛게 되는 것입니다. 오류 표시는 `:user-invalid`로 합니다.
+
+## 커스텀 오류 메시지 UI 패턴
+
+네이티브 말풍선은 문구와 위치, 모양을 바꿀 수 없습니다. 바꾸려면 말풍선을 억제하고 직접 오류를 그립니다. 방법은 둘입니다.
+
+| 방법 | 구조 | 특징 |
+|------|------|------|
+| `invalid` 이벤트 가로채기 | 네이티브 검증 유지, 말풍선만 `preventDefault` | 제출·포커스 규칙은 브라우저가 처리 |
+| `novalidate` + 직접 검사 | `submit`에서 `checkValidity()` 호출 | 오류 표시 시점과 순서를 완전히 제어 |
+
+첫 번째 방법의 핵심 코드입니다. 플래그를 사용자용 문장으로 번역합니다.
+
+```js
+function messageOf(el) {
+  const v = el.validity
+  if (v.customError) return el.validationMessage
+  if (v.valueMissing) return '필수 항목입니다.'
+  if (v.typeMismatch) return '형식이 올바르지 않습니다.'
+  if (v.tooShort) return `${el.minLength}자 이상 입력하세요.`
+  if (v.patternMismatch) return el.title || '형식을 확인하세요.'
+  return el.validationMessage // 나머지는 브라우저 문장
+}
+```
+
+```js
+form.addEventListener('invalid', (e) => {
+  e.preventDefault()
+  showError(e.target, messageOf(e.target))
+}, true)
+```
+
+- 플래그 검사 순서가 우선순위입니다. 한 요소에서 여러 플래그가 동시에 `true`일 수 있으므로 가장 먼저 알려 줄 것을 앞에 둡니다.
+- `customError`를 맨 앞에 두면 직접 설정한 메시지가 표준 메시지에 가려지지 않습니다.
+- 오류가 고쳐졌을 때 지우는 것도 직접 합니다. `input` 이벤트에서 `checkValidity()`가 `true`면 오류 문구를 지웁니다.
+- 오류 표시를 "처음 입력 전"이 아니라 "조작 후"에 시작하려면 `blur`나 제출 시도 이후부터 렌더링하거나 `:user-invalid`를 기준으로 삼습니다.
+- 말풍선을 억제하면 첫 위반 요소로의 포커스 이동도 사라집니다. 첫 오류 요소에 `focus()`를 보냅니다.
+
+```js
+const firstBad = form.querySelector(':invalid')
+firstBad?.focus()
+```
+
+## 비동기 검증 패턴
+
+서버에 물어봐야 알 수 있는 검증(아이디 중복)은 응답이 올 때까지 결과를 모릅니다. 제약 검증은 동기 모델이므로 `setCustomValidity`를 상태 저장소로 씁니다.
+
+- 입력이 바뀌면 이전 결과를 해제합니다.
+- 요청을 보내기 전에 임시 메시지(확인 중)를 커스텀 오류로 걸어 제출을 막습니다.
+- 응답이 오면 결과에 따라 오류를 설정하거나 빈 문자열로 해제합니다.
+- 이전 요청은 `AbortController`로 취소해서 늦게 도착한 응답이 최신 입력을 덮어쓰지 않게 합니다.
+
+```js
+let ctrl
+nick.addEventListener('input', async () => {
+  nick.setCustomValidity('')
+  ctrl?.abort()
+  if (!nick.checkValidity()) return // 형식부터 통과해야 요청
+  nick.setCustomValidity('중복 확인 중입니다.')
+  ctrl = new AbortController()
+  const url = `/api/nick?q=${encodeURIComponent(nick.value)}`
+  try {
+    const res = await fetch(url, { signal: ctrl.signal })
+    const { taken } = await res.json()
+    nick.setCustomValidity(taken ? '이미 사용 중입니다.' : '')
+  } catch (err) {
+    if (err.name !== 'AbortError')
+      nick.setCustomValidity('확인하지 못했습니다.')
+  }
+})
+```
+
+- 중간 임시 메시지 덕분에 응답 전에 제출 버튼을 눌러도 대화형 검증이 막습니다.
+- 취소된 요청(`AbortError`)은 새 요청이 이미 임시 메시지를 걸었으므로 아무것도 하지 않습니다. 취소가 아닌 네트워크 실패는 오류로 남겨 재입력을 유도합니다.
+- 입력마다 요청하면 서버 부담이 커지므로 실무에서는 300ms 안팎의 디바운스를 두거나 `blur`·`change`에서 확인합니다.
+- 응답 경쟁은 AbortController 외에 요청 번호 비교로도 막습니다(39편). 취소·재시도 패턴은 37편에서 다룹니다.
+- 검사 직후에도 서버 상태는 바뀔 수 있습니다. 제출 시 서버가 같은 검사를 다시 하고, 실패 응답을 다시 `setCustomValidity`로 표시합니다.
+
+## 접근성 있는 오류 표시
+
+오류 UI는 시각적으로만 보이면 안 됩니다. 스크린 리더 사용자가 어느 필드가 틀렸는지, 이유가 무엇인지 알아야 합니다. 말풍선을 억제하면 그 책임이 개발자에게 옵니다.
+
+| 속성·기법 | 역할 |
+|-----------|------|
+| `aria-invalid="true"` | 이 필드의 값이 유효하지 않음을 보조 기술에 알림 |
+| `aria-describedby` | 필드와 오류 문구 요소를 연결해 필드 포커스 때 문구를 읽게 함 |
+| `role="alert"` 또는 `aria-live` | 오류가 새로 나타났을 때 즉시 낭독 |
+| 첫 오류 필드 `focus()` | 제출 실패 후 오류 위치로 이동 |
+
+```html
+<label for="email">이메일</label>
+<input id="email" type="email" required
+       aria-describedby="email-hint email-err">
+<p id="email-hint">회사 주소를 입력하세요.</p>
+<p id="email-err" role="alert"></p>
+```
+
+```js
+function showError(el, msg) {
+  const err = document.getElementById(`${el.id}-err`)
+  err.textContent = msg // 문구가 바뀌면 낭독된다
+  el.setAttribute('aria-invalid', 'true')
+}
+function clearError(el) {
+  document.getElementById(`${el.id}-err`).textContent = ''
+  el.removeAttribute('aria-invalid')
+}
+```
+
+- 오류 요소는 `hidden`으로 토글하지 않고 항상 DOM에 두며 문구만 바꿉니다. 나중에 생긴 요소보다 기존 `role="alert"` 영역의 내용 변경이 더 안정적으로 낭독됩니다.
+- `aria-describedby`는 공백으로 여러 id를 이을 수 있습니다. 안내문(hint)과 오류 문구를 함께 연결해 둡니다.
+- `aria-invalid`는 오류가 있을 때만 `true`로 설정하고, 해결되면 속성을 제거하거나 `false`로 둡니다. 처음부터 `true`로 두지 않습니다.
+- 오류 문구는 색만으로 구분하지 않고 텍스트로 이유를 적습니다. 아이콘이나 색은 보조 수단입니다.
+- `aria-errormessage`라는 전용 속성도 있으나 보조 기술 지원이 일관되지 않아 `aria-describedby`가 널리 쓰입니다.
+- `required` 속성은 이미 필수라는 의미를 전달합니다. 같은 뜻으로 `aria-required`를 겹쳐 달 필요가 없습니다.
+- 여러 오류를 한꺼번에 알릴 때는 폼 상단에 오류 목록을 두고 각 항목에서 해당 필드로 연결하는 방식이 있습니다. 첫 오류 필드로의 포커스 이동은 제출 실패 후 반드시 합니다.
+- 접근성 트리와 ARIA 이름 계산은 27편, 포커스 관리는 28편에서 다룹니다.
+
+## 핵심 정리
+
+- 내장 제약(`required`, `pattern`, `min`·`max`, `step`, `minlength`·`maxlength`, `type`)은 빈 값에서는 `required`만 위반이고, 글자 수 제약은 사용자 편집에만 적용됩니다.
+- `willValidate`가 `false`인 요소(`disabled`, `readonly` 등)는 검증하지 않습니다. `validity`의 11개 플래그 중 `valid`는 나머지 10개가 모두 `false`일 때만 `true`입니다.
+- `checkValidity()`는 조용히, `reportValidity()`는 UI까지 검사하고, 둘 다 `invalid` 이벤트(버블링 없음, 취소 가능)를 발생시킵니다.
+- `setCustomValidity('')`로 해제하지 않으면 커스텀 오류가 계속 남습니다. `input`마다 초기화 후 재검사합니다.
+- `novalidate`·`formnovalidate`는 제출 시 대화형 검증만 끕니다. `form.submit()`은 검증하지 않으므로 서버 검증이 필수입니다.
+- 오류 표시는 `:user-invalid`와 `aria-invalid`·`aria-describedby`로 하며, 말풍선을 억제하면 낭독과 포커스를 직접 처리합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="minlength 속성이 3인 텍스트 입력의 value를 스크립트로 ab로 설정한 뒤 checkValidity()를 호출하면 결과는 무엇입니까?"
+  options={['①true', '②false', '③true이며 invalid 이벤트가 발생한다', '④value가 빈 문자열로 되돌려진다']}
+  correctAnswer={1}
+  explanation="minlength와 maxlength는 사용자가 직접 편집한 값에만 적용됩니다. 스크립트로 넣은 값은 tooShort가 되지 않으므로 checkValidity()는 true를 반환하고 invalid 이벤트도 없습니다. false는 위반을 가정한 오답이고, 값이 되돌려지는 동작은 없습니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="비밀번호 확인 입력에 setCustomValidity로 오류 메시지를 설정했습니다. 사용자가 값을 올바르게 고쳤는데도 제출이 계속 막히는 가장 직접적인 원인은 무엇입니까?"
+  options={['①input 이벤트가 발생하지 않아서', '②required 속성이 빠져서', '③setCustomValidity에 빈 문자열을 전달해 오류를 해제하지 않아서', '④checkValidity 대신 reportValidity를 호출해서']}
+  correctAnswer={3}
+  explanation="커스텀 오류는 자동으로 풀리지 않고, setCustomValidity에 빈 문자열을 전달해야 해제됩니다. 해제하지 않으면 customError가 true로 남아 valid가 false인 채 제출이 막힙니다. 값이 바뀌어도 이전 메시지는 유지됩니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="다음 중 브라우저의 제약 검증을 거쳐 제출되는 경우는 어느 것입니까?"
+  options={['①form.submit() 호출', '②novalidate 속성이 없는 폼에서 submit 버튼 클릭', '③novalidate 속성이 있는 폼에서 submit 버튼 클릭', '④formnovalidate 버튼을 인자로 한 form.requestSubmit(button) 호출']}
+  correctAnswer={2}
+  explanation="submit 버튼 클릭은 novalidate가 없으면 대화형 검증을 수행합니다. form.submit()은 검증과 submit 이벤트를 모두 건너뛰고, novalidate와 formnovalidate는 제출 시 대화형 검증을 끕니다."
+/>
+
+## 참고 자료
+
+- [HTML Standard — Constraint validation](https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#constraints)
+- [MDN — Client-side form validation](https://developer.mozilla.org/en-US/docs/Learn_web_development/Extensions/Forms/Form_validation)
+- [MDN — Constraint validation](https://developer.mozilla.org/en-US/docs/Web/HTML/Guides/Constraint_validation)
+- [MDN — ValidityState](https://developer.mozilla.org/en-US/docs/Web/API/ValidityState)
+- [MDN — pattern 속성](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Attributes/pattern)
+- [MDN — :user-invalid](https://developer.mozilla.org/en-US/docs/Web/CSS/:user-invalid)
+- [MDN — aria-invalid](https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Reference/Attributes/aria-invalid)

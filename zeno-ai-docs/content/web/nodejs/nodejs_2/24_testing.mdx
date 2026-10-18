@@ -1,0 +1,512 @@
+---
+title: '24. 테스트'
+description: '단위·통합 테스트의 구분, node:test의 describe·it·assert·mock·mock timers, 비동기와 열린 핸들 문제, 포트 0·임시 디렉터리·픽스처, 커버리지, Vitest·Jest·supertest·Testcontainers 비교를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** `node:test`로 단위·통합 테스트를 작성하고, 비동기 테스트가 끝나지 않는 원인과 서버·파일·DB를 쓰는 테스트의 준비·정리 방법을 설명하며, Vitest·Jest·supertest·Testcontainers의 역할을 구분할 수 있습니다.
+</Callout>
+
+## 단위 테스트
+
+단위 테스트는 함수나 클래스 하나를 외부 의존(네트워크, DB, 파일, 시간)에서 떼어 내 입력과 출력만 검증하는 테스트입니다. 빠르고, 실패하면 원인이 그 단위 안에 있습니다.
+
+```js
+// sum.js
+export const sum = (a, b) => a + b
+```
+
+```js
+// sum.test.js
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { sum } from './sum.js'
+
+test('두 수를 더한다', () => {
+  assert.equal(sum(1, 2), 3)
+})
+```
+
+- 외부 의존이 있는 코드는 의존을 인수로 받게 만들고, 테스트에서는 가짜(mock)를 넘깁니다(아래 "mock").
+- 계산, 변환, 검증, 라우팅 규칙 같은 순수한 로직이 단위 테스트의 주 대상입니다.
+- HTTP 핸들러의 비즈니스 로직은 핸들러에서 service 함수로 분리하면 서버 없이 단위 테스트할 수 있습니다(구조는 13편).
+
+## 통합 테스트
+
+통합 테스트는 여러 구성 요소를 실제로 연결해 함께 동작하는지 확인하는 테스트입니다. 서버가 요청을 받아 DB에 쓰고 응답하는 흐름이 대표적입니다.
+
+| 구분 | 단위 테스트 | 통합 테스트 |
+|------|-------------|-------------|
+| 범위 | 함수·클래스 하나 | 여러 모듈 + HTTP·DB·파일 |
+| 외부 의존 | 가짜로 대체 | 실제(또는 실제와 같은 것) 사용 |
+| 속도 | 밀리초 | 수십 밀리초에서 수 초 |
+| 실패 시 | 원인이 좁음 | 원인을 더 찾아야 함 |
+| 잡는 문제 | 로직 오류 | 연결·설정·쿼리·직렬화 오류 |
+
+- 둘은 대체 관계가 아닙니다. 단위 테스트를 많이, 통합 테스트를 핵심 경로에 적게 두는 구성이 일반적입니다.
+- 통합 테스트는 준비와 정리가 필요합니다. 포트, 임시 파일, DB 상태를 테스트마다 격리합니다(아래 포트 0, 임시 디렉터리, 픽스처, Testcontainers 절).
+- 가짜로 대체한 의존은 실제와 달라질 수 있으므로, 쿼리처럼 실제 동작이 중요한 부분은 통합 테스트로 확인합니다.
+
+## node:test
+
+`node:test`는 Node에 내장된 테스트 러너로, 설치 없이 `node --test`로 실행합니다. v18.0.0에 추가되었고 v20.0.0부터 안정(Stable)입니다. `node:` 스킴으로만 가져옵니다(입문은 23편).
+
+```bash
+node --test
+```
+
+- 인수가 없으면 `*.test.js`, `*-test.js`, `*_test.js`, `test-*.js`, `test.js`와 `test` 디렉터리 안의 파일을 찾아 실행합니다. `--no-strip-types`를 주지 않으면 `.ts` 파일도 같은 패턴으로 찾습니다. 글로브를 인수로 줄 수 있고 따옴표로 감쌉니다.
+- 기본으로 테스트 파일마다 별도 자식 프로세스에서 실행합니다(`--test-isolation=process`가 기본). 파일끼리 전역 상태를 공유하지 않습니다.
+- 한 테스트 함수는 동기 함수(던지면 실패), `Promise` 반환(거부되면 실패), 콜백 `done` 받기(첫 인수가 참 같은 값이면 실패) 중 하나로 판정됩니다.
+- 하나라도 실패하면 종료 코드는 1입니다. CI는 이 종료 코드를 보고 실패를 판단합니다.
+- 이름 필터는 `--test-name-pattern`(정규식), 시간 제한은 `--test-timeout`(기본값 `Infinity`)입니다.
+
+테스트 안에서 `t.test()`로 서브테스트를 만들 수 있습니다. 부모 테스트는 서브테스트를 기다려 주지 않으므로 `await`해야 합니다. 끝나지 않은 서브테스트는 취소되어 실패 처리됩니다.
+
+```js
+test('부모', async (t) => {
+  await t.test('자식 1', () => {})
+  await t.test('자식 2', () => {})
+})
+```
+
+- 테스트에는 `{ skip: true }`(건너뜀), `{ todo: true }`(미완성 표시), `{ timeout: 1000 }` 같은 옵션을 줄 수 있습니다.
+- 훅은 `before`, `after`, `beforeEach`, `afterEach`입니다. 테스트 안에서는 `t.after(fn)`으로 그 테스트가 끝난 뒤의 정리를 등록합니다.
+
+## describe와 it
+
+`describe()`는 테스트를 묶는 스위트를 만들고, `it()`은 개별 테스트를 만듭니다. 각각 `suite()`와 `test()`의 별칭입니다.
+
+```js
+import { describe, it } from 'node:test'
+import assert from 'node:assert/strict'
+
+describe('sum', () => {
+  it('양수를 더한다', () => assert.equal(1 + 2, 3))
+  describe('음수', () => {
+    it('음수도 더한다', () => assert.equal(-1 + 1, 0))
+  })
+})
+```
+
+- `describe`는 중첩할 수 있고 `describe.skip`, `describe.only`, `it.skip`, `it.todo`, `it.only`가 있습니다.
+- 스위트 안의 테스트는 부모가 끝나기 전에 모두 끝나도록 러너가 기다려 줍니다. `t.test()` 서브테스트와 다른 점입니다.
+- `describe` 콜백은 테스트를 등록하는 용도입니다. 비동기 준비는 콜백 안에서 `await`하지 않고 `before`에서 합니다.
+- `test`와 `it`은 기능이 같습니다. 한 프로젝트 안에서 한 스타일로 통일합니다.
+
+## assert
+
+테스트의 검증은 `node:assert`로 합니다. 테스트에서는 `node:assert/strict`를 쓰면 `equal`이 `===`로 비교되어 느슨한 비교 실수를 막습니다(자세히는 22편).
+
+```js
+import assert from 'node:assert/strict'
+
+assert.equal(result, 3)
+assert.deepEqual(user, { id: 1, name: 'kim' })
+assert.throws(() => parse('{'), SyntaxError)
+await assert.rejects(load('x'), { message: /not found/ })
+```
+
+- 실패하면 `AssertionError`가 던져져서 테스트가 실패합니다. 엄격 모드는 객체 차이를 diff로 보여 줍니다.
+- 테스트 컨텍스트에도 `t.assert`가 있습니다. 같은 검증 함수에 더해 스냅샷(`t.assert.snapshot`)을 제공합니다.
+- 예외가 던져지는지 검증할 때는 함수를 직접 호출하지 말고 함수 자체를 넘깁니다. `assert.throws(parse('{'))`는 `parse`가 먼저 던져서 검증이 시작되기 전에 실패합니다.
+- 비동기 예외는 `assert.rejects`이고 반드시 `await`합니다.
+
+## mock
+
+`mock`은 함수의 호출을 기록하고 동작을 바꾸는 가짜입니다. `node:test`의 `mock`은 외부 라이브러리 없이 쓰는 내장 목 도구입니다.
+
+```js
+import { test, mock } from 'node:test'
+import assert from 'node:assert/strict'
+
+test('함수 호출 기록', () => {
+  const fn = mock.fn((a) => a * 2)
+  assert.equal(fn(2), 4)
+  assert.equal(fn.mock.callCount(), 1)
+  assert.deepEqual(fn.mock.calls[0].arguments, [2])
+})
+```
+
+- `mock.fn(original?, implementation?)`는 호출 기록(`calls`, `callCount()`)을 가진 함수를 만듭니다. 각 호출에서 `arguments`, `result`, `error`를 볼 수 있습니다.
+- `mock.method(object, 'name', impl?)`은 객체의 메서드를 가짜로 바꿉니다. 구현을 생략하면 원본을 호출하면서 기록만 남기는 스파이가 됩니다. `mock.getter`, `mock.setter`도 있습니다.
+- 테스트 컨텍스트의 `t.mock`으로 만든 목은 테스트가 끝나면 러너가 자동으로 원래대로 되돌립니다. 최상위 `mock`은 `mock.reset()`이나 `mock.restoreAll()`로 직접 되돌립니다.
+- `ctx.mockImplementation(fn)`, `ctx.mockImplementationOnce(fn)`으로 구현을 중간에 바꿉니다.
+
+```js
+test('메서드 가짜', (t) => {
+  const repo = { find: () => 'real' }
+  t.mock.method(repo, 'find', () => 'mocked')
+  assert.equal(repo.find(), 'mocked')
+})
+// 테스트가 끝나면 repo.find가 원래대로 복구됨
+```
+
+- 모듈 단위 목은 `mock.module(specifier)`입니다. `--experimental-test-module-mocks` 플래그가 필요하고 안정성 지수는 1.0(Early development)입니다.
+- 무엇을 목으로 바꿀지는 경계에서 정합니다. 외부로 나가는 I/O(HTTP 호출, DB, 시계)는 목으로 바꿔도 되지만 테스트하려는 코드 자체를 목으로 바꾸면 아무것도 검증하지 못합니다.
+- 목에 의존한 테스트는 구현을 바꾸면 깨집니다. 호출 횟수보다 결과를 검증하는 편이 낫습니다.
+
+## mock timers
+
+`mock.timers`는 `setTimeout`, `setInterval`, `Date` 같은 시간을 실제로 기다리지 않고 가짜 시계로 앞당기는 도구입니다. v20.4.0, v18.19.0에 추가되었고 v23.1.0부터 안정입니다.
+
+```js
+test('5초 뒤 실행', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const fn = t.mock.fn()
+  setTimeout(fn, 5000)
+  assert.equal(fn.mock.callCount(), 0)
+  t.mock.timers.tick(5000)         // 시계를 5초 앞당김
+  assert.equal(fn.mock.callCount(), 1)
+})
+```
+
+- `enable({ apis: [...] })`로 가짜로 바꿀 대상을 고릅니다. 대상은 `'setTimeout'`, `'setInterval'`, `'setImmediate'`, `'Date'`이고 생략하면 모두 바꿉니다. `{ apis: ['Date'], now: 0 }`처럼 시작 시각을 줄 수 있습니다.
+- `tick(ms)`는 가짜 시계를 앞당겨 그 사이 예약된 타이머를 실행합니다. `runAll()`은 예약된 타이머를 모두 실행하고 `reset()`은 되돌립니다.
+- 전역 `setTimeout`과 `node:timers`, `node:timers/promises`의 함수가 대상입니다. `import { setTimeout } from 'node:timers'`처럼 구조 분해한 함수는 지원하지 않는다고 공식 문서가 밝힙니다. 모듈 객체(`import nodeTimers from 'node:timers'`)의 메서드로 호출하거나 전역을 씁니다.
+- 만료 시각, 재시도 대기, 캐시 TTL처럼 시간에 의존하는 로직을 빠르고 결정적으로 테스트할 때 씁니다.
+- 테스트 컨텍스트의 `t.mock.timers`는 테스트가 끝나면 자동으로 복구됩니다.
+
+## 비동기 테스트가 끝나야 함
+
+비동기 테스트는 `async` 함수이거나 Promise를 반환해서, 러너가 끝날 때까지 기다리게 해야 합니다. `await`나 `return`을 빼면 검증이 실행되기 전에 테스트가 통과로 끝납니다.
+
+```js
+// ❌ Promise를 기다리지 않음: 테스트는 즉시 통과
+test('forgot await', () => {
+  load().then((v) => assert.equal(v, 1))
+})
+
+// ✅ async/await로 끝까지 기다림
+test('awaits', async () => {
+  assert.equal(await load(), 1)
+})
+```
+
+- 위 ❌ 코드에서 검증은 테스트가 끝난 뒤에 실행되고, 이 편의 환경에서 `assert`가 실패하자 테스트 줄은 ✔로 보였고 파일 전체가 실패(`unhandledRejection`)로 보고되었습니다. 공식 문서도 테스트가 끝난 뒤의 `uncaughtException`과 `unhandledRejection`이 실패로 표시되고, 끝난 테스트에 만든 서브테스트는 즉시 실패 처리된다고 설명합니다.
+- 테스트 결과는 끝난 뒤에 생긴 비동기 작업을 기다리지 않고 바로 보고됩니다. 그래서 늦게 실패한 이유가 엉뚱한 곳에 나타납니다.
+- 콜백 API는 `done`을 호출하거나 `util.promisify`로 Promise로 바꿔서 `await`합니다.
+- 이벤트를 기다릴 때는 `await once(emitter, 'event')`(`node:events`)처럼 Promise로 만들어 `await`합니다.
+- 테스트에 `{ timeout }` 옵션이나 `--test-timeout`을 걸어 두면 영원히 끝나지 않는 테스트를 실패로 바꿀 수 있습니다.
+
+## 열린 핸들 때문에 테스트가 안 끝남
+
+열린 핸들(open handle)은 이벤트 루프를 계속 붙잡는 열린 서버, 소켓, 타이머, DB 연결 같은 자원입니다. 테스트가 모두 통과해도 핸들이 남아 있으면 프로세스가 종료되지 않습니다.
+
+```js
+test('서버를 닫지 않음', async () => {
+  const server = createApp()
+  await new Promise((r) => server.listen(0, r))
+  const res = await fetch(url(server))
+  assert.equal(res.status, 200)
+  // ❌ server.close()가 없어서 프로세스가 끝나지 않음
+})
+```
+
+- 이 편의 환경에서 위 테스트는 통과했지만 `node --test`와 `node 파일`이 모두 종료되지 않아 시간 제한으로 강제 종료했습니다.
+- 해결은 생성과 정리를 짝으로 두는 것입니다. `before`에서 열고 `after`에서 닫거나, 테스트 안에서는 `t.after(() => server.close())`를 바로 이어서 등록합니다. 에러가 나도 정리가 실행됩니다.
+- `server.close()`는 새 연결을 막고 대기 중인 연결이 끝나길 기다립니다. v19.0.0부터 `http.Server`의 `close()`는 요청이 없는 유휴 연결을 닫고 반환합니다. 진행 중인 연결까지 끊으려면 `server.closeAllConnections()`(v18.2.0)를 씁니다.
+- DB 풀, Redis 클라이언트, 타이머(`setInterval`)도 같습니다. 풀은 `pool.end()`, 클라이언트는 `quit()`/`close()`, 타이머는 `clearInterval()`로 정리합니다.
+- `--test-force-exit`(v22.0.0, v20.14.0)는 모든 테스트가 끝나면 이벤트 루프가 살아 있어도 프로세스를 종료합니다. 이 편의 환경에서 위 테스트에 이 플래그를 주자 종료 코드 0으로 끝났습니다. 정리 누락을 숨기는 임시 처방이므로 원인(닫지 않은 자원)을 고치는 것이 원칙입니다.
+- 어떤 핸들이 남았는지 모를 때는 열고 닫는 코드를 하나씩 대조합니다.
+
+## 포트 0으로 바인딩
+
+`server.listen(0)`은 포트에 0을 주어 운영체제가 사용 중이 아닌 임의의 포트를 배정하게 하는 방법입니다. 배정된 포트는 `'listening'` 이후 `server.address().port`로 읽습니다.
+
+```js
+const server = http.createServer(handler)
+await new Promise((resolve) => server.listen(0, resolve))
+const { port } = server.address()
+const base = `http://127.0.0.1:${port}`
+// 테스트가 끝나면 server.close()
+```
+
+- 고정 포트(예: 3000)를 쓰면 개발 서버나 병렬로 도는 다른 테스트 파일과 충돌해 `EADDRINUSE` 에러가 납니다. 테스트 러너는 파일을 병렬로 실행하므로 포트 0이 기본입니다.
+- `server.address()`의 반환값은 객체, 문자열(파이프나 유닉스 소켓), `null` 중 하나입니다. IP 소켓에서는 `{ port, family, address }` 객체이고, `listening` 이후에 읽습니다.
+- 호스트를 `127.0.0.1`로 지정하면 외부에서 접근할 수 없어 테스트에서 안전합니다.
+- 테스트 대상 코드는 포트를 하드코딩하지 말고 주입받게 만듭니다. 서버를 만드는 함수와 `listen()`을 호출하는 진입점을 분리하면 테스트가 포트와 시작 시점을 정할 수 있습니다.
+
+```js
+// app.js: 서버를 만들기만 하고 listen은 하지 않음
+export const createApp = () => http.createServer(handler)
+// main.js: createApp().listen(Number(process.env.PORT))
+```
+
+## 임시 디렉터리
+
+파일을 읽고 쓰는 코드를 테스트할 때는 테스트마다 새 임시 디렉터리를 만들고 끝나면 지웁니다. 실제 프로젝트 파일이나 고정 경로를 건드리지 않고, 테스트끼리 서로의 파일에 영향을 주지 않게 하기 위해서입니다.
+
+```js
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+test('파일 쓰기', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'test-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  // dir 안에서 파일 작업을 하고 검증
+})
+```
+
+- `mkdtemp(prefix)`는 접두사 뒤에 임의 문자를 붙여 고유한 디렉터리를 만듭니다. 병렬 실행에서도 이름이 겹치지 않습니다.
+- `os.tmpdir()`는 운영체제의 임시 디렉터리 경로입니다(자세히는 22편).
+- 정리는 `t.after`나 `after` 훅에서 합니다.
+- 상대 경로를 쓰는 코드는 작업 디렉터리 대신 경로를 인수로 받게 만들어 임시 디렉터리를 넘깁니다.
+
+## 픽스처
+
+픽스처(fixture)는 테스트가 시작될 때 갖춰 두는 고정된 입력과 상태입니다. 샘플 파일, 시드 데이터, 미리 만든 객체, 준비된 서버가 해당합니다.
+
+```js
+// 읽기 전용 샘플은 파일로 두고 읽기
+import { readFile } from 'node:fs/promises'
+
+const sample = await readFile(
+  new URL('./fixtures/user.json', import.meta.url),
+  'utf8',
+)
+```
+
+| 방법 | 용도 |
+|------|------|
+| `fixtures/` 폴더의 파일 | 큰 입력(JSON, CSV, 이미지) |
+| 팩토리 함수 `makeUser(overrides)` | 테스트마다 조금씩 다른 객체 |
+| `before` / `beforeEach` 훅 | 서버, DB, 임시 디렉터리 준비 |
+| `after` / `afterEach`, `t.after` | 정리 |
+
+- `before`와 `after`는 스위트에서 한 번, `beforeEach`와 `afterEach`는 테스트마다 실행됩니다. 상태를 바꾸는 픽스처는 `beforeEach`로 매번 새로 만들어 테스트끼리 의존하지 않게 합니다.
+- 읽기 전용 샘플을 모든 테스트가 공유하면 한 테스트가 수정할 때 다른 테스트가 깨집니다. 객체는 팩토리로 매번 새로 만듭니다.
+- 파일 경로는 실행 위치에 따라 달라지므로 `import.meta.url` 기준으로 만듭니다.
+- 전체 테스트 전후에 한 번 실행할 준비(서버, 컨테이너)는 `--test-global-setup` 플래그로 지정하는 모듈의 `globalSetup`과 `globalTeardown`으로 둘 수 있습니다. v24.0.0에 추가되었고 안정성 지수는 1.0(Early development)입니다.
+- 테스트가 어떤 데이터에 의존하는지가 테스트 코드 안에서 보여야 읽기 쉽습니다. 숨은 전역 픽스처에 기대지 않습니다.
+
+## HTTP 핸들러만 테스트
+
+HTTP 핸들러만 테스트한다는 것은 서버를 띄우지 않고 핸들러 함수를 직접 호출해 요청 객체와 응답 객체를 가짜로 넘기는 방식입니다. 포트와 네트워크가 필요 없어 빠릅니다.
+
+```js
+import { test, mock } from 'node:test'
+import assert from 'node:assert/strict'
+import { handler } from './app.js'
+
+test('GET /health', () => {
+  const res = { end: mock.fn() }
+  res.writeHead = mock.fn(() => res)
+  handler({ method: 'GET', url: '/health' }, res)
+  const [status] = res.writeHead.mock.calls[0].arguments
+  const [body] = res.end.mock.calls[0].arguments
+  assert.equal(status, 200)
+  assert.equal(body, '{"ok":true}')
+})
+```
+
+- 핸들러가 `req.method`, `req.url`, `req.headers`만 읽으면 일반 객체로 충분합니다. 본문 스트림을 읽는 핸들러는 가짜 객체로 흉내 내기 번거로워 서버를 띄우는 통합 테스트가 낫습니다.
+- 가짜 응답 객체는 핸들러가 실제로 부르는 메서드만 구현합니다. 구현이 늘어나면 가짜가 실제와 달라질 위험이 있어서 서버를 띄우는 통합 테스트(포트 0과 `fetch`)로 바꿉니다.
+- 핸들러가 service 함수를 호출하는 구조라면 service는 핸들러와 분리해서 단위 테스트하고, 핸들러는 입력 변환과 상태 코드만 확인합니다.
+- 서버를 띄우고 실제 `fetch`로 호출하는 통합 테스트는 헤더, 상태 코드, 본문 직렬화, 라우팅까지 한 번에 검증합니다. Express 앱 같은 핸들러는 supertest로 요청을 보낼 수 있습니다(아래 supertest).
+
+```js
+// 서버를 띄운 통합 테스트
+const res = await fetch(`${base}/health`)
+assert.equal(res.status, 200)
+assert.deepEqual(await res.json(), { ok: true })
+```
+
+## 커버리지
+
+코드 커버리지는 테스트가 실행한 코드의 비율입니다. 테스트가 코드의 어느 부분을 실행했는지 보여 주는 지표이고, 올바르게 검증했는지는 보장하지 않습니다.
+
+```bash
+node --test --experimental-test-coverage
+```
+
+```text
+file      | line % | branch % | funcs % | uncovered lines
+all files | 100.00 |   100.00 |   75.00 |
+```
+
+- `--experimental-test-coverage` 플래그로 켭니다. 안정성 지수는 1(Experimental)이고 v19.7.0, v18.15.0에 추가되었습니다.
+- 줄(line), 분기(branch), 함수(funcs) 세 가지 비율과 실행되지 않은 줄을 표로 보여 줍니다.
+- 기본으로 테스트 파일과 `node_modules`, Node 코어 모듈은 보고서에서 제외됩니다. `--test-coverage-include`, `--test-coverage-exclude`로 바꿉니다.
+- `--test-coverage-lines=N`, `--test-coverage-branches=N`, `--test-coverage-functions=N`으로 최소 기준을 정하면 기준 미만일 때 실패합니다. CI에서 하한선으로 씁니다.
+- `--test-reporter=lcov --test-reporter-destination=lcov.info`로 lcov 파일을 만들어 외부 도구에 넘깁니다.
+- `/* node:coverage ignore next */`, `/* node:coverage disable */` 주석으로 일부 줄을 제외합니다.
+- 커버리지 100퍼센트는 목표가 아닙니다. 검증 없이 실행만 하는 테스트도 커버리지를 채웁니다. 낮은 커버리지가 테스트되지 않은 위험 지점을 찾는 데 쓸모가 있습니다.
+
+## Vitest·Jest와 비교
+
+Vitest와 Jest는 `node:test`와 같은 목적의 테스트 프레임워크입니다. 별도 패키지 설치가 필요하고 `expect` 스타일 검증과 풍부한 목·스냅샷 기능을 제공합니다.
+
+| 항목 | node:test | Vitest | Jest |
+|------|-----------|--------|------|
+| 설치 | 내장 | 개발 의존성 | 개발 의존성 |
+| 검증 | `node:assert` | Chai + Jest 호환 `expect` | `expect` |
+| 목 | `mock.fn`, `mock.method`, `mock.timers` | Jest 호환 `vi` 객체 | `jest.fn`, `jest.mock` |
+| ESM·TS | Node 그대로(`.ts`도 기본 탐색) | ESM 우선, TS·JSX 기본 지원 | TS는 Babel 또는 ts-jest, ESM은 실험적 |
+| 커버리지 | `--experimental-test-coverage` | v8 또는 istanbul | `--coverage` |
+| 감시 모드 | `--watch`(테스트 문서 기준 Experimental) | 변경 영향을 받는 테스트만 다시 실행 | `--watch`(변경된 파일 관련 테스트) |
+| 기반 | Node 런타임 | Vite | 자체 러너 |
+
+- Vitest는 문서에서 "Vite로 구동되는 차세대 테스트 프레임워크"라고 소개하며, 이 편이 확인한 문서 기준으로 Vite 6.4.0 이상과 Node 22.12.0 이상을 요구합니다. 파일 이름에 `.test.` 또는 `.spec.`이 있으면 테스트로 인식하고, Jest 호환 스냅샷과 목을 제공합니다.
+- Jest는 기본 환경이 Node이고(DOM 테스트용 jsdom은 선택), `*.test.js`와 `*.spec.js`를 찾습니다. ESM 지원은 Jest 문서가 실험적이라고 밝히고 `--experimental-vm-modules` 플래그를 요구합니다. Vite와는 공식 지원하지 않는다고 하며 Vitest를 권합니다.
+- NestJS 문서는 새로 생성한 프로젝트가 Vitest를 기본으로 쓴다고 설명하고, Nest의 테스트 API는 특정 러너에 종속되지 않는다고 합니다(자세히는 15편).
+- 선택 기준은 이렇습니다. 의존성을 늘리지 않으려면 `node:test`, TypeScript·ESM과 풍부한 목이 필요하면 Vitest, 이미 Jest로 구성된 코드베이스는 Jest를 유지합니다.
+- 어느 쪽이든 작성 패턴(준비, 실행, 검증, 정리)과 이 편의 주의점(비동기 `await`, 핸들 정리, 포트 0)은 같습니다.
+
+## supertest
+
+supertest는 HTTP 서버를 테스트하는 라이브러리입니다. `http.Server`나 Express 앱 같은 요청 핸들러 함수를 넘기면 요청을 보내고 응답을 검증하는 체이닝 API를 제공합니다. 서버가 아직 listen 중이 아니면 임시(ephemeral) 포트에 알아서 바인딩해 주므로 포트를 직접 관리하지 않아도 됩니다.
+
+```js
+import request from 'supertest'
+import { app } from './app.js'   // listen 하지 않고 export한 앱
+
+test('GET /users', async () => {
+  await request(app)
+    .get('/users')
+    .set('Accept', 'application/json')
+    .expect('Content-Type', /json/)
+    .expect(200)
+})
+```
+
+- `.expect(상태 코드)`, `.expect(헤더 이름, 값 또는 정규식)`로 검증하고, 응답은 `await`한 결과(`res.status`, `res.body`)로도 읽습니다.
+- `request.agent(app)`은 요청 사이에 쿠키를 유지합니다. 로그인한 상태의 요청 흐름을 테스트할 때 씁니다.
+- 앱을 `listen()` 없이 내보내는 구조여야 합니다. 서버 시작은 진입점 파일에서만 합니다(위 "포트 0으로 바인딩").
+- 별도 설치가 필요한 외부 패키지입니다.
+- Node 내장만으로도 포트 0과 `fetch`로 같은 통합 테스트를 쓸 수 있습니다. supertest는 그 보일러플레이트를 줄이는 도구입니다.
+- NestJS 문서도 e2e 테스트에서 HTTP 요청 시뮬레이션에 supertest를 쓰는 방식을 안내합니다.
+
+## Testcontainers와 테스트 DB 전략
+
+Testcontainers는 테스트 중에 Docker 컨테이너로 실제 DB 같은 서비스를 띄우고 끝나면 지워 주는 라이브러리입니다. Node용은 Docker 같은 컨테이너 런타임이 필요하고, PostgreSQL, MySQL, MongoDB, Redis, Kafka 같은 서비스용 모듈을 제공합니다.
+
+```js
+import { PostgreSqlContainer as Pg }
+  from '@testcontainers/postgresql'
+
+const container = await new Pg(IMAGE).start()
+const url = container.getConnectionUri()   // pg 클라이언트에 전달
+// ... 마이그레이션 적용, 테스트 ...
+await container.stop()
+```
+
+- `IMAGE`는 `postgres:16` 같은 Docker 이미지 이름입니다. 운영과 같은 종류·메이저 버전의 DB를 쓰는 것이 핵심입니다.
+- 컨테이너는 Ryuk이라는 정리 장치가 테스트 뒤에 자동으로 지웁니다. 그래도 `stop()`이나 `after` 훅에서 명시적으로 정리하는 편이 안전합니다.
+- 컨테이너 기동에는 시간이 걸리므로 테스트마다가 아니라 파일 전체(`before`)나 전체 실행(`globalSetup`)당 한 번 띄우는 편이 낫습니다.
+
+테스트 DB 전략은 목적에 따라 고릅니다.
+
+| 전략 | 설명 | 주의 |
+|------|------|------|
+| 컨테이너 DB (Testcontainers) | 운영과 같은 엔진을 격리된 컨테이너로 | Docker 필요, 기동 시간 |
+| 별도 테스트 DB | 개발 DB와 분리한 전용 DB | 개발·운영 DB를 절대 쓰지 않음 |
+| 매 테스트 전 데이터 초기화 | 테이블 비우기(truncate)와 시드 | 느려질 수 있음, 병렬 실행 시 충돌 |
+| 테스트마다 트랜잭션 후 롤백 | 시작 시 트랜잭션, 끝나면 롤백 | 코드가 자체 트랜잭션을 열면 적용이 복잡 |
+| 인메모리 SQLite 대체 | 가볍고 빠름 | 운영 DB와 SQL 방언·기능이 달라 결과가 다를 수 있음 |
+
+- 마이그레이션을 테스트 DB에 먼저 적용한 뒤 테스트를 실행합니다(마이그레이션은 17편).
+- Prisma 공식 문서도 통합 테스트에서 Docker로 DB를 띄워 개발·운영과 분리된 전용 환경을 쓰고, 마이그레이션을 먼저 적용하고, 스위트마다 데이터를 시드하고 끝나면 지우는 흐름을 권합니다.
+- 병렬 실행되는 테스트 파일이 한 DB를 공유하면 데이터가 섞입니다. 파일마다 별도 스키마나 DB를 쓰거나 병렬을 줄입니다(`--test-concurrency`).
+- 정리하지 않은 DB 연결 풀은 열린 핸들입니다. `after`에서 `pool.end()`를 호출합니다(위 열린 핸들 절).
+- CI 환경에도 컨테이너 런타임이 있어야 Testcontainers를 쓸 수 있습니다.
+
+## 스냅샷
+
+스냅샷 테스트는 값을 문자열로 직렬화해 파일에 저장해 둔 기준값과 비교하는 테스트입니다. 값이 크거나 모양이 자주 바뀌어 `assert`를 일일이 쓰기 번거로운 출력(응답 본문, 변환 결과)에 씁니다. v22.3.0에 추가되었고 v23.4.0부터 실험 단계가 아닙니다.
+
+```js
+test('응답 모양', (t) => {
+  t.assert.snapshot({ id: 1, tags: ['a', 'b'] })
+})
+```
+
+```bash
+node --test --test-update-snapshots   # 기준 파일 생성·갱신
+node --test                            # 이후 비교
+```
+
+- 기준 파일은 테스트 파일마다 `테스트파일명.snapshot`으로 생깁니다. 안에는 `테스트 이름 + 번호`를 키로 직렬화된 값이 들어 있습니다.
+- 기준 파일이 없는 상태에서 처음 실행하면 실패합니다. `--test-update-snapshots`로 한 번 만들고 소스 관리에 함께 커밋합니다.
+- 값이 바뀌면 테스트가 실패하고, 의도한 변경이라면 `--test-update-snapshots`로 기준을 갱신합니다.
+- 갱신 명령으로 습관처럼 덮어쓰면 회귀를 놓칩니다. 스냅샷 변경은 코드 리뷰에서 diff로 확인합니다.
+- 시각, 난수, ID처럼 실행마다 달라지는 값이 들어 있으면 매번 실패합니다. 고정하거나 비교 전에 제거합니다.
+- `t.assert.fileSnapshot(value, path)`는 지정한 파일에 기준을 저장합니다.
+- 스냅샷만으로는 무엇이 올바른지 알 수 없습니다. 핵심 규칙은 `assert`로 명시하고 스냅샷은 보조로 씁니다.
+
+## --test-only와 --watch
+
+`--test-only`와 `--watch`는 테스트 반복 실행 속도를 높이는 CLI 옵션입니다.
+
+```js
+test('이것만 실행', { only: true }, () => {})
+test('건너뜀', () => {})
+```
+
+```bash
+node --test --test-only
+```
+
+- `--test-only`를 주면 `only: true`가 붙은 최상위 테스트만 실행합니다. 이 플래그 없이 `only`를 쓰면 `'only' and 'runOnly' require the --test-only command-line option.` 메시지가 나오고 모든 테스트가 실행됩니다.
+- 스위트는 `describe.only`, 테스트는 `it.only`로 지정합니다. 서브테스트에서 쓸 때는 조상 테스트에도 `only`가 필요하고, 테스트 컨텍스트의 `t.runOnly(true)`로 서브테스트 단위로 제어할 수도 있습니다.
+- `only`는 개발 중 하나만 돌려 보는 용도라서 커밋 전에 지웁니다. 남아 있으면 나머지 테스트가 조용히 건너뛰어집니다. CI에서는 `--test-only`를 쓰지 않아야 합니다.
+- 이름으로 고를 때는 코드 수정 없이 `--test-name-pattern="정규식"`을 씁니다.
+- `node --test --watch`는 테스트 파일과 그 의존 파일을 감시하다가 변경되면 영향받는 테스트를 다시 실행합니다. 프로세스를 끝낼 때까지 계속 실행됩니다. `node:test` 문서의 감시 모드 절은 안정성 지수를 1(Experimental)로 표시합니다.
+- `--watch` 자체는 v22.0.0, v20.13.0부터 안정 상태로 문서에 기록되어 있어, 테스트와 함께 쓰는 경우의 표기가 다릅니다. 사용하는 버전의 문서를 확인합니다.
+- `--watch`와 `--test-only`는 함께 쓸 수 있습니다.
+
+## 핵심 정리
+
+- 단위 테스트는 의존을 떼어 낸 함수 하나를, 통합 테스트는 HTTP·DB·파일까지 실제로 연결한 흐름을 검증하며 둘을 함께 둡니다.
+- `node:test`는 `node --test`로 실행하는 내장 러너이고 `describe`와 `it`으로 구성하며 `node:assert/strict`로 검증하고 실패하면 종료 코드 1입니다.
+- `mock.fn`과 `mock.method`로 호출을 기록하고 바꾸며, `mock.timers`로 시간을 앞당겨 타이머 테스트를 즉시 끝내고, `t.mock`은 테스트 후 자동 복구됩니다.
+- 비동기 테스트는 `async`/`await`로 끝까지 기다려야 하고, 서버·풀·타이머 같은 열린 핸들은 `after`나 `t.after`로 닫아야 프로세스가 종료됩니다.
+- 테스트 서버는 포트 0으로 띄워 `server.address().port`를 읽고, 파일은 `mkdtemp` 임시 디렉터리를, 상태는 `beforeEach` 픽스처로 격리합니다.
+- 서버를 띄우지 않는 핸들러 직접 호출, supertest의 임시 포트, Testcontainers의 실제 DB 컨테이너는 범위가 다른 도구이며, 커버리지·스냅샷·`--test-only`·`--watch`는 보조 기능입니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="통합 테스트에서 테스트용 HTTP 서버를 띄울 때 server.listen(0)을 쓰는 이유로 알맞은 것은?"
+  options={['포트 0은 외부 접속을 자동으로 막아 주기 때문이다', '운영체제가 사용 중이 아닌 임의의 포트를 배정해 병렬로 도는 테스트와 포트가 충돌하지 않기 때문이다', '포트 0이면 server.address()를 읽을 필요가 없어지기 때문이다', '포트 0으로 띄운 서버는 server.close()를 호출하지 않아도 프로세스가 종료되기 때문이다']}
+  correctAnswer={2}
+  explanation="포트를 생략하거나 0을 주면 운영체제가 사용 중이 아닌 임의의 포트를 배정하고 listening 이후 server.address().port로 읽습니다. 고정 포트는 다른 테스트 파일이나 개발 서버와 EADDRINUSE 충돌을 일으킵니다. 외부 접속 차단은 호스트를 127.0.0.1로 지정해야 하고, 서버는 포트와 무관하게 close()로 닫아야 종료됩니다."
+  optionExplanations={['접속 제한은 포트가 아니라 바인딩 호스트(127.0.0.1)로 정합니다.', '임의 포트 배정으로 병렬 테스트의 포트 충돌을 피하는 것이 이유입니다.', '배정된 포트를 알아야 요청을 보낼 수 있으므로 address().port를 읽어야 합니다.', '열린 서버는 포트와 관계없이 닫지 않으면 프로세스가 끝나지 않습니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="테스트 함수가 load()가 돌려준 Promise에 then으로 검증을 붙이기만 하고 반환도 await도 하지 않는다. load()가 값 2로 이행하고 검증은 1과 비교할 때 일어나는 일은?"
+  options={['검증이 실패해 테스트가 즉시 실패로 표시된다', 'Promise를 반환하거나 await하지 않아서 테스트는 먼저 통과로 끝나고, 실패는 테스트가 끝난 뒤의 처리되지 않은 거부로 늦게 나타난다', 'node:test가 then 체인을 자동으로 기다려 준다', '콜백 done을 받지 않았으므로 타임아웃 에러가 난다']}
+  correctAnswer={2}
+  explanation="테스트 함수가 Promise를 반환하지도 await하지도 않으면 러너는 동기 함수로 보고 곧바로 통과 처리합니다. 이후 검증이 실패하면 끝난 테스트에서 발생한 unhandledRejection으로 보고되어 엉뚱한 곳에서 실패가 드러납니다. async 함수로 만들고 await하거나 Promise를 return해야 합니다."
+  optionExplanations={['검증은 테스트 함수가 끝난 뒤에 실행되어 테스트 결과에 즉시 반영되지 않습니다.', '기다리지 않은 Promise는 테스트 완료 이후에 실패가 늦게 나타납니다.', '러너는 반환하지 않은 Promise 체인을 알 수 없어 기다리지 못합니다.', 'done 콜백을 받지 않는 함수에는 해당하지 않으며 타임아웃도 발생하지 않습니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="mock.timers로 5초 뒤 실행되는 setTimeout 로직을 즉시 검증하려 한다. 올바른 순서는?"
+  options={['setTimeout을 호출한 뒤 5초 동안 await로 기다린다', 'mock.timers.enable로 setTimeout을 가짜로 바꾸고 setTimeout을 호출한 뒤 mock.timers.tick(5000)으로 시계를 앞당긴다', 'import { setTimeout } from node:timers로 가져온 함수에 mock.timers.enable을 적용한다', 'mock.fn으로 setTimeout 전체를 직접 덮어쓴다']}
+  correctAnswer={2}
+  explanation="mock.timers.enable({ apis: [setTimeout] })로 가짜 시계를 켜면 전역 setTimeout 호출이 가짜 시계에 예약되고 tick으로 시계를 앞당기면 실제로 기다리지 않고 콜백이 실행됩니다. node:timers에서 구조 분해해 가져온 함수는 이 API가 지원하지 않는다고 공식 문서가 밝힙니다."
+  optionExplanations={['실제로 5초를 기다리므로 mock timers를 쓰는 의미가 없습니다.', '가짜 시계를 켜고 예약한 뒤 tick으로 앞당기는 올바른 순서입니다.', '구조 분해로 가져온 타이머 함수는 mock timers가 지원하지 않습니다.', '직접 덮어쓰면 복구와 시간 진행 제어를 따로 구현해야 하고 이 API가 해 주는 일이 아닙니다.']}
+/>
+
+## 참고 자료
+
+- [Node.js — Test runner](https://nodejs.org/api/test.html)
+- [Node.js — Assert](https://nodejs.org/api/assert.html)
+- [Node.js — Command-line options](https://nodejs.org/api/cli.html)
+- [Node.js — Net (server.listen)](https://nodejs.org/api/net.html)
+- [Node.js — HTTP (server.close)](https://nodejs.org/api/http.html)
+- [Vitest — Getting Started](https://vitest.dev/guide/)
+- [Vitest — Features](https://vitest.dev/guide/features.html)
+- [Jest — Getting Started](https://jestjs.io/docs/getting-started)
+- [Jest — ECMAScript Modules](https://jestjs.io/docs/ecmascript-modules)
+- [supertest](https://github.com/forwardemail/supertest)
+- [Testcontainers for Node.js](https://node.testcontainers.org/)
+- [Testcontainers — PostgreSQL module](https://node.testcontainers.org/modules/postgresql/)
+- [Prisma — Integration testing](https://www.prisma.io/docs/orm/prisma-client/testing/integration-testing)
+- [NestJS — Testing](https://docs.nestjs.com/fundamentals/testing)

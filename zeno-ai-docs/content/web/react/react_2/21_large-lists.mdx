@@ -1,0 +1,367 @@
+---
+title: '21. 대규모 리스트'
+description: '긴 리스트가 느린 이유, 가상화(윈도잉)와 TanStack Virtual·react-window, IntersectionObserver 무한 스크롤, 페이지네이션, key·행 메모이제이션, 스크롤 성능과 content-visibility를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 긴 리스트가 느려지는 원인을 구별하고, 페이지 나누기·무한 스크롤·가상화·CSS 렌더링 건너뛰기 가운데 상황에 맞는 방법을 고르며, key와 행 메모이제이션을 올바르게 적용할 수 있습니다.
+</Callout>
+
+## 긴 리스트의 비용
+
+리스트가 길면 느려지는 이유는 세 가지입니다. 항목 수에 비례해 비용이 늘어납니다.
+
+| 비용 | 발생 시점 |
+|------|-----------|
+| 컴포넌트 렌더링 | 부모가 다시 렌더링될 때마다 모든 행 함수가 호출됨 |
+| DOM 노드 생성·배치 | 처음 그릴 때와 레이아웃이 바뀔 때 |
+| 메모리 | 행마다 DOM 노드와 Fiber가 남음 |
+
+수백 개까지는 문제가 되지 않는 경우가 많습니다. 느려지기 전에 측정하는 것이 먼저입니다(자세히는 20편). 측정으로 병목이 확인되면 아래 표에서 방법을 고릅니다.
+
+| 방법 | 줄이는 것 | 대가 |
+|------|-----------|------|
+| 페이지네이션 | 한 번에 가져오고 그리는 항목 수 | 페이지 이동 UI |
+| 무한 스크롤 | 처음 가져오는 항목 수 | 쌓이는 DOM은 그대로 늘어남 |
+| 가상화 | 화면에 그리는 DOM 수 | 높이 계산 필요, 찾기·접근성 제약 |
+| `content-visibility` | 화면 밖 행의 렌더링 작업 | DOM은 남음, 높이 추정 필요 |
+| 행 메모이제이션 | 다시 렌더링하는 행 수 | 안정된 props 필요 |
+
+방법은 겹쳐 쓸 수 있습니다. 예를 들어 무한 스크롤로 가져오면서 가상화로 그릴 수 있습니다.
+
+## 가상화와 윈도잉
+
+가상화(virtualization)는 전체 항목 중 화면에 보이는 것만 DOM으로 만드는 기법입니다. 윈도잉(windowing)은 같은 뜻으로 쓰이며, 스크롤 위치에 따라 "창"이 데이터 위를 움직인다는 데서 나온 이름입니다.
+
+동작은 네 단계입니다.
+
+- 스크롤 컨테이너의 높이는 `항목 수 × 행 높이`로 고정해 스크롤바가 전체 길이를 나타내게 합니다.
+- 스크롤 위치(`scrollTop`)와 뷰포트 높이로 보이는 인덱스 범위를 계산합니다.
+- 그 범위의 행만 렌더링하고, 각 행을 절대 위치(또는 변환)로 제자리에 놓습니다.
+- 스크롤하면 범위를 다시 계산합니다. 범위를 벗어난 행은 언마운트되고 새 행이 마운트됩니다.
+
+화면 밖에 일정 개수의 행을 더 그리는 것을 overscan이라고 합니다. 빠르게 스크롤할 때 빈 칸이 보이는 것을 줄입니다.
+
+가상화의 제약은 다음과 같습니다.
+
+- 화면 밖 행은 DOM에 없어서 브라우저의 페이지 내 찾기에 잡히지 않습니다.
+- 행이 언마운트되므로 행 안의 state(입력값, 펼침 상태)가 사라집니다. 필요하면 행 바깥으로 올립니다.
+- 행 높이를 알아야 합니다. 높이가 제각각이면 추정하고 측정해서 보정합니다.
+- 보조 기술 사용자는 전체 항목 수를 알 수 없으므로 `aria-rowcount` 같은 속성을 직접 챙겨야 합니다(자세히는 32편).
+
+## TanStack Virtual
+
+TanStack Virtual은 리스트 가상화를 위한 헤드리스(headless) 유틸리티입니다. 마크업과 스타일을 제공하지 않고 계산만 맡습니다. React용 패키지는 `@tanstack/react-virtual`이고 Vue·Svelte·Solid·Lit·Angular와 바닐라 JS용 어댑터도 있습니다. 세로가 기본이고 가로 방향과 격자형 배치도 지원합니다.
+
+`useVirtualizer`에는 세 옵션이 필요합니다.
+
+| 옵션 | 뜻 |
+|------|----|
+| `count` | 전체 항목 수 |
+| `getScrollElement` | 스크롤 컨테이너를 돌려주는 함수 |
+| `estimateSize` | 항목 크기 추정값을 돌려주는 함수 |
+
+```jsx
+function List({ rows }) {
+  const parentRef = useRef(null)
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 40,
+    overscan: 5,
+  })
+  // ...
+}
+```
+
+반환된 인스턴스의 메서드로 그립니다.
+
+- `getVirtualItems()` — 지금 그려야 할 항목의 목록입니다. 각 항목은 `index`, `key`, `start`(시작 위치) 등을 가집니다.
+- `getTotalSize()` — 전체 높이입니다. 안쪽 컨테이너의 높이로 씁니다.
+
+```jsx
+<div ref={parentRef} style={scrollBox}>
+  <div style={{ height: virtualizer.getTotalSize(),
+                position: 'relative' }}>
+    {virtualizer.getVirtualItems().map((v) => (
+      <div key={v.key} style={{
+        position: 'absolute', height: v.size,
+        transform: `translateY(${v.start}px)`,
+      }}>
+        {rows[v.index].name}
+      </div>
+    ))}
+  </div>
+</div>
+```
+
+는 `{ height: 400, overflow: 'auto' }` 스타일 객체입니다. `scrollBox`는 높이와 `overflow: 'auto'`를 가진 스타일 객체입니다.
+
+높이가 제각각이면 행에 `ref={virtualizer.measureElement}`와 `data-index`를 붙입니다. 실제로 그려진 크기를 측정해 계산을 보정하고, `estimateSize`는 측정 전의 초기 추정값으로만 쓰입니다.
+
+```jsx
+<div ref={virtualizer.measureElement} data-index={v.index}>
+  {rows[v.index].text}
+</div>
+```
+
+## react-window
+
+react-window는 `npm install react-window`로 설치하는 리스트·격자 가상화 컴포넌트 라이브러리입니다. TanStack Virtual과 달리 완성된 컴포넌트를 제공합니다. 공식 문서 기준 현재 문서는 새 API이고, 1.x 문서는 별도 주소로 분리되어 있습니다. 1.x와 API가 다르므로 예제를 가져올 때 버전을 확인합니다.
+
+`List`의 필수 props는 다음과 같습니다.
+
+| prop | 뜻 |
+|------|----|
+| `rowComponent` | 행을 그리는 컴포넌트. `index`와 `style` props를 받음 |
+| `rowCount` | 전체 행 수 |
+| `rowHeight` | 숫자(픽셀), 퍼센트, 함수, 동적 높이 캐시 중 하나 |
+| `rowProps` | 행 컴포넌트에 추가로 넘길 props |
+
+```jsx
+function Row({ index, style, items }) {
+  return <div style={style}>{items[index].name}</div>
+}
+
+<List
+  rowComponent={Row}
+  rowCount={items.length}
+  rowHeight={40}
+  rowProps={{ items }}
+/>
+```
+
+- 행 컴포넌트가 받은 `style`을 최상위 요소에 반드시 적용해야 위치가 맞습니다.
+- `overscanCount`로 화면 밖에 더 그릴 행 수를 정합니다. `rowKey`로 key를 직접 정할 수 있습니다.
+- 행과 열이 모두 있는 데이터는 `Grid`(`cellComponent`, `columnCount`, `rowCount`, `columnWidth`, `rowHeight`)를 씁니다.
+
+고르는 기준은 다음과 같습니다.
+
+| 기준 | TanStack Virtual | react-window |
+|------|------------------|--------------|
+| 형태 | 계산만 제공(헤드리스) | 컴포넌트 제공 |
+| 마크업 자유도 | 높음(표, 채팅, 격자 등) | List·Grid 구조에 맞춤 |
+| 설정량 | 많음 | 적음 |
+
+## IntersectionObserver
+
+IntersectionObserver는 요소가 뷰포트나 지정한 조상 요소와 겹치는지를 비동기로 알려 주는 브라우저 API입니다. 스크롤 이벤트 핸들러에서 위치를 계산하는 것보다 가볍고, 메인 스레드를 막지 않습니다. 2019년 3월부터 주요 브라우저에서 쓸 수 있습니다.
+
+```js
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach((entry) => {
+    entry.isIntersecting       // 겹치는 중이면 true
+    entry.intersectionRatio    // 보이는 비율 0–1
+  })
+}, { root: null, rootMargin: '200px', threshold: 0 })
+observer.observe(target)
+```
+
+| 옵션 | 뜻 |
+|------|----|
+| `root` | 기준 요소. `null`이면 문서 뷰포트 |
+| `rootMargin` | 기준 영역을 늘이거나 줄이는 여백. `'200px'`이면 200px 앞에서 감지 |
+| `threshold` | 콜백을 부를 보임 비율. 숫자 또는 배열(0–1) |
+
+메서드는 `observe(el)`, `unobserve(el)`, `disconnect()`(전부 중단), `takeRecords()`(대기 중인 기록을 즉시 꺼냄)입니다. 대표 용도는 이미지 지연 로딩, 무한 스크롤, 광고 노출 측정, 화면에 보일 때만 애니메이션 실행입니다.
+
+**흔한 실수:** 컴포넌트가 사라질 때 관찰을 끝내지 않는 것입니다. Effect의 정리 함수에서 `disconnect()`를 호출합니다.
+
+## 무한 스크롤
+
+무한 스크롤은 사용자가 목록 끝에 가까워지면 다음 항목을 가져와 이어 붙이는 방식입니다. 끝에 "감시용 요소"(sentinel)를 두고 IntersectionObserver로 감시합니다.
+
+```jsx
+function useSentinel(onVisible) {
+  const ref = useRef(null)
+  useEffect(() => {
+    const io = new IntersectionObserver(([e]) => {
+      if (e.isIntersecting) onVisible()
+    }, { rootMargin: '300px' })
+    io.observe(ref.current)
+    return () => io.disconnect()
+  }, [onVisible])
+  return ref
+}
+```
+
+```jsx
+const sentinelRef = useSentinel(loadMore)
+// ...
+<li ref={sentinelRef} aria-hidden="true" />
+```
+
+규칙과 주의점은 다음과 같습니다.
+
+- 요청 중에 같은 요청을 또 보내지 않도록 `isLoading`과 `hasMore`를 확인합니다. 새 항목이 들어오기 전에 감시용 요소가 계속 보이면 콜백이 반복해서 불립니다.
+- `rootMargin`으로 끝에 닿기 전에 미리 가져옵니다.
+- 다음 페이지를 가리키는 값은 오프셋(몇 번째부터)보다 커서(마지막 항목의 ID나 서버가 준 토큰)가 안전합니다. 중간에 항목이 추가·삭제되어도 중복이나 누락이 생기지 않습니다.
+- 항목이 쌓이면 DOM도 계속 늘어납니다. 수천 개를 넘길 수 있으면 가상화를 함께 씁니다.
+- 푸터처럼 목록 아래에 있어야 할 내용이 있으면 사용자가 닿기 전에 계속 밀려납니다. 이 경우 "더 보기" 버튼이 낫습니다.
+- 서버 데이터를 쓰는 앱은 `useInfiniteQuery` 같은 서버 상태 라이브러리가 페이지 누적과 로딩 상태를 관리합니다(자세히는 26편, 28편).
+
+**흔한 실수:** 스크롤 이벤트에서 `scrollTop + clientHeight >= scrollHeight`를 매번 계산하는 것입니다. 이벤트가 매우 자주 발생하고 레이아웃 계산을 강제합니다. 위의 감시용 요소 방식으로 바꿉니다.
+
+## 페이지네이션
+
+페이지네이션은 전체 목록을 일정 크기로 나눠 한 번에 한 페이지만 보여 주는 방식입니다.
+
+| 방식 | 요청 | 특징 |
+|------|------|------|
+| 오프셋 | `page=3&size=20` | 임의의 페이지로 바로 이동 가능. 중간에 항목이 바뀌면 중복·누락이 생길 수 있음 |
+| 커서 | `after=마지막ID` | 앞뒤 이동만 가능. 변경에 안정적 |
+
+- 사용자가 특정 위치를 찾아 돌아와야 하거나, 총 개수와 현재 위치가 중요하거나, 푸터에 닿아야 하는 화면은 페이지네이션이 맞습니다.
+- 현재 페이지 번호는 URL에 두면 새로고침·공유·뒤로 가기가 자연스럽습니다(자세히는 29편).
+- 다음 페이지로 넘어가는 동안 이전 페이지를 유지하면 깜빡임이 줄어듭니다(자세히는 28편).
+- 페이지 상태를 `useState`로만 두고 필터가 바뀔 때 1로 되돌리지 않는 것이 흔한 실수입니다. 필터나 정렬이 바뀌면 페이지를 초기화합니다.
+
+선택 기준을 정리하면 다음과 같습니다.
+
+| 상황 | 방법 |
+|------|------|
+| 검색 결과, 관리자 표, 위치 기억이 중요 | 페이지네이션 |
+| 피드, 타임라인처럼 훑어 내려가는 목록 | 무한 스크롤 |
+| 한 번에 수천 행 이상을 그려야 함 | 가상화 |
+
+## Key 최적화
+
+`key`는 React가 배열의 어느 항목이 어느 컴포넌트에 대응하는지 알아내는 식별자입니다. 리스트 성능과 정확성에 직접 영향을 줍니다. 공식 문서가 정하는 규칙은 세 가지입니다.
+
+- 형제 사이에서 고유해야 합니다. 다른 배열에서는 같은 key를 써도 됩니다.
+- 바뀌면 안 됩니다. 렌더링 중에 새로 만들지 않습니다.
+- `map` 안에서 바로 반환하는 JSX 요소에는 항상 필요합니다.
+
+```jsx
+items.map((it, i) => <Row key={i} item={it} />)   // ❌
+items.map((it) => <Row key={Math.random()} {...it} />) // ❌
+items.map((it) => <Row key={it.id} item={it} />)  // ✅
+```
+
+- 서버 데이터는 데이터베이스 ID를 씁니다. 로컬에서 만든 데이터는 항목을 만들 때 `crypto.randomUUID()`나 증가하는 카운터로 ID를 붙여 저장합니다.
+- 인덱스 key는 항목이 추가·삭제·재정렬되면 같은 위치의 다른 항목에 이전 state와 DOM이 붙습니다. 입력값이 엉뚱한 행으로 옮겨 가는 버그가 여기서 나옵니다. 목록이 절대 바뀌지 않는 정적 목록에서만 안전합니다.
+- `Math.random()`처럼 렌더링마다 바뀌는 key는 모든 행을 매번 지우고 다시 만들어서 가장 나쁩니다. 메모이제이션도 소용이 없어집니다.
+- 한 항목이 요소를 여러 개 반환하면 `Fragment`에 key를 줍니다. 짧은 문법 `<>`에는 key를 줄 수 없습니다.
+- key를 바꾸면 React는 그 컴포넌트를 새로 만듭니다. 이 성질을 이용해 state를 의도적으로 초기화할 수도 있습니다.
+
+## Row Memoization
+
+부모가 다시 렌더링되면 모든 행도 다시 렌더링됩니다. 행 컴포넌트를 `memo`로 감싸면 props가 같을 때 건너뜁니다. `memo`는 props를 `Object.is`로 얕게 비교합니다(자세히는 18편).
+
+```jsx
+const Row = memo(function Row({ item, onSelect }) {
+  const click = () => onSelect(item.id)
+  return <li onClick={click}>{item.name}</li>
+})
+```
+
+행에 `memo`가 효과를 내려면 props가 안정적이어야 합니다.
+
+- 행에 객체나 배열을 새로 만들어 넘기면 매번 다른 값이라 비교가 실패합니다. 항목 자체(`item`)나 원시 값(`id`, `name`)을 넘깁니다.
+- 핸들러는 부모에서 `useCallback`으로 고정하고, 행 안에서 `item.id`와 합쳐 호출합니다(자세히는 19편).
+- 목록을 갱신할 때 바뀐 항목만 새 객체로 만들고 나머지는 이전 참조를 유지해야 합니다. `map`으로 전부 새 객체를 만들면 모든 행이 다시 렌더링됩니다.
+- 선택 상태를 부모의 state로 두고 `selected` 불리언을 내려 주면, 선택이 바뀌어도 해당 두 행만 다시 렌더링됩니다.
+
+```jsx
+const next = items.map((it) =>
+  it.id === id ? { ...it, done: !it.done } : it,
+)
+// 바뀐 항목만 새 객체. 나머지 행은 memo가 건너뜀
+```
+
+- React Compiler를 쓰면 컴파일러가 비슷한 메모이제이션을 자동으로 적용하므로 수동 `memo`가 필요 없는 경우가 많습니다(자세히는 18편).
+- `memo`는 렌더링을 건너뛸 뿐 DOM 수를 줄이지 못합니다. 행이 수천 개면 가상화가 먼저입니다.
+
+**흔한 실수:** 측정 없이 모든 행에 `memo`를 붙이는 것입니다. 행이 가벼우면 비교 비용이 렌더링 비용보다 클 수 있습니다. Profiler로 행이 실제로 불필요하게 다시 그려지는지 먼저 확인합니다.
+
+## Scroll Performance
+
+스크롤이 끊기는 원인은 대부분 스크롤 중에 메인 스레드가 오래 일하기 때문입니다. 줄이는 방법은 다음과 같습니다.
+
+- 스크롤 이벤트마다 `setState`를 호출하지 않습니다. 이벤트가 초당 수십 번 발생해 렌더링이 쌓입니다. 위치가 필요하면 IntersectionObserver를 쓰거나, 값이 바뀔 때만 state를 갱신합니다.
+- 스크롤 이벤트를 꼭 써야 하면 `{ passive: true }`로 등록합니다. 리스너가 `preventDefault()`를 호출하지 않겠다고 알리면 브라우저가 리스너 종료를 기다리지 않고 스크롤을 시작합니다. `window`·`document`·`body`의 `wheel`, `touchstart`, `touchmove`는 기본값이 `true`입니다. 그 외 요소는 기본값이 `false`이므로 직접 지정합니다.
+- 행의 DOM 수를 줄입니다. 가상화가 가장 효과가 크고, 행 안의 불필요한 래퍼 요소와 큰 이미지도 줄입니다.
+- 스크롤 중에 행이 마운트될 때 무거운 작업(이미지 디코딩, 큰 계산)을 하지 않습니다. 이미지는 `loading="lazy"`로 늦추고 크기를 미리 정해 레이아웃 이동을 막습니다.
+- 개발 서버가 아니라 프로덕션 빌드에서 측정합니다. 개발 모드의 추가 검사가 느린 원인으로 오해되곤 합니다(자세히는 20편).
+
+```js
+window.addEventListener('scroll', onScroll, {
+  passive: true,
+})
+// 해제할 때도 같은 함수 참조로 removeEventListener 호출
+```
+
+## content-visibility
+
+`content-visibility`는 화면 밖 요소의 렌더링 작업을 브라우저가 건너뛰게 하는 CSS 속성입니다. 건너뛰는 것은 레이아웃, 페인트, 스타일 계산입니다. JavaScript 없이 쓰고, 요소는 DOM에 그대로 남습니다.
+
+| 값 | 동작 |
+|----|------|
+| `visible` | 기본값. 효과 없음 |
+| `auto` | 화면 밖이면 렌더링을 건너뛰고, 가까워지면 렌더링함 |
+| `hidden` | 항상 건너뜀. `display: none`과 비슷하며 찾기·탭 이동에 잡히지 않음 |
+
+```css
+.row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 48px;
+}
+```
+
+- 건너뛴 요소는 크기 격리가 걸려 높이가 0이 되어 스크롤바가 흔들립니다. `contain-intrinsic-size`로 자리 크기를 예약합니다. `auto` 키워드는 한 번 그려진 실제 크기를 기억합니다.
+- `auto`는 건너뛴 내용도 접근성 트리에 남고, 포커스·선택·페이지 내 찾기가 됩니다. 가상화와 다른 점입니다. `hidden`은 이런 기능이 되지 않습니다.
+- web.dev의 여행 블로그 예제는 처음 렌더링이 232ms에서 30ms로 줄었습니다. 구조에 따라 효과는 크게 다릅니다.
+- 건너뛴 부분 트리에서 렌더링을 강제하는 DOM API(크기 읽기 등)를 부르면 이득이 사라집니다.
+- MDN 기준 2024년 9월부터 최신 브라우저 전반에서 쓸 수 있는 Baseline 상태입니다. 세부 지원 수준은 브라우저 호환성 표에서 확인합니다.
+
+가상화와 비교하면 `content-visibility`는 적용이 쉽고 DOM을 유지해서 부작용이 적지만, 노드 수와 메모리는 줄이지 못합니다. 수백 개에서 수천 개 사이의 목록은 이 속성을 먼저 시도할 만합니다.
+
+## 핵심 정리
+
+- 긴 리스트의 비용은 렌더링, DOM 노드, 메모리에서 나오며 측정으로 병목을 확인한 뒤 방법을 고릅니다.
+- 가상화는 보이는 행만 DOM으로 만듭니다. TanStack Virtual은 계산만 주는 헤드리스 도구이고 react-window는 List·Grid 컴포넌트를 줍니다.
+- 무한 스크롤은 끝의 감시용 요소를 IntersectionObserver로 감시하고, 중복 요청을 막으며, 정리 함수에서 `disconnect()`를 호출합니다.
+- key는 안정된 고유 ID를 쓰고 인덱스·난수 key를 피합니다. 행 `memo`는 props가 안정적일 때만 효과가 있습니다.
+- 스크롤 이벤트에서 state를 갱신하지 않고, 불가피하면 `passive: true`를 씁니다.
+- `content-visibility: auto`와 `contain-intrinsic-size`는 DOM을 유지한 채 화면 밖 렌더링을 건너뜁니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="리스트 가상화(윈도잉)의 동작으로 옳은 것은?"
+  options={['모든 행을 렌더링하되 화면 밖 행의 CSS만 숨긴다', '스크롤 위치로 보이는 범위를 계산해 그 행만 DOM으로 만든다', '서버에서 한 페이지씩만 가져와 이전 페이지를 버린다', '행 컴포넌트를 memo로 감싸 다시 렌더링되지 않게 한다']}
+  correctAnswer={2}
+  explanation="가상화는 전체 높이를 확보한 채 보이는 인덱스 범위의 행만 렌더링하고 스크롤할 때 범위를 다시 계산합니다. 화면 밖 행은 DOM에 존재하지 않습니다. CSS로 숨기는 방식은 DOM 수를 줄이지 못하고, 서버 페이지 분할은 페이지네이션이며, memo는 다시 렌더링을 건너뛸 뿐 DOM 수를 줄이지 못합니다."
+  optionExplanations={['숨기기만 하면 DOM 노드와 렌더링 비용이 그대로 남습니다.', '정답입니다. 보이는 범위만 마운트하고 스크롤하면 범위를 갱신합니다.', '이것은 페이지네이션이며 가상화가 아닙니다.', 'memo는 재렌더링 건너뛰기이고 DOM 노드 수는 줄이지 못합니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="무한 스크롤을 IntersectionObserver로 구현할 때 가장 적절한 방식은?"
+  options={['scroll 이벤트마다 scrollTop을 state에 저장해 끝 위치와 비교한다', '목록 끝에 감시용 요소를 두고 보이면 다음 페이지를 요청하며 정리 함수에서 disconnect를 호출한다', '일정 시간마다 setInterval로 다음 페이지를 요청한다', '처음에 모든 페이지를 한꺼번에 가져온 뒤 숨겨 둔다']}
+  correctAnswer={2}
+  explanation="끝의 감시용 요소가 보일 때 콜백이 불리므로 스크롤 이벤트와 레이아웃 계산이 필요 없습니다. 요청 중복을 막는 확인과 언마운트 시 disconnect가 함께 필요합니다. scroll 이벤트마다 state를 갱신하면 렌더링이 쌓이고, 주기 요청과 일괄 가져오기는 무한 스크롤의 목적에 맞지 않습니다."
+  optionExplanations={['스크롤 이벤트는 매우 자주 발생하고 레이아웃 계산을 강제해 성능이 나빠집니다.', '정답입니다. 비동기 관찰이라 메인 스레드 부담이 적습니다.', '사용자 스크롤과 무관하게 요청하게 되어 낭비입니다.', '처음 가져오는 양이 줄지 않아 무한 스크롤의 장점이 없습니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="리스트 행의 key에 대한 설명으로 옳은 것은?"
+  options={['항목이 재정렬되는 목록에서도 map의 인덱스를 key로 쓰는 것이 가장 안전하다', 'key는 렌더링할 때마다 Math.random으로 새로 만들어야 충돌이 없다', 'key는 형제 사이에서 고유하고 바뀌지 않아야 하며 데이터의 고유 ID를 쓴다', 'Fragment에는 key를 줄 수 없다']}
+  correctAnswer={3}
+  explanation="공식 문서는 key가 형제 사이에서 고유해야 하고 렌더링 중에 새로 만들면 안 된다고 정합니다. 인덱스 key는 재정렬이나 삭제 때 state와 DOM이 다른 항목에 붙는 버그를 만들고, 난수 key는 모든 행을 매번 다시 만듭니다. 여러 요소를 반환하는 항목에는 Fragment에 key를 줄 수 있습니다."
+  optionExplanations={['재정렬과 삭제에서 state가 엉뚱한 행으로 옮겨 가는 원인이 됩니다.', '렌더링마다 key가 바뀌면 모든 행이 지워지고 새로 만들어집니다.', '정답입니다. 서버 ID나 항목 생성 시 붙인 ID를 사용합니다.', 'Fragment 태그를 직접 쓰면 key를 줄 수 있습니다. 짧은 문법만 불가능합니다.']}
+/>
+
+## 참고 자료
+
+- [TanStack Virtual — Introduction](https://tanstack.com/virtual/latest/docs/introduction)
+- [TanStack Virtual — useVirtualizer (React)](https://tanstack.com/virtual/latest/docs/framework/react/react-virtual)
+- [react-window — GitHub](https://github.com/bvaughn/react-window)
+- [MDN — Intersection Observer API](https://developer.mozilla.org/en-US/docs/Web/API/Intersection_Observer_API)
+- [MDN — content-visibility](https://developer.mozilla.org/en-US/docs/Web/CSS/content-visibility)
+- [web.dev — content-visibility](https://web.dev/articles/content-visibility)
+- [MDN — EventTarget.addEventListener() (passive)](https://developer.mozilla.org/en-US/docs/Web/API/EventTarget/addEventListener)
+- [React 공식 문서 — Rendering Lists](https://react.dev/learn/rendering-lists)
+- [React 공식 문서 — memo](https://react.dev/reference/react/memo)

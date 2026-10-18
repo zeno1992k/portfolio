@@ -1,0 +1,357 @@
+---
+title: '09. CORS와 쿠키'
+description: 'CORS가 브라우저 정책인 이유와 서버가 붙이는 헤더, preflight, 쿠키와 Set-Cookie 속성(HttpOnly·Secure·SameSite), __Host- 접두사, CSRF 방어의 한계를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 브라우저가 CORS를 판정하는 방식과 서버가 보내야 하는 헤더를 설명하고, Node 서버에서 안전한 속성을 붙여 쿠키를 발급하며, SameSite만으로 CSRF를 막을 수 없는 경우를 구분할 수 있습니다.
+</Callout>
+
+## CORS는 브라우저 정책
+
+CORS(Cross-Origin Resource Sharing)는 서버가 "자신 말고 어느 출처가 이 응답을 읽어도 되는가"를 HTTP 헤더로 알리는 방식입니다. 출처(origin)는 스킴, 호스트, 포트의 조합입니다. 셋 중 하나라도 다르면 다른 출처입니다.
+
+```text
+https://app.example.com        기준
+https://app.example.com/a      같은 출처 (경로는 무관)
+http://app.example.com         다른 출처 (스킴)
+https://api.example.com        다른 출처 (호스트)
+https://app.example.com:8443   다른 출처 (포트)
+```
+
+- 판정하는 쪽은 서버가 아니라 브라우저입니다. 서버는 헤더를 붙일 뿐이고, 응답을 JavaScript에 넘길지는 브라우저가 정합니다.
+- 브라우저는 다른 출처로 요청할 때 `Origin` 헤더를 붙입니다. 응답에 허용 헤더가 없으면 응답을 JavaScript에 노출하지 않고 네트워크 에러로 처리합니다.
+- curl, Postman, 서버 간 호출에는 CORS가 없습니다. 브라우저만 지키는 규칙입니다.
+- CORS는 인증 수단이 아닙니다. 요청을 막아 주지 않으므로 서버의 접근 제어를 대신하지 못합니다.
+
+MDN은 CORS가 실패해도 서버는 요청을 받는다고 설명합니다. 단순 요청(아래 "preflight")은 서버에서 이미 실행된 뒤 브라우저가 응답만 가립니다. 결제처럼 상태를 바꾸는 POST가 CORS 에러 화면 뒤에서 처리될 수 있습니다.
+
+**흔한 실수:**
+
+- 브라우저 콘솔의 CORS 에러를 서버 장애로 착각하는 것입니다. 서버는 200을 응답했는데 헤더가 없어서 막힌 경우가 많습니다(자세히는 26편).
+- 서버 로그에 요청이 찍히니 CORS가 보안을 지켜 준다고 믿는 것입니다. 보호되는 것은 응답을 읽는 쪽이고, 요청 실행은 막지 않습니다.
+
+## 서버가 CORS 헤더를 붙여 주는 이유
+
+응답을 읽을 수 있는 출처를 정하는 주체는 그 자원의 주인인 서버이기 때문입니다. 프런트엔드 코드는 누구나 바꿀 수 있으므로 허용 여부를 클라이언트가 정할 수 없습니다.
+
+| 헤더 | 위치 | 뜻 |
+|------|------|----|
+| `Access-Control-Allow-Origin` | 응답 | 읽기를 허용할 출처 하나 또는 `*` |
+| `Access-Control-Allow-Credentials` | 응답 | `true`이면 쿠키를 동반한 요청의 응답을 허용 |
+| `Access-Control-Expose-Headers` | 응답 | JavaScript가 읽을 수 있게 열 응답 헤더 |
+| `Vary: Origin` | 응답 | 응답이 Origin에 따라 달라지니 캐시를 나누라는 표시 |
+
+```js
+const allowed = new Set(['https://app.example.com'])
+
+function cors(req, res) {
+  const origin = req.headers.origin
+  if (!origin || !allowed.has(origin)) return
+  const set = (k, v) => res.setHeader(k, v)
+  set('Access-Control-Allow-Origin', origin)
+  set('Access-Control-Allow-Credentials', 'true')
+  set('Vary', 'Origin')
+}
+// 허용 목록에 없는 출처에는 헤더를 붙이지 않는다
+```
+
+- `Access-Control-Allow-Origin`에는 출처 하나만 쓸 수 있습니다. 여러 출처를 허용하려면 요청의 `Origin`을 목록과 대조해 그 값을 되돌려 줍니다.
+- 쿠키나 인증 정보를 동반하는 요청(클라이언트가 `credentials: 'include'`로 보내는 요청)은 규칙이 엄격합니다. `Access-Control-Allow-Origin: *`는 허용되지 않고, 구체적인 출처와 `Access-Control-Allow-Credentials: true`가 있어야 합니다. 이때 `Access-Control-Allow-Headers`와 `Access-Control-Allow-Methods`에도 `*`를 쓸 수 없습니다.
+- 응답이 `Origin`에 따라 달라지면 `Vary: Origin`을 붙입니다. 빠뜨리면 중간 캐시가 한 출처용 응답을 다른 출처에 내줄 수 있습니다.
+- JavaScript는 기본적으로 CORS 안전 목록에 있는 응답 헤더만 읽습니다. 커스텀 헤더를 읽게 하려면 `Access-Control-Expose-Headers`에 이름을 적습니다.
+- 쿠키가 달린 CORS 응답의 `Set-Cookie`는 클라이언트가 `credentials: 'include'`를 썼을 때만 저장됩니다. 서드파티 쿠키 차단 설정이 켜져 있으면 CORS가 맞아도 쿠키는 막힙니다.
+
+**흔한 실수:** 허용 목록을 거치지 않고 요청의 `Origin`을 그대로 되돌려 주면서 `Access-Control-Allow-Credentials: true`를 붙이는 것입니다. 어느 사이트든 로그인한 사용자의 응답을 읽을 수 있게 됩니다. CORS 미들웨어 설정은 13편에서 다룹니다.
+
+## preflight
+
+preflight는 브라우저가 본 요청을 보내기 전에 보내는 확인용 `OPTIONS` 요청입니다. 서버가 그 방식의 요청을 받아 주는지 먼저 묻습니다.
+
+모든 요청에 preflight가 붙는 것은 아닙니다. 아래 조건을 모두 만족하는 단순 요청(simple request)은 바로 전송됩니다.
+
+| 항목 | 단순 요청의 조건 |
+|------|------------------|
+| 메서드 | `GET`, `HEAD`, `POST` |
+| 직접 지정한 헤더 | `Accept`, `Accept-Language`, `Content-Language`, `Content-Type`, 단일 범위의 `Range`만 |
+| `Content-Type` 값 | `application/x-www-form-urlencoded`, `multipart/form-data`, `text/plain` |
+
+`PUT`, `DELETE`, `PATCH`를 쓰거나, `Authorization` 같은 커스텀 헤더를 붙이거나, `Content-Type: application/json`을 보내면 preflight가 먼저 나갑니다.
+
+```http
+OPTIONS /doc HTTP/1.1
+Origin: https://app.example.com
+Access-Control-Request-Method: PUT
+Access-Control-Request-Headers: content-type
+
+HTTP/1.1 204 No Content
+Access-Control-Allow-Origin: https://app.example.com
+Access-Control-Allow-Methods: GET, POST, PUT
+Access-Control-Allow-Headers: content-type
+Access-Control-Max-Age: 600
+```
+
+- 서버가 응답해야 하는 헤더는 `Access-Control-Allow-Methods`, `Access-Control-Allow-Headers`, `Access-Control-Max-Age`입니다. 요청한 메서드나 헤더가 허용 목록에 없으면 본 요청은 전송되지 않습니다.
+- 응답 상태는 2xx여야 하고 보통 본문 없는 `204`를 씁니다.
+- `Access-Control-Max-Age`는 preflight 결과를 캐시하는 초 단위 시간입니다. MDN 기준 기본값은 5초이고, 브라우저마다 허용하는 최댓값이 따로 있어 그보다 크게 써도 잘립니다.
+- preflight에는 쿠키가 실리지 않습니다. 본 요청이 쿠키를 쓰더라도 preflight 응답에 `Access-Control-Allow-Credentials: true`가 있어야 합니다.
+
+Node에서는 `OPTIONS`를 직접 분기해서 응답합니다.
+
+```js
+if (req.method === 'OPTIONS') {
+  const set = (k, v) => res.setHeader(k, v)
+  set('Access-Control-Allow-Methods', 'GET, POST, PUT')
+  set('Access-Control-Allow-Headers', 'content-type')
+  set('Access-Control-Max-Age', '600')
+  res.writeHead(204).end()
+  return
+}
+```
+
+**흔한 실수:**
+
+- 인증 검사를 라우팅보다 앞에 두어 `OPTIONS`가 401을 받는 것입니다. preflight는 인증 정보 없이 오므로 CORS 처리가 인증보다 앞서야 합니다(미들웨어 순서는 11편).
+- `Access-Control-Allow-Headers`에 `Authorization`이나 `Content-Type`을 빠뜨리는 것입니다. 에러는 서버가 아니라 브라우저 콘솔에 나타납니다.
+- 허용 헤더 이름을 대소문자까지 맞추려 애쓰는 것입니다. 헤더 이름은 대소문자를 구분하지 않습니다.
+
+## 쿠키
+
+쿠키(cookie)는 서버가 `Set-Cookie`로 내려 주면 브라우저가 저장했다가, 이후 같은 서버로 가는 요청마다 `Cookie` 헤더에 실어 보내는 이름과 값의 쌍입니다. HTTP가 요청 사이의 상태를 기억하지 않기 때문에 로그인 유지, 개인 설정, 추적에 쓰입니다.
+
+```http
+HTTP/1.1 200 OK
+Set-Cookie: theme=dark
+Set-Cookie: lang=ko
+
+GET /next HTTP/1.1
+Cookie: theme=dark; lang=ko
+```
+
+- 브라우저는 조건이 맞는 모든 요청에 자동으로 쿠키를 붙입니다. 요청을 보낸 페이지가 어디인지는 따지지 않습니다. RFC 6265는 이 성질을 ambient authority라 부르며 CSRF의 원인으로 지목합니다.
+- 요청의 쿠키는 한 개의 `Cookie` 헤더에 세미콜론과 공백으로 이어집니다. 응답의 `Set-Cookie`는 쿠키마다 별도 헤더입니다.
+- 쿠키 이름과 경로, 도메인이 같으면 같은 쿠키이고 새 값이 이전 값을 대체합니다.
+- 값에는 세미콜론, 쉼표, 공백, 큰따옴표, 역슬래시를 직접 쓸 수 없습니다. 필요하면 `encodeURIComponent`로 인코딩합니다.
+- RFC 6265가 사용자 에이전트에 요구하는 최소 지원치는 쿠키 하나당 4096바이트, 도메인당 50개입니다. 큰 데이터를 쿠키에 담지 않습니다.
+
+Node의 `http` 모듈에는 쿠키 파서가 없습니다. `req.headers.cookie`는 문자열 하나이고, 같은 이름의 `Cookie` 헤더가 여러 개 오면 `; `로 이어서 줍니다. 직접 쪼개거나 라이브러리를 씁니다.
+
+```js
+function parseCookies(header = '') {
+  const jar = new Map()
+  for (const pair of header.split(';')) {
+    const i = pair.indexOf('=')
+    if (i < 1) continue
+    const name = pair.slice(0, i).trim()
+    const value = pair.slice(i + 1).trim()
+    if (!jar.has(name)) jar.set(name, value)
+  }
+  return jar
+}
+parseCookies('sid=abc; sid=zzz; x=a=b').get('x') // 'a=b'
+```
+
+같은 이름이 두 번 오면 첫 값을 씁니다. 브라우저는 경로가 더 구체적인 쿠키를 앞에 두므로 첫 값이 보통 더 구체적인 쿠키입니다. 일반 객체 대신 `Map`을 쓰는 이유는 `__proto__` 같은 이름의 쿠키가 객체 프로토타입을 오염시키는 일을 피하기 위해서입니다.
+
+**흔한 실수:** 사용자 입력이나 민감한 데이터를 쿠키 값에 그대로 담는 것입니다. 쿠키는 클라이언트가 읽고 바꿀 수 있습니다. 서버가 기억해야 할 상태는 서버에 두고 쿠키에는 식별자만 둡니다(자세히는 10편).
+
+## Set-Cookie
+
+`Set-Cookie`는 쿠키의 이름과 값 뒤에 속성을 세미콜론으로 이어 붙입니다.
+
+```http
+Set-Cookie: sid=abc; Max-Age=3600; Path=/; Secure; HttpOnly
+```
+
+| 속성 | 의미 |
+|------|------|
+| `Max-Age` | 만료까지 남은 초. 0 이하이면 즉시 삭제 |
+| `Expires` | 만료 시각(HTTP 날짜). `Max-Age`와 같이 있으면 `Max-Age`가 우선 |
+| `Domain` | 쿠키를 받을 호스트. 서브도메인까지 포함. 생략하면 발급한 호스트에만 보내는 host-only |
+| `Path` | 이 경로 아래 요청에만 전송. 생략하면 요청 경로가 기준 |
+| `Secure` | HTTPS 요청에만 전송 |
+| `HttpOnly` | JavaScript의 `document.cookie`로 읽을 수 없음 |
+| `SameSite` | 다른 사이트에서 시작한 요청에 쿠키를 보낼지 결정 |
+
+- `Max-Age`와 `Expires`가 모두 없으면 세션 쿠키이고, 브라우저 세션이 끝나면 삭제됩니다.
+- `Domain`은 공용 접미사(`com`, `github.io`)로 지정할 수 없고, 발급 호스트를 포함해야 합니다. 값을 적으면 서브도메인 전체가 쿠키를 받으므로 보통은 생략이 안전합니다.
+- 쿠키를 지울 때는 같은 이름, 도메인, 경로로 `Max-Age=0`을 보냅니다. 경로나 도메인이 다르면 다른 쿠키를 지정한 것이라 지워지지 않습니다.
+
+Node에서는 `Set-Cookie`를 문자열 배열로 넘깁니다. 헤더 하나에 쉼표로 합치면 안 됩니다(RFC 6265).
+
+```js
+res.setHeader('Set-Cookie', [
+  'sid=abc123; HttpOnly; Secure; Path=/; SameSite=Lax',
+  'theme=dark; Max-Age=31536000; Path=/',
+])
+res.getHeader('set-cookie') // 배열 그대로 돌려준다
+```
+
+- 응답에서 `Set-Cookie`를 `setHeader`로 다시 부르면 이전 값을 덮어씁니다. 여러 개를 쌓으려면 이전 값을 읽어 배열에 더해 다시 설정합니다.
+- 클라이언트의 `fetch`에서는 `response.headers.getSetCookie()`가 `Set-Cookie`를 배열로 돌려줍니다. 브라우저의 JavaScript는 `Set-Cookie`를 읽을 수 없는 금지 응답 헤더로 막혀 있습니다.
+
+**흔한 실수:** 쿠키 값을 `JSON.stringify`한 결과 그대로 넣는 것입니다. 쉼표와 큰따옴표가 쿠키 값에 쓸 수 없는 문자라서 브라우저가 거부하거나 잘라냅니다. 인코딩하거나 식별자만 보냅니다.
+
+## HttpOnly
+
+`HttpOnly`가 붙은 쿠키는 JavaScript의 `document.cookie`로 읽을 수 없고, HTTP 요청에 실려 서버에만 전달됩니다.
+
+```http
+Set-Cookie: sid=abc123; HttpOnly
+```
+
+```js
+document.cookie // 'sid'가 보이지 않는다
+fetch('/me')    // 요청에는 sid가 실려 간다
+```
+
+- 목적은 XSS로 주입된 스크립트가 세션 쿠키를 훔치지 못하게 하는 것입니다.
+- 쿠키의 전송까지 막는 것은 아닙니다. 주입된 스크립트가 `fetch`를 호출하면 쿠키가 요청에 실려 가므로, XSS 자체를 막지는 못하고 쿠키 값의 유출만 막습니다.
+- 클라이언트 코드가 읽어야 하는 값(예: UI 테마)은 `HttpOnly`를 붙이지 않습니다. 인증 식별자는 항상 붙입니다.
+
+## Secure
+
+`Secure`가 붙은 쿠키는 HTTPS 요청에만 실립니다. 평문 HTTP 구간에서 쿠키가 도청되는 것을 막습니다.
+
+```http
+Set-Cookie: sid=abc123; Secure
+```
+
+- MDN은 `localhost`에서는 `Secure` 요건이 적용되지 않는다고 설명합니다. 로컬 개발에서는 HTTP로 `Secure` 쿠키를 시험할 수 있습니다.
+- TLS를 앞단 프록시가 종료하는 구조에서는 Node가 받는 요청이 HTTP입니다. `Secure` 속성은 서버가 판단해 붙이는 값이므로 프록시 뒤에서도 운영 환경이면 항상 붙입니다. 요청이 HTTP로 보인다는 이유로 빼지 않습니다.
+- RFC 6265는 `Secure`가 기밀성만 보장한다고 못 박습니다. 네트워크를 장악한 공격자가 HTTP 연결에서 `Secure` 쿠키를 덮어쓸 수 있습니다. 이 한계를 줄이는 것이 아래 `__Host-` 접두사입니다.
+
+**흔한 실수:** 개발 환경에서 `Secure`를 켠 채로 `localhost`가 아닌 호스트 이름(예: 사설 IP)에 HTTP로 접속하면서 쿠키가 안 저장된다고 헤매는 것입니다. 브라우저가 쿠키를 거부한 것이므로 HTTPS로 접속하거나 환경에 따라 속성을 바꿉니다.
+
+## SameSite
+
+`SameSite`는 다른 사이트에서 시작된 요청에 쿠키를 실을지 정하는 속성입니다. 여기서 사이트(site)는 등록 가능한 도메인과 스킴을 합친 단위라서, 출처보다 느슨합니다. `a.example.com`과 `b.example.com`은 출처는 다르지만 같은 사이트입니다.
+
+| 값 | 쿠키가 전송되는 경우 |
+|----|----------------------|
+| `Strict` | 같은 사이트에서 시작한 요청만 |
+| `Lax` | 같은 사이트 요청과, 다른 사이트에서의 최상위 이동(링크 클릭 등) 중 안전한 메서드(`GET`, `HEAD`, `OPTIONS`) |
+| `None` | 모든 요청. 반드시 `Secure`와 함께 |
+
+```http
+Set-Cookie: sid=abc; SameSite=Strict
+Set-Cookie: widget=1; SameSite=None; Secure
+```
+
+- 속성을 생략하면 최신 브라우저는 `Lax`로 취급합니다. 명시적으로 쓰는 편이 브라우저 차이를 줄입니다.
+- `Strict`는 외부 링크를 타고 들어온 첫 요청에 쿠키가 빠져서 로그인이 풀린 것처럼 보일 수 있습니다. 로그인 유지용은 `Lax`, 민감한 작업 전용 쿠키는 `Strict`가 일반적인 선택입니다.
+- `None`은 다른 사이트에 임베드되는 위젯, 결제 프레임 같은 서드파티 용도입니다. 서드파티 쿠키는 브라우저가 기본으로 막는 추세라서 `None`을 붙여도 전달되지 않을 수 있습니다.
+- `Lax`가 기본일 때 일부 브라우저는 쿠키 발급 직후 2분 이내의 최상위 `POST`를 예외로 허용한다고 MDN이 적고 있습니다. 이 동작에 기대지 않습니다.
+
+**흔한 실수:** 프런트엔드와 API가 서로 다른 사이트(예: `app.com`과 `api.io`)인데 `SameSite=Lax` 쿠키로 `fetch`가 인증되기를 기대하는 것입니다. 이 구성은 `SameSite=None; Secure`와 CORS 자격 증명 설정이 모두 필요하고, 그래도 서드파티 쿠키 차단에 막힐 수 있습니다. 같은 사이트 아래에 두는 배치(`app.example.com`과 `api.example.com`)가 더 안정적입니다.
+
+## 쿠키 접두사
+
+쿠키 이름 앞에 붙이는 `__Host-`, `__Secure-` 접두사는 브라우저가 속성 조건을 강제하게 합니다. 조건이 틀리면 쿠키는 저장되지 않습니다.
+
+| 접두사 | 요구 조건 |
+|--------|-----------|
+| `__Secure-` | `Secure` 속성, HTTPS에서 발급 |
+| `__Host-` | `Secure`, HTTPS 발급, `Domain` 속성 없음, `Path=/` |
+| `__Http-` | `Secure`, HTTPS 발급, `HttpOnly` |
+| `__Host-Http-` | `__Host-`와 `__Http-`의 조건을 모두 |
+
+```http
+Set-Cookie: __Host-sid=1; Secure; HttpOnly; Path=/
+Set-Cookie: __Host-sid=1; Secure; Path=/; Domain=a.com
+```
+
+첫 줄은 유효하고, 둘째 줄은 `Domain`이 있어 거부됩니다.
+
+- `__Host-` 쿠키는 발급한 호스트에만 묶입니다. 형제 서브도메인이나 HTTP 구간에서 같은 이름으로 덮어쓸 수 없어서 앞의 `Secure` 한계를 줄입니다.
+- 서브도메인과 공유할 필요가 없는 세션 쿠키에는 `__Host-`가 맞습니다. 서브도메인과 쿠키를 공유해야 한다면 `__Secure-`를 씁니다.
+
+## CSRF와 SameSite의 한계
+
+CSRF(Cross-Site Request Forgery)는 다른 사이트의 페이지가 사용자 브라우저를 시켜 우리 서버에 요청을 보내게 하는 공격입니다. 쿠키가 자동으로 실리므로 서버는 사용자가 의도한 요청으로 오인합니다.
+
+```html
+<!-- 공격자의 페이지 -->
+<form action="https://bank.example/transfer" method="POST">
+  <input name="to" value="attacker">
+</form>
+<script>document.forms[0].submit()</script>
+```
+
+방어는 층으로 나눠 씁니다.
+
+| 방어 | 방식 |
+|------|------|
+| `SameSite` 쿠키 | 다른 사이트 요청에 쿠키를 빼 버린다 |
+| CSRF 토큰 | 예측할 수 없는 값을 폼에 심고 서버가 대조한다 |
+| `Sec-Fetch-Site` 검사 | 브라우저가 붙이는 요청 헤더가 `same-origin`, `same-site`인 요청만 통과시킨다 |
+| 단순 요청 회피 | JSON 본문과 커스텀 헤더를 요구해 CORS preflight를 강제한다 |
+
+```js
+const site = req.headers['sec-fetch-site']
+const ok = ['same-origin', 'same-site'].includes(site)
+if (site && !ok) {
+  res.writeHead(403).end() // 교차 사이트 요청 거부
+  return
+}
+```
+
+SameSite만으로 충분하지 않은 경우입니다.
+
+- 같은 사이트의 다른 출처는 막지 못합니다. `blog.example.com`에서 XSS가 나면 `api.example.com`으로 가는 요청에 쿠키가 실립니다.
+- `Lax`는 최상위 이동의 `GET`에 쿠키를 보냅니다. `GET`으로 상태를 바꾸는 엔드포인트나, 메서드 오버라이드를 지원해 `GET`을 `POST`처럼 처리하는 프레임워크는 뚫립니다.
+- `SameSite=None`은 CSRF 보호가 전혀 없습니다.
+- 오래된 브라우저나 속성을 무시하는 클라이언트에서는 보호되지 않습니다.
+- MDN은 최소한 하나의 주 방어(토큰, Fetch Metadata, 단순 요청 회피)를 두고, 상태를 바꾸는 요청에 `GET`을 쓰지 않으며, `SameSite`는 겹쳐 두는 방어로 쓰라고 권합니다.
+
+**흔한 실수:**
+
+- 쿠키 인증을 쓰는 API의 `POST`가 `application/json`만 받는다고 믿고 `Content-Type`을 검사하지 않는 것입니다. 서버가 `text/plain`으로 온 본문도 JSON으로 파싱하면 단순 요청으로 교차 사이트 폼이 통과합니다.
+- 헤더(`Authorization: Bearer`)로 보내는 토큰 인증은 브라우저가 자동으로 붙이지 않으므로 CSRF 대상이 아닙니다. 쿠키에 담긴 인증만 해당합니다(자세히는 10편).
+
+## 핵심 정리
+
+- CORS는 응답을 읽을 수 있는 출처를 서버가 헤더로 알리는 브라우저 정책이며, 실패해도 서버는 요청을 받고 curl이나 서버 간 호출에는 적용되지 않습니다.
+- 자격 증명이 있는 요청은 `Access-Control-Allow-Origin`에 구체적인 출처와 `Access-Control-Allow-Credentials: true`가 필요하고, 허용 목록을 거쳐야 하며 `Vary: Origin`을 붙입니다.
+- 단순 요청이 아니면 `OPTIONS` preflight가 먼저 나가므로 인증보다 앞에서 204와 허용 헤더로 응답해야 합니다.
+- `Set-Cookie`는 쿠키마다 별도 헤더이고 Node에서는 배열로 넘기며, 세션 쿠키에는 `HttpOnly`, `Secure`, `SameSite`를 붙입니다.
+- `__Host-` 접두사는 `Secure`, `Path=/`, `Domain` 없음을 브라우저가 강제해 쿠키를 호스트에 묶습니다.
+- `SameSite`는 같은 사이트의 다른 출처와 `Lax`의 `GET`을 막지 못하므로 CSRF 토큰이나 `Sec-Fetch-Site` 검사와 겹쳐 씁니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="https://app.example.com 의 JavaScript가 https://api.example.com 으로 fetch를 보냈는데 서버가 Access-Control-Allow-Origin 헤더를 응답에 붙이지 않았습니다. 일어나는 일로 옳은 것은?"
+  options={['서버는 요청을 받아 처리하지만 브라우저가 응답을 JavaScript에 노출하지 않는다', '브라우저가 요청 자체를 전송하지 않으므로 서버 로그에 남지 않는다', '서버가 400으로 거부한다', '두 주소는 같은 사이트라서 CORS 검사를 받지 않는다']}
+  correctAnswer={1}
+  explanation="출처는 스킴, 호스트, 포트 조합이라 두 주소는 다른 출처입니다. 단순 요청은 그대로 서버에 전송되고 처리되며, 응답에 허용 헤더가 없으면 브라우저가 응답을 JavaScript에 주지 않고 에러로 처리합니다. 요청을 보내지 않는 것은 preflight에서 거부된 경우이고, 같은 사이트라 해도 CORS는 출처 기준으로 판정합니다."
+  optionExplanations={['정답입니다. CORS는 응답을 읽는 쪽을 막는 브라우저 정책이고 서버에서 요청 실행까지 막지는 않습니다.', 'preflight가 필요한 요청에서 허용되지 않았을 때의 설명입니다. 단순 요청은 바로 전송됩니다.', '서버는 CORS 헤더 유무로 요청을 거부하지 않습니다. 판정은 브라우저가 합니다.', 'CORS는 사이트가 아니라 출처 단위입니다. 호스트가 다르면 다른 출처입니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="쿠키를 동반하는 교차 출처 fetch에 대해 서버가 응답해야 할 설정으로 옳은 것은?"
+  options={['Access-Control-Allow-Origin을 별표로 하고 Allow-Credentials를 true로 한다', 'Allow-Origin에 요청 출처를 허용 목록 검사 후 되돌려 주고 Allow-Credentials를 true로 하며 Vary: Origin을 붙인다', 'Allow-Origin에 허용할 출처 여러 개를 쉼표로 이어 쓴다', 'preflight 응답에는 Allow-Credentials가 필요 없다']}
+  correctAnswer={2}
+  explanation="자격 증명이 있는 요청은 와일드카드 출처가 허용되지 않고 구체적인 출처가 필요합니다. 값은 하나만 쓸 수 있으므로 요청의 Origin을 허용 목록과 대조해 그대로 돌려주고 Vary: Origin으로 캐시를 나눕니다. preflight에는 쿠키가 실리지 않지만 응답에 Allow-Credentials: true가 있어야 본 요청이 진행됩니다."
+  optionExplanations={['별표와 자격 증명의 조합은 브라우저가 거부합니다.', '정답입니다. 허용 목록 검사, 구체적인 출처, Allow-Credentials, Vary: Origin의 네 가지가 모두 필요합니다.', 'Allow-Origin에는 출처 하나만 쓸 수 있고 쉼표로 이어 쓴 값은 무효입니다.', 'preflight 응답에도 Allow-Credentials: true가 있어야 쿠키를 쓰는 본 요청이 허용됩니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="세션 쿠키를 발급하는 Set-Cookie 값으로 가장 적절한 것은?"
+  options={['sid=abc; Path=/', 'sid=abc; HttpOnly; SameSite=None', '__Host-sid=abc; Secure; HttpOnly; Path=/; SameSite=Lax', '__Host-sid=abc; Secure; HttpOnly; Domain=example.com; Path=/']}
+  correctAnswer={3}
+  explanation="세션 쿠키는 HttpOnly로 스크립트 접근을, Secure로 평문 전송을, SameSite로 교차 사이트 전송을 막고 __Host- 접두사로 호스트에 묶는 구성이 적절합니다. SameSite=None은 Secure와 함께여야 하고 CSRF 보호가 없으며, __Host- 쿠키에 Domain이 있으면 브라우저가 저장을 거부합니다."
+  optionExplanations={['HttpOnly, Secure, SameSite가 없어 XSS 탈취와 평문 전송에 노출됩니다.', 'SameSite=None은 Secure가 필요하고 CSRF 보호를 제공하지 않으므로 세션 쿠키에 부적절합니다.', '정답입니다. __Host- 접두사의 조건(Secure, Path=/, Domain 없음)을 만족하고 세 가지 보호 속성이 모두 있습니다.', '__Host- 접두사는 Domain 속성을 금지하므로 이 쿠키는 거부됩니다.']}
+/>
+
+## 참고 자료
+
+- [MDN — Cross-Origin Resource Sharing (CORS)](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS)
+- [MDN — Set-Cookie](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie)
+- [MDN — Using HTTP cookies](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Cookies)
+- [MDN — Cross-site request forgery (CSRF)](https://developer.mozilla.org/en-US/docs/Web/Security/Attacks/CSRF)
+- [RFC 6265 — HTTP State Management Mechanism](https://www.rfc-editor.org/rfc/rfc6265)
+- [Node.js — HTTP (response.setHeader, message.headers)](https://nodejs.org/api/http.html)

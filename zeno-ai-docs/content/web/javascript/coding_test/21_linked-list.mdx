@@ -1,0 +1,435 @@
+---
+title: '21. Linked List'
+description: '연결 리스트의 개념과 노드·참조, 단일·이중 연결 리스트, 삽입·삭제, 배열과의 비교, prev·next 배열 구현, 뒤집기, 토끼와 거북이 사이클 탐지를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 노드와 참조로 연결 리스트를 구현하고, 삽입·삭제·뒤집기·사이클 탐지를 코드로 쓰며, 배열과 비교해 언제 연결 리스트를 고르는지 설명할 수 있습니다.
+</Callout>
+
+## Linked List 개념
+
+연결 리스트(linked list)는 값을 담은 노드들이 서로 다음 노드를 가리켜 한 줄로 이어진 자료구조입니다. 노드가 메모리에서 연속해 있을 필요가 없고, 순서는 노드 사이의 연결이 정합니다.
+
+```text
+head → [1 | •] → [2 | •] → [3 | null]
+```
+
+- 리스트에는 첫 노드를 가리키는 `head` 하나만 있으면 됩니다. 나머지 노드는 `head`에서 따라가며 찾습니다.
+- 마지막 노드의 다음 칸은 `null`입니다. 빈 리스트는 `head`가 `null`입니다.
+- 인덱스로 바로 접근하지 못합니다. i번째 노드를 찾으려면 처음부터 i번 따라가야 합니다.
+- 자바스크립트에는 연결 리스트가 내장돼 있지 않습니다. 문제가 노드 클래스를 주거나, 필요할 때 직접 만듭니다. 코딩테스트에서는 포인터 조작을 묻는 유형(뒤집기, 사이클, 중간 노드)과, 중간 삽입·삭제가 잦은 시뮬레이션에서 쓰입니다.
+
+## Node와 포인터
+
+노드(node)는 값과 다음 노드를 가리키는 칸을 가진 객체입니다. 자바스크립트에는 포인터가 없어서 객체 참조가 그 역할을 합니다. 변수와 프로퍼티는 객체 자체가 아니라 객체를 가리키는 참조를 담습니다.
+
+```js
+class Node {
+  constructor(value) {
+    this.value = value
+    this.next = null
+  }
+}
+const a = new Node(1)
+a.next = new Node(2)
+console.log(a.next.value) // 2
+```
+
+배열에서 리스트를 만들고 끝까지 순회하는 기본 코드입니다. 이후 예제가 모두 이 `Node`와 두 함수를 씁니다. 더미 노드를 앞에 두면 첫 노드도 같은 코드로 붙습니다.
+
+```js
+function build(arr) {
+  const dummy = new Node(0)
+  let tail = dummy
+  for (const v of arr) {
+    tail.next = new Node(v)
+    tail = tail.next
+  }
+  return dummy.next
+}
+```
+
+```js
+function toArray(head) {
+  const out = []
+  let cur = head
+  while (cur !== null) {
+    out.push(cur.value)
+    cur = cur.next
+  }
+  return out
+}
+console.log(toArray(build([1, 2, 3]))) // [1, 2, 3]
+```
+
+- 순회는 `cur`를 `head`에서 시작해 `cur = cur.next`로 한 칸씩 옮기고, `null`이 되면 멈춥니다. 시간 복잡도는 O(n)입니다.
+- `cur = cur.next`는 노드를 복사하지 않고 참조만 옮깁니다. `a = b`로 두 변수가 같은 노드를 가리키면, 한쪽에서 `next`를 바꾼 결과가 다른 쪽에도 보입니다.
+- `head`를 옮기는 데 쓰면 첫 노드를 잃습니다. 순회에는 별도 변수 `cur`를 씁니다.
+
+**흔한 실수:**
+
+- `cur.next.next`처럼 `null`일 수 있는 값 뒤에 `.next`를 붙이는 것입니다. `null`의 프로퍼티를 읽으면 TypeError입니다. 먼저 `null`인지 검사하거나 `cur.next?.next`로 씁니다.
+- 반복 조건을 `while (cur.next)`로 쓰면 마지막 노드를 처리하지 못합니다. 모든 노드를 방문하려면 `while (cur !== null)`입니다.
+
+## 단일 / 이중 연결 리스트
+
+단일 연결 리스트(singly linked list)는 노드가 다음 노드만 가리키고, 이중 연결 리스트(doubly linked list)는 이전 노드(`prev`)도 가리킵니다.
+
+```js
+class DNode {
+  constructor(value) {
+    this.value = value
+    this.prev = null
+    this.next = null
+  }
+}
+```
+
+| 항목 | 단일 | 이중 |
+|------|------|------|
+| 노드가 가진 연결 | `next` | `prev`, `next` |
+| 이동 방향 | 앞으로만 | 앞뒤 모두 |
+| 노드 하나의 메모리 | 작음 | 연결 하나만큼 큼 |
+| 노드 참조만 알 때 그 노드 삭제 | 이전 노드를 모르면 불가 | O(1) |
+| 연결을 바꿀 때 고칠 곳 | 적음 | 많음(실수하기 쉬움) |
+
+- 이전 노드를 거슬러 가야 하거나, 노드 참조만 들고 그 노드를 지워야 하면 이중을 씁니다. 앞으로만 훑으면 단일로 충분합니다.
+- `tail`(마지막 노드) 참조를 따로 들고 있으면 끝에 붙이는 연산이 O(1)입니다. 없으면 끝까지 순회해야 해서 O(n)입니다.
+- 원형 연결 리스트는 마지막 노드의 `next`가 `head`를 가리키는 구조입니다. 끝이 없어서 `null`로 순회를 끝낼 수 없고, 시작 노드로 돌아왔는지로 끝을 판단합니다.
+
+이중 연결 리스트는 양 끝에 값이 없는 더미 노드(sentinel)를 두면 경계 처리가 사라집니다. 모든 실제 노드가 앞뒤에 이웃을 갖기 때문입니다.
+
+```js
+const head = new DNode(null)
+const tail = new DNode(null)
+head.next = tail
+tail.prev = head
+// 빈 리스트: head ⇄ tail
+```
+
+## 삽입 / 삭제
+
+연결 리스트의 삽입과 삭제는 연결만 바꾸면 되고, 원소를 밀거나 당기지 않습니다. 위치(노드 참조)를 이미 알고 있으면 O(1)입니다. 위치를 찾는 순회는 O(n)이 따로 듭니다.
+
+단일 연결 리스트에서 노드 뒤에 삽입합니다. 새 노드의 `next`를 먼저 채우고 나서 기존 연결을 바꿉니다.
+
+```js
+function insertAfter(node, value) {
+  const n = new Node(value)
+  n.next = node.next // 1) 뒤쪽을 먼저 붙인다
+  node.next = n      // 2) 앞쪽을 연결한다
+}
+function pushFront(head, value) {
+  const n = new Node(value)
+  n.next = head
+  return n // 새 head
+}
+```
+
+삭제는 이전 노드가 필요합니다. 이전 노드의 `next`가 삭제할 노드를 건너뛰게 바꿉니다. 첫 노드를 지우는 경우는 `head` 자체가 바뀌므로 더미 head를 앞에 붙여 하나의 코드로 처리합니다.
+
+```js
+function removeValue(head, target) {
+  const dummy = new Node(0)
+  dummy.next = head
+  let prev = dummy
+  while (prev.next !== null) {
+    const nxt = prev.next
+    if (nxt.value === target) prev.next = nxt.next
+    else prev = nxt
+  }
+  return dummy.next
+}
+const list = build([1, 2, 2, 3, 2])
+console.log(toArray(removeValue(list, 2))) // [1, 3]
+```
+
+- 지운 뒤에는 `prev`를 옮기지 않습니다. 새로 이어진 노드도 대상일 수 있기 때문입니다. 위 예에서 연속한 `2`가 모두 지워지는 이유입니다.
+- 이중 연결 리스트는 노드 하나만 알아도 지울 수 있습니다. 더미 노드가 있으면 `null` 검사도 필요 없습니다.
+
+```js
+function removeNode(node) {
+  node.prev.next = node.next
+  node.next.prev = node.prev
+}
+function insertBefore(node, value) {
+  const n = new DNode(value)
+  n.prev = node.prev
+  n.next = node
+  node.prev.next = n
+  node.prev = n
+  return n
+}
+```
+
+- 자바스크립트는 가비지 컬렉션이 있어서 지운 노드를 직접 해제하지 않습니다. 더 이상 아무도 참조하지 않으면 회수됩니다.
+연산 비용은 다음과 같습니다.
+
+| 연산 | 단일 | 이중 |
+|------|------|------|
+| head에 삽입 | O(1) | O(1) |
+| 노드 뒤 삽입 | O(1) | O(1) |
+| 노드 앞 삽입 | 이전 노드를 알아야 O(1) | O(1) |
+| 노드 삭제 | 이전 노드를 알아야 O(1) | O(1) |
+| 값으로 찾기 | O(n) | O(n) |
+
+**흔한 실수:** 연결을 바꾸는 순서입니다. `node.next = n`을 먼저 쓰면 `node.next`가 가리키던 나머지 리스트를 가리키는 참조가 사라져 `n.next = node.next`가 `n` 자신을 가리키게 됩니다. 새 노드의 연결을 먼저 채우고 기존 연결을 나중에 바꿉니다.
+
+## Array vs Linked List
+
+배열은 연속한 칸에 인덱스로 접근하고, 연결 리스트는 노드를 따라가며 접근합니다. 자바스크립트의 배열은 동적 배열처럼 쓸 수 있습니다.
+
+| 연산 | 배열 | 연결 리스트 |
+|------|------|-------------|
+| i번째 접근 | O(1) | O(n) |
+| 값으로 찾기 | O(n) | O(n) |
+| 끝에 추가 | 평균 O(1) | tail이 있으면 O(1) |
+| 맨 앞에 추가 | O(n) | O(1) |
+| 중간에 삽입·삭제(위치를 이미 알 때) | O(n) | O(1) |
+| 메모리 | 값만 저장 | 값과 참조를 노드마다 저장 |
+
+- 배열의 맨 앞·중간 삽입과 삭제(`unshift`, `shift`, `splice`)는 뒤 원소를 이동시켜야 해서 O(n)으로 계산합니다. 명세는 이 비용을 정하지 않으므로 최악을 기준으로 잡습니다.
+- 연결 리스트의 O(1)은 노드 참조를 이미 가졌을 때만 성립합니다. "k번째 원소 삭제"는 k번째를 찾는 O(k)가 먼저 들어서 배열과 비슷해집니다.
+- 노드가 메모리 곳곳에 흩어져 있어 순차 접근이 배열보다 느린 경우가 많습니다(참조 지역성). 상수 시간끼리 비교해도 실제로는 배열이 빠른 일이 흔합니다.
+
+문제의 단서로 고르는 기준입니다.
+
+- 연결 리스트: 중간 노드를 참조로 바로 지우고 끼워 넣는 연산이 매우 많고 인덱스 접근이 없을 때(에디터 커서, 줄 세우기), 뒤집기·사이클 같은 포인터 조작을 직접 묻는 문제.
+- 배열: 인덱스 접근, 정렬, 이분 탐색이 필요할 때. 대부분의 문제가 여기에 속합니다.
+- 큐의 앞쪽 제거만 필요하다면 연결 리스트 대신 헤드 인덱스를 옮기는 방식도 쓸 수 있습니다(자세히는 20편).
+
+## 배열 기반 연결 리스트
+
+노드 객체 대신 `prev`, `next` 배열을 만들고 노드 번호를 인덱스로 써서 연결 리스트를 구현하는 방법입니다. 객체 생성이 없어서 빠르고, 노드 수가 미리 정해진 문제에 어울립니다.
+
+노드 번호를 1부터 n까지 쓰고 0번을 더미(리스트의 앞뒤가 이어진 기준점)로 둡니다. `Int32Array`는 0으로 채워져 생성되고 값 범위가 32비트 정수라서 노드 번호를 담기에 충분합니다(자세히는 05편).
+
+```js
+const n = 5
+const next = new Int32Array(n + 1)
+const prev = new Int32Array(n + 1)
+for (let i = 0; i <= n; i++) {
+  next[i] = (i + 1) % (n + 1)
+  prev[i] = (i + n) % (n + 1)
+}
+// 0 → 1 → 2 → 3 → 4 → 5 → 0 (원형)
+```
+
+삭제와 순회는 객체 버전과 같은 원리입니다.
+
+```js
+function remove(x) {
+  next[prev[x]] = next[x]
+  prev[next[x]] = prev[x]
+}
+function walk() {
+  const out = []
+  for (let x = next[0]; x !== 0; x = next[x]) out.push(x)
+  return out
+}
+remove(2)
+remove(4)
+console.log(walk()) // [1, 3, 5]
+```
+
+- 삭제된 노드의 `prev[x]`, `next[x]`는 지우지 않으면 그대로 남습니다. 이 값을 이용해 삭제의 반대 순서로 복구할 수 있습니다.
+
+```js
+function restore(x) {
+  next[prev[x]] = x
+  prev[next[x]] = x
+}
+restore(4)
+console.log(walk()) // [1, 3, 4, 5]
+restore(2)
+console.log(walk()) // [1, 2, 3, 4, 5]
+```
+
+- 복구는 반드시 삭제한 순서의 역순이어야 합니다. 그 시점의 `prev`, `next`가 아직 유효한 이웃을 가리키기 때문입니다. 순서가 어긋나면 이미 지워진 노드를 다시 잇게 됩니다.
+- 새 노드를 끼울 때는 아직 쓰지 않은 번호를 `id`로 잡고 앞의 두 줄만 바꿉니다.
+
+```js
+function insertAfter(x, id) {
+  next[id] = next[x]
+  prev[id] = x
+  prev[next[x]] = id
+  next[x] = id
+}
+```
+
+- 값은 `value` 배열을 따로 두고 같은 번호로 접근합니다. 노드 수의 상한을 알아야 하고, 그 크기로 배열을 미리 만듭니다.
+
+## 연결 리스트 뒤집기
+
+뒤집기는 모든 노드의 `next`를 반대 방향으로 바꾸는 연산입니다. 반복문으로 `prev`, `cur`, `nxt` 세 참조를 옮기며 O(n) 시간, O(1) 공간에 끝냅니다.
+
+```js
+function reverse(head) {
+  let prev = null
+  let cur = head
+  while (cur !== null) {
+    const nxt = cur.next // 1) 다음 노드를 저장
+    cur.next = prev      // 2) 방향을 뒤집는다
+    prev = cur           // 3) prev를 전진
+    cur = nxt            // 4) cur를 전진
+  }
+  return prev // 새 head
+}
+const r = reverse(build([1, 2, 3]))
+console.log(toArray(r)) // [3, 2, 1]
+```
+
+`1 → 2 → 3`을 따라가는 과정입니다.
+
+| 단계 | cur | nxt 저장 | 바꾼 연결 | prev | 결과 |
+|------|-----|----------|-----------|------|------|
+| 시작 | 1 | - | - | null | - |
+| 1 | 1 | 2 | 1의 next를 null로 | 1 | 1 → null |
+| 2 | 2 | 3 | 2의 next를 1로 | 2 | 2 → 1 |
+| 3 | 3 | null | 3의 next를 2로 | 3 | 3 → 2 → 1 |
+
+- 반복이 끝났을 때 `cur`는 `null`이고 `prev`가 마지막 노드, 곧 새 `head`입니다.
+- 빈 리스트(`head`가 `null`)와 노드 하나짜리는 반복문이 0번 또는 1번 돌아 별도 처리 없이 맞게 동작합니다.
+- 재귀로도 쓸 수 있지만 호출 깊이가 노드 수만큼 필요해서 입력이 크면 호출 스택 한계에 닿습니다(자세히는 22편, 86편). 반복문이 안전합니다.
+- 이중 연결 리스트는 노드마다 `prev`와 `next`를 맞바꾸고 `head`와 `tail`을 교환하면 됩니다.
+
+**흔한 실수:** `cur.next = prev`를 `nxt`를 저장하기 전에 실행하는 것입니다. 나머지 리스트로 가는 참조를 잃어서 뒤집기가 첫 노드에서 끝납니다. 저장, 방향 전환, 전진 순서를 지킵니다.
+
+## 토끼와 거북이 사이클 탐지
+
+토끼와 거북이(Floyd's tortoise and hare) 알고리즘은 한 칸씩 가는 느린 포인터와 두 칸씩 가는 빠른 포인터로 사이클을 찾습니다. 사이클이 있으면 두 포인터가 반드시 만나고, 없으면 빠른 포인터가 `null`에 도달합니다. 시간 O(n), 공간 O(1)입니다.
+
+```js
+function hasCycle(head) {
+  let slow = head
+  let fast = head
+  while (fast !== null && fast.next !== null) {
+    slow = slow.next
+    fast = fast.next.next
+    if (slow === fast) return true
+  }
+  return false
+}
+```
+
+- 만났는지는 값이 아니라 노드 참조로 비교합니다. 값이 같은 서로 다른 노드가 있을 수 있기 때문입니다.
+- `fast !== null && fast.next !== null` 검사로 `fast.next.next`가 안전해집니다. 순서를 바꾸면 `null`의 `next`를 읽는 TypeError가 납니다.
+- 사이클 안에서는 빠른 포인터가 느린 포인터를 한 걸음씩 따라잡습니다. 한 번에 한 칸 차이가 줄어서 건너뛰지 못하고 만납니다.
+- 방문한 노드를 `Set`에 모아도 탐지되지만 공간이 O(n)입니다.
+
+`1 → 2 → 3 → 4 → 5 → 6 → 3`(6이 3으로 되돌아감)을 따라갑니다.
+
+| 단계 | slow | fast |
+|------|------|------|
+| 시작 | 1 | 1 |
+| 1 | 2 | 3 |
+| 2 | 3 | 5 |
+| 3 | 4 | 3 |
+| 4 | 5 | 5 (만남) |
+
+사이클이 시작되는 노드는 만난 뒤에 구합니다. `slow`를 `head`로 돌리고 두 포인터를 같은 속도로 한 칸씩 움직이면 사이클 시작점에서 만납니다.
+
+```js
+function findMeet(head) {
+  let slow = head
+  let fast = head
+  while (fast !== null && fast.next !== null) {
+    slow = slow.next
+    fast = fast.next.next
+    if (slow === fast) return slow
+  }
+  return null // 사이클 없음
+}
+```
+
+`hasCycle`은 `findMeet(head) !== null`과 같습니다. 만난 노드에서 시작점을 구하는 함수입니다.
+
+```js
+function cycleStart(head) {
+  let meet = findMeet(head)
+  if (meet === null) return null
+  let slow = head
+  while (slow !== meet) {
+    slow = slow.next
+    meet = meet.next
+  }
+  return slow // 위 예에서는 값이 3인 노드
+}
+```
+
+정당성은 다음과 같습니다. 변수는 세 개입니다.
+
+- `μ`: head에서 사이클 시작점까지의 거리
+- `λ`: 사이클 길이
+- `k`: 사이클 시작점에서 만난 지점까지의 거리
+
+만났을 때 `slow`는 `μ + k`칸을 갔고 `fast`는 그 두 배인 `2(μ + k)`칸을 갔습니다. `fast`가 사이클을 m바퀴 더 돌았으므로 두 거리의 차 `μ + k`는 `λ`의 배수 `mλ`입니다. 따라서 `μ = mλ − k`이고, 만난 지점에서 `μ`칸을 더 가면 사이클을 m바퀴 돌고 `k`만큼 되돌아와 시작점에 닿습니다. head에서 `μ`칸 가는 포인터와 만난 지점에서 `μ`칸 가는 포인터는 시작점에서 만납니다.
+
+사이클 길이는 만난 지점에서 한 포인터만 돌려 다시 그 지점에 올 때까지 센 칸 수입니다.
+
+```js
+let len = 1
+for (let x = meet.next; x !== meet; x = x.next) len++
+// 위 예에서 len은 4 (meet은 만난 노드)
+```
+
+- 이 방법은 다음 위치가 한 값에서 정해지는 모든 수열에 적용됩니다. `x → f(x)`를 반복할 때 반복이 시작되는 값과 주기를 Set 없이 O(1) 공간으로 구합니다.
+
+```js
+const f = (x) => (x * x + 1) % 255
+let s = f(1)
+let q = f(f(1))
+while (s !== q) { s = f(s); q = f(f(q)) }
+// s는 수열의 사이클 안에 있는 값
+```
+
+**흔한 실수:**
+
+- `slow`와 `fast`를 같은 곳에서 출발시키고 반복문을 `while (slow !== fast)`로 쓰는 것입니다. 시작부터 같아서 반복이 돌지 않습니다. 이동 뒤에 비교합니다.
+- 반복 조건에서 `fast.next` 검사를 빼는 것입니다. 노드 수가 홀수이면 `fast`가 마지막 노드에서 멈추므로 `fast.next.next`를 읽을 때 TypeError가 납니다.
+
+## 핵심 정리
+
+- 연결 리스트는 노드가 `next`(이중은 `prev`도)로 이어진 구조이며, `head`에서 따라가야 해서 인덱스 접근은 O(n)입니다.
+- 위치(노드 참조)를 알면 삽입과 삭제는 O(1)이고, 더미 노드를 두면 `head`와 경계 처리가 사라집니다. 연결은 새 노드 쪽을 먼저 채우고 기존 연결을 나중에 바꿉니다.
+- 자바스크립트 배열은 인덱스 접근과 정렬에 유리하고, 연결 리스트는 노드 참조 기준의 잦은 삽입·삭제와 포인터 조작 문제에 씁니다.
+- 노드 수가 정해져 있으면 `prev`·`next` 배열로 구현할 수 있고, 삭제의 역순으로 복구할 수 있습니다.
+- 뒤집기는 `prev`, `cur`, `nxt` 세 참조로 O(n) 시간, O(1) 공간에 하며, 다음 노드를 먼저 저장해야 합니다.
+- 토끼와 거북이는 느린·빠른 포인터가 만나는지로 사이클을 찾고, `slow`를 `head`로 돌려 같은 속도로 움직이면 시작점을 구합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="이중 연결 리스트에서 삭제할 노드 x의 참조만 알고 있고, 앞뒤에는 더미 노드가 있을 때 x를 삭제하는 시간 복잡도는?"
+  options={['O(1)', 'O(log n)', 'O(n)', 'O(n log n)']}
+  correctAnswer={1}
+  explanation="x가 prev와 next를 모두 가지므로 x.prev.next와 x.next.prev만 바꾸면 되고, 리스트를 순회하지 않으므로 O(1)입니다. 단일 연결 리스트라면 이전 노드를 찾는 순회가 필요해 O(n)이 됩니다."
+  optionExplanations={['x의 이웃을 바로 알아서 연결 두 개만 고치면 됩니다.', '이진 탐색 구조가 아니므로 로그 시간이 나올 이유가 없습니다.', '단일 연결 리스트에서 이전 노드를 모를 때의 비용입니다.', '정렬과 관련 없는 연산입니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="리스트 1, 2, 3을 뒤집는 반복 코드에서 const nxt = cur.next 를 쓰기 전에 cur.next = prev 를 먼저 실행하면 어떻게 되는가?"
+  options={['정상적으로 3, 2, 1이 된다', '첫 노드에서 나머지 노드로 가는 참조를 잃어 뒤집기가 중간에 끝난다', 'TypeError가 즉시 발생한다', '무한 루프에 빠지지만 결과는 같다']}
+  correctAnswer={2}
+  explanation="cur.next를 덮어쓰면 2번 노드로 가는 참조가 사라집니다. 그 뒤 nxt에는 이미 바뀐 값이 저장되므로 나머지 노드를 방문하지 못하고 리스트가 잘립니다. 다음 노드를 먼저 저장하는 것이 뒤집기의 핵심입니다."
+  optionExplanations={['순서가 바뀌면 나머지 노드를 따라갈 수 없습니다.', '다음 노드로 가는 길을 잃어 반복이 이어지지 못합니다.', 'null이 아닌 노드를 읽으므로 에러는 나지 않고 결과만 틀립니다.', '반복은 곧 끝나며 결과도 다릅니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="토끼와 거북이로 두 포인터가 만난 뒤, 사이클의 시작 노드를 찾는 방법으로 맞는 것은?"
+  options={['slow를 head로 되돌리고 두 포인터를 한 칸씩 움직여 만나는 노드를 구한다', 'fast를 head로 되돌리고 fast만 두 칸씩 움직인다', '만난 노드의 다음 노드를 시작 노드로 본다', '만난 노드를 시작 노드로 본다']}
+  correctAnswer={1}
+  explanation="head에서 사이클 시작점까지의 거리를 μ라 하면 만난 지점에서 μ칸 더 가면 시작점에 닿습니다. head에서 μ칸 가는 포인터와 만난 지점에서 μ칸 가는 포인터가 시작점에서 만나므로, 둘을 같은 속도로 움직입니다."
+  optionExplanations={['정답입니다. 두 포인터가 같은 속도로 시작점에서 만납니다.', '속도가 다르면 시작점에서 만난다는 보장이 없습니다.', '만난 지점은 사이클 안의 임의 위치라 시작점과 무관합니다.', '만난 지점은 시작점이 아닐 수 있습니다.']}
+/>
+
+## 참고 자료
+
+- [Wikipedia — Linked list](https://en.wikipedia.org/wiki/Linked_list)
+- [Wikipedia — Cycle detection](https://en.wikipedia.org/wiki/Cycle_detection)
+- [MDN — TypedArray](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/TypedArray)
+- [MDN — Array.prototype.shift()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/shift)

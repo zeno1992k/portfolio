@@ -1,0 +1,602 @@
+---
+title: '21. this'
+description: 'this가 호출 방식으로 정해지는 규칙, call·apply·bind, 화살표 함수의 this, 최상위 this, 결정 우선순위를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 코드의 호출 형태만 보고 this가 무엇인지 판별하고, this가 사라지는 상황과 해결책을 설명할 수 있습니다.
+</Callout>
+
+## this의 필요성
+
+`this`는 코드가 속한 객체, 또는 생성자가 만들 인스턴스를 가리키는 키워드입니다. 메서드가 자기 객체의 프로퍼티를 읽으려면 그 객체를 가리킬 방법이 필요합니다.
+
+변수 이름으로 가리키면 그 이름에 묶입니다.
+
+```js
+const circle = {
+  radius: 5,
+  getDiameter() { return 2 * circle.radius }, // ❌
+}
+const copy = { ...circle, radius: 10 }
+copy.getDiameter() // 10 (기대값은 20)
+```
+
+`copy`의 메서드는 복사된 함수여서 여전히 `circle`을 읽습니다. `this`를 쓰면 호출한 객체를 따라갑니다.
+
+```js
+const circle = {
+  radius: 5,
+  getDiameter() { return 2 * this.radius }, // ✅
+}
+const copy = { ...circle, radius: 10 }
+copy.getDiameter() // 20
+```
+
+생성자 함수에서는 이름으로 가리키는 방법 자체가 없습니다. 인스턴스는 `new`로 호출할 때 만들어지므로, 함수를 정의하는 시점에는 그 인스턴스를 부를 이름이 없습니다.
+
+```js
+function Circle(radius) {
+  this.radius = radius // 만들어질 인스턴스
+}
+new Circle(5).radius // 5
+```
+
+- `this`는 변수가 아니라 키워드입니다. `this = 1`은 SyntaxError입니다.
+- Java 같은 클래스 기반 언어의 `this`는 언제나 그 클래스의 인스턴스입니다. JavaScript의 `this`는 함수를 호출하는 방식에 따라 값이 달라집니다.
+- 메서드뿐 아니라 어떤 함수에서도, 함수 밖 최상위에서도 쓸 수 있습니다.
+
+## 호출 방식과 this 바인딩
+
+this 바인딩은 `this`에 값이 연결되는 일이며, 함수가 호출되는 시점에 호출 방식으로 결정됩니다. 스코프는 함수를 어디에 선언했는지로 정해지고(자세히는 12편), `this`는 어떻게 호출했는지로 정해집니다. 객체 안에 선언한 함수도 떼어 내 호출하면 객체와 관계가 끊깁니다.
+
+| 호출 방식 | 예 | this |
+|-----------|----|------|
+| 일반 함수 호출 | `f()` | 비엄격 모드는 `globalThis`, 엄격 모드는 `undefined` |
+| 메서드 호출 | `obj.f()` | `obj` |
+| 생성자 호출 | `new F()` | 새로 만든 인스턴스 |
+| 간접 호출 | `f.call(x)`, `f.apply(x)`, `f.bind(x)()` | `x` |
+| 화살표 함수 | `() => this` | 바깥 스코프의 `this` |
+
+같은 함수도 호출 방식에 따라 `this`가 달라집니다.
+
+```js
+function show() { 'use strict'; return this }
+const obj = { show }
+
+show()             // undefined
+obj.show() === obj // true
+new show()         // show {} (새 인스턴스)
+show.call(7)       // 7
+```
+
+화살표 함수는 호출 방식이 아니라 정의된 위치로 `this`가 정해집니다(화살표 함수 절 참고).
+
+## 일반 함수 호출
+
+일반 함수 호출은 `f()`처럼 앞에 점이나 `new`가 없는 호출입니다. 객체 안에서 선언했더라도 호출 형태가 `f()`이면 일반 호출이고, 중첩 함수, 콜백, 즉시 실행 함수도 모두 해당합니다.
+
+| 모드 | this |
+|------|------|
+| 비엄격 모드 | `globalThis` |
+| 엄격 모드 | `undefined` |
+
+```js
+function f() { return this }
+f() === globalThis // true (비엄격 모드)
+```
+
+```js
+function g() { 'use strict'; return this }
+g() // undefined
+```
+
+- 비엄격 모드에서는 `this`가 `undefined`·`null`이면 `globalThis`로, 원시 값이면 래퍼 객체로 바뀝니다. 엄격 모드는 값을 그대로 둡니다.
+- 엄격 모드가 되는 곳은 `'use strict'` 지시자가 있는 스크립트와 함수, ES 모듈, 클래스 본문입니다(자세히는 19편).
+- `globalThis`는 어느 런타임에서나 전역 객체를 가리킵니다(ES2020, 자세히는 01편).
+
+**흔한 실수:** 일반 함수에서 `this.x = ...`를 실행하면 비엄격 모드에서는 전역 객체에 프로퍼티가 생기고, 엄격 모드에서는 TypeError가 납니다.
+
+```js
+function setId() { this.id = 1 }
+setId()
+globalThis.id // 1 (비엄격 모드. 전역 오염)
+// 엄격 모드: TypeError: Cannot set properties of undefined
+```
+
+일반 호출되는 함수 안에서 `this`를 쓰고 있다면 대개 호출 방식이 잘못된 것입니다.
+
+## 메서드 호출
+
+메서드 호출은 점 표기법 `obj.f()` 또는 대괄호 표기법 `obj['f']()`로 호출하는 것이며, `this`는 점 앞의 객체입니다. 메서드를 소유한 객체가 아니라 호출할 때 지목한 객체입니다.
+
+```js
+const user = { name: 'Kim', hi() { return this.name } }
+user.hi()    // 'Kim'
+user['hi']() // 'Kim'
+```
+
+- 프로토타입에서 상속받은 메서드도 호출한 객체가 `this`입니다.
+
+```js
+const parent = { name: 'P', hi() { return this.name } }
+const child = Object.create(parent)
+child.name = 'C'
+child.hi() // 'C'
+```
+
+- getter·setter는 프로퍼티를 읽거나 쓰는 객체가 `this`입니다.
+
+```js
+const base = { v: 1, get twice() { return this.v * 2 } }
+const sub = Object.create(base)
+sub.v = 5
+sub.twice // 10
+```
+
+- 정적 메서드 `Cls.m()`의 `this`는 `Cls`입니다. 정적 필드 초기화식과 static 블록의 `this`도 클래스입니다(자세히는 24편).
+
+### 메서드에서 this가 사라지는 경우
+
+엔진은 `obj.f`를 평가할 때 함수 값과 함께 어느 객체에서 읽었는지도 호출 직전까지 들고 있다가 `this`로 씁니다(명세의 Reference Record). 이 정보는 호출 괄호 바로 앞이 프로퍼티 접근일 때만 살아 있습니다.
+
+| 표현식 | this | 이유 |
+|--------|------|------|
+| `obj.f()` | `obj` | 호출 직전 참조가 프로퍼티 접근 |
+| `(obj.f)()` | `obj` | 괄호만 씌운 것은 참조를 유지 |
+| `obj?.f()`, `obj.f?.()` | `obj` | 옵셔널 체이닝도 참조를 유지 |
+| `const g = obj.f; g()` | 일반 호출 | 변수에 함수 값만 복사 |
+| `(0, obj.f)()` | 일반 호출 | 쉼표 연산자가 값으로 바꾼다 |
+| `(obj.f = obj.f)()` | 일반 호출 | 할당식의 결과는 값 |
+| `(a ? obj.f : g)()` | 일반 호출 | 조건 연산자도 값을 낸다 |
+
+`||`, `??` 같은 논리 연산자도 조건 연산자처럼 값을 내므로 `this`가 사라집니다. 쉼표 연산자 형태 `(0, obj.f)()`는 `this`를 일부러 끊을 때 쓰는 관용구입니다.
+
+**흔한 실수:** 메서드를 변수에 담거나 구조 분해로 꺼내면 일반 호출이 됩니다.
+
+```js
+const user = { name: 'Kim', hi() { return this.name } }
+const { hi } = user
+hi() // 'Kim'이 아니다 (this가 globalThis. 엄격 모드는 TypeError)
+```
+
+## 생성자 함수 호출
+
+`new F()`로 호출하면 `this`는 엔진이 새로 만든 인스턴스입니다. 생성 과정과 반환 규칙은 15편에서 다루고, 여기서는 `this`와 관련된 규칙만 정리합니다.
+
+```js
+function Counter() { this.count = 0 }
+const c = new Counter()
+c.count // 0
+```
+
+- 인스턴스는 본문 첫 줄이 실행되기 전에 만들어져 있고 프로토타입도 연결되어 있습니다.
+- 본문이 객체를 반환하면 `this` 대신 그 객체가 `new` 표현식의 결과가 됩니다. 원시 값 반환은 무시됩니다.
+- `new` 없이 호출하면 일반 호출이 되어 `this`가 `globalThis`(비엄격) 또는 `undefined`(엄격)입니다. 클래스는 `new` 없이 호출하면 TypeError입니다.
+- 생성자 안에서 `this.f = function () {...}`로 만든 메서드는 메서드 호출 규칙을 따릅니다. 호출한 객체가 `this`입니다.
+
+```js
+function Person(name) {
+  this.name = name
+  this.hi = function () { return this.name }
+}
+const p = new Person('Kim')
+const q = { name: 'Lee', hi: p.hi }
+p.hi() // 'Kim'
+q.hi() // 'Lee' (호출한 객체가 this)
+```
+
+- 생성자 안에 선언한 중첩 함수는 일반 호출이라서 생성자의 `this`를 얻지 못합니다(중첩 함수 절 참고).
+- 클래스 생성자와 클래스 필드 초기화식의 `this`도 새 인스턴스입니다. `extends`가 있는 클래스의 생성자에서는 `super()`를 호출하기 전에 `this`에 접근하면 ReferenceError입니다(자세히는 25편).
+
+## call·apply·bind
+
+`call`, `apply`, `bind`는 호출 방식과 무관하게 `this`를 직접 지정하는 `Function.prototype`의 메서드입니다(자세히는 17편). 모든 함수가 프로토타입 체인으로 상속받습니다.
+
+| 메서드 | 함수 호출 | 인수 전달 | 반환값 |
+|--------|-----------|-----------|--------|
+| `call(thisArg, a, b)` | 즉시 호출 | 낱개로 나열 | 함수의 결과 |
+| `apply(thisArg, [a, b])` | 즉시 호출 | 배열 하나 | 함수의 결과 |
+| `bind(thisArg, a, b)` | 호출하지 않음 | 낱개로 나열(미리 채움) | `this`가 고정된 새 함수 |
+
+```js
+function sum(a, b) { return this.base + a + b }
+const ctx = { base: 10 }
+
+sum.call(ctx, 1, 2)    // 13
+sum.apply(ctx, [1, 2]) // 13
+const fixed = sum.bind(ctx, 1)
+fixed(2)               // 13
+```
+
+### thisArg 처리
+
+첫 번째 인수 `thisArg`는 일반 호출과 같은 모드 규칙을 거칩니다.
+
+```js
+function type() { return typeof this }
+type.call(1) // 'object' (비엄격 모드: Number 래퍼)
+type.call()  // 'object' (globalThis)
+
+function strictType() { 'use strict'; return typeof this }
+strictType.call(1)         // 'number'
+strictType.call(undefined) // 'undefined'
+```
+
+### apply의 인수
+
+- 두 번째 인수는 배열이거나 유사 배열(`length`와 인덱스 프로퍼티를 가진 객체)이어야 합니다.
+- `null`과 `undefined`는 인수 없음으로 처리됩니다.
+- 그 외 원시 값은 TypeError입니다(`f.apply(null, 1)`).
+- 스프레드 문법(ES2015) 이후에는 `f.call(ctx, ...args)`로 대부분 대체됩니다(자세히는 36편).
+
+### bind의 결과
+
+- 원본 함수는 바뀌지 않고 새 함수가 반환됩니다.
+- 미리 채운 인수는 부분 적용이 되어, 호출 때 받은 인수가 그 뒤에 이어집니다.
+- 이름은 `'bound '` 접두사가 붙고, `length`는 원본 `length`에서 미리 채운 인수 수를 뺀 값입니다(0 미만은 0).
+- 바운드 함수에는 `prototype` 프로퍼티가 없습니다.
+
+```js
+const f = sum.bind(ctx, 1)
+f.name   // 'bound sum'
+f.length // 1 (원본 2 - 미리 채운 1)
+```
+
+### 용례
+
+- 유사 배열에 배열 메서드를 빌려 쓰는 용도는 지금은 `Array.from`이나 스프레드가 대체합니다(자세히는 28편, 36편).
+
+```js
+Array.prototype.map.call('abc', (ch) => ch.toUpperCase())
+// ['A', 'B', 'C']
+```
+
+- `Math.max.apply(null, arr)`는 `Math.max(...arr)`로 씁니다.
+- 콜백에 `this`를 고정하는 `bind`는 중첩 함수 절과 클래스 절에서 다룹니다.
+
+### 내장 API의 thisArg
+
+콜백을 받는 일부 내장 메서드는 콜백의 `this`를 지정하는 인수를 따로 받습니다.
+
+| API | thisArg 위치 |
+|-----|--------------|
+| `forEach`, `map`, `filter`, `some`, `every`, `flatMap` (배열) | 두 번째 인수 |
+| `find`, `findIndex`, `findLast`, `findLastIndex` (배열) | 두 번째 인수 |
+| `Map.prototype.forEach`, `Set.prototype.forEach` | 두 번째 인수 |
+| `Array.from(items, mapFn, thisArg)` | 세 번째 인수 |
+
+`reduce`와 `reduceRight`는 `thisArg`가 없습니다. 화살표 함수 콜백에는 `thisArg`가 효과 없습니다.
+
+**흔한 실수:**
+
+- `f.call(obj, [1, 2])`는 배열 하나를 첫 번째 인수로 넘깁니다. 배열을 펼치려면 `apply`나 `...`를 씁니다.
+- `f.bind(obj)`는 호출하지 않습니다. 반환된 함수를 호출해야 실행됩니다.
+- `thisArg`를 생략하면 `undefined`가 넘어가므로 비엄격 모드에서는 `globalThis`가 됩니다.
+
+## 중첩 함수와 콜백의 this 손실
+
+메서드 안에서 일반 호출되는 중첩 함수와 콜백의 `this`는 메서드의 `this`가 아니라 일반 호출 규칙을 따릅니다. 함수 안에 함수를 선언해도 호출 방식이 바뀌지 않기 때문입니다.
+
+```js
+const timer = {
+  id: 7,
+  start() {
+    return [1].map(function () { return this.id })
+  },
+}
+timer.start() // [undefined] (콜백의 this는 globalThis)
+```
+
+엄격 모드(클래스 본문 안 등)에서는 `this`가 `undefined`라서 `this.id`에서 TypeError가 납니다.
+
+콜백은 그것을 호출하는 쪽이 `this`를 정합니다. `map`은 `thisArg`를 주지 않으면 `undefined`를 넘기고, DOM 표준은 이벤트 리스너로 등록한 일반 함수의 `this`를 이벤트의 `currentTarget`으로 정합니다. Node.js의 `setTimeout` 콜백은 `Timeout` 객체를 `this`로 받습니다. 호스트가 정하는 값은 환경마다 다릅니다.
+
+해결 방법은 네 가지입니다.
+
+| 방법 | 형태 | 비고 |
+|------|------|------|
+| 화살표 함수 | `[1].map(() => this.id)` | ES2015. 가장 간단하다 |
+| 변수에 저장 | `const self = this` 후 `self.id` | 클로저로 동작(자세히는 23편). ES5 시대 관용구 |
+| bind | `read.bind(this)` | 기존 함수를 재사용할 때 |
+| thisArg | `[1].map(read, this)` | 지원하는 내장 API만 |
+
+```js
+const timer = {
+  id: 7,
+  arrow() { return [1].map(() => this.id) },
+  self() {
+    const self = this
+    return [1].map(function () { return self.id })
+  },
+}
+timer.arrow() // [7]
+timer.self()  // [7]
+```
+
+```js
+const timer = {
+  id: 7,
+  bound() {
+    const read = function () { return this.id }
+    return [1].map(read.bind(this))
+  },
+  arg() {
+    const read = function () { return this.id }
+    return [1].map(read, this)
+  },
+}
+timer.bound() // [7]
+timer.arg()   // [7]
+```
+
+**흔한 실수:** 메서드를 값으로 넘기면 `this`가 따라가지 않습니다.
+
+```js
+const counter = {
+  n: 0,
+  tick() { this.n++ },
+  start() {
+    setTimeout(this.tick, 100)         // ❌ this 상실
+    setTimeout(() => this.tick(), 100) // ✅
+  },
+}
+```
+
+## 화살표 함수의 this
+
+화살표 함수는 자신의 `this` 바인딩이 없습니다. `this`를 쓰면 스코프 체인을 따라 바깥 함수나 전역의 `this`를 찾으며(렉시컬 this), 호출 방식이 아니라 함수가 정의된 위치가 값을 정합니다.
+
+```js
+const obj = {
+  v: 1,
+  read() { return (() => this.v)() },
+}
+obj.read() // 1 (화살표 함수의 this는 read의 this인 obj)
+```
+
+바깥 함수의 `this`가 호출마다 달라지면, 그 안에서 만들어진 화살표 함수의 `this`도 그 호출의 값을 따릅니다.
+
+```js
+function Outer() { return () => this.tag }
+const a = Outer.call({ tag: 'A' })
+a()                  // 'A'
+a.call({ tag: 'B' }) // 'A' (call로 바꿀 수 없다)
+```
+
+바깥 함수가 일반 호출이면 화살표 함수의 `this`도 `globalThis`나 `undefined`입니다. 화살표 함수가 특별한 값을 주는 것이 아니라 바깥 값을 그대로 쓰는 것입니다.
+
+규칙은 다음과 같습니다.
+
+- `call`, `apply`의 `thisArg`는 무시되고 인수만 전달됩니다. `bind`도 `this`는 바뀌지 않고 부분 적용만 동작합니다.
+- `new`로 호출할 수 없습니다. 호출하면 TypeError입니다(자세히는 15편).
+- `arguments`, `super`, `new.target`도 자체 바인딩이 없어 바깥 함수의 것을 씁니다(자세히는 27편).
+- 객체 리터럴의 프로퍼티나 프로토타입 메서드로 쓰면 `this`가 그 객체가 아닙니다.
+
+```js
+const o = { v: 1, get: () => this.v }
+o.get() // undefined (this는 o가 아니라 바깥의 this)
+// 바깥 this가 undefined인 ES 모듈에서는 TypeError
+```
+
+```js
+Person.prototype.hi = () => this.name // ❌ this는 바깥
+```
+
+화살표 함수는 용도에 따라 고릅니다.
+
+| 용도 | 권장 | 이유 |
+|------|------|------|
+| 객체 메서드, 프로토타입 메서드 | 메서드 축약 표현, 일반 함수 | 호출한 객체가 `this`여야 한다 |
+| 생성자 | 일반 함수, 클래스 | 화살표 함수는 `new` 불가 |
+| 메서드 안의 콜백, 중첩 함수 | 화살표 함수 | 바깥 `this`를 유지한다 |
+| 리스너에서 `this`로 요소를 받을 때 | 일반 함수 | 화살표 함수는 요소를 `this`로 받지 못한다. `event.currentTarget`은 쓸 수 있다 |
+
+## 클래스 메서드를 콜백으로 넘길 때
+
+클래스 본문은 항상 엄격 모드이므로(자세히는 24편), 메서드를 떼어 내 일반 호출하면 `this`가 `undefined`가 되어 TypeError가 납니다. 비엄격 모드의 일반 함수는 `globalThis`로 조용히 틀리지만 클래스는 바로 에러로 드러납니다.
+
+```js
+class Button {
+  label = 'OK'
+  handle() { return this.label }
+}
+const b = new Button()
+const f = b.handle
+f() // TypeError: Cannot read properties of undefined
+```
+
+같은 현상이 생기는 위치는 다음과 같습니다.
+
+- 콜백 인수: `setTimeout(b.handle, 0)`, `promise.then(b.handle)`, `arr.map(b.handle)`
+- 구조 분해: `const { handle } = b`
+- 이벤트 리스너: `el.addEventListener('click', b.handle)`은 `this`가 `b`가 아니라 요소가 되므로 TypeError 없이 틀린 값을 만듭니다.
+
+해결 방법은 네 가지입니다.
+
+| 방법 | 코드 | 특징 |
+|------|------|------|
+| 호출 지점에서 감싸기 | `() => b.handle()` | 간단하지만 호출처마다 써야 한다 |
+| 호출 지점에서 bind | `b.handle.bind(b)` | 호출할 때마다 새 함수가 생긴다 |
+| 생성자에서 bind | `this.handle = this.handle.bind(this)` | 인스턴스마다 바운드 함수를 만든다 |
+| 클래스 필드 화살표 함수 | `handle = () => this.label` | ES2022. 인스턴스마다 함수를 만든다 |
+
+호출 지점에서 `bind`를 쓰면 리스너 제거가 안 됩니다. `bind`는 호출할 때마다 새 함수를 만들어서, 제거할 때 쓴 함수와 등록한 함수가 다른 참조이기 때문입니다.
+
+```js
+el.addEventListener('click', b.handle.bind(b))
+el.removeEventListener('click', b.handle.bind(b)) // 제거 안 됨
+```
+
+같은 참조를 유지하려면 생성자에서 한 번만 `bind`하거나 클래스 필드를 씁니다.
+
+```js
+class Button {
+  constructor() { this.handle = this.handle.bind(this) }
+  handle() { /* this는 항상 인스턴스 */ }
+}
+const b = new Button()
+el.addEventListener('click', b.handle)
+el.removeEventListener('click', b.handle) // 제거됨
+```
+
+클래스 필드 화살표 함수는 프로토타입 메서드가 아니라 인스턴스 자신의 프로퍼티입니다. 그래서 다음 제약이 있습니다.
+
+- 서브클래스에서 `super.handle()`로 호출할 수 없습니다. 부모의 프로토타입에 `handle`이 없어 TypeError입니다.
+- 서브클래스가 `handle`을 프로토타입 메서드로 오버라이드해도 부모의 인스턴스 필드가 먼저 선택되어 가려집니다.
+- 인스턴스를 많이 만들면 함수 객체도 그만큼 만들어집니다.
+
+```js
+class A { handle = () => 'A' }
+class B extends A { handle() { return 'B' } }
+new B().handle() // 'A' (인스턴스 필드가 가린다)
+```
+
+## 모듈·전역 최상위의 this
+
+함수 밖 최상위 코드의 `this`는 실행 환경과 코드 종류에 따라 다릅니다.
+
+| 위치 | this |
+|------|------|
+| 브라우저 일반 스크립트 최상위 | `window`(`globalThis`) |
+| 브라우저 모듈 스크립트(`type="module"`) 최상위 | `undefined` |
+| Node.js CommonJS 파일 최상위 | `module.exports`(처음에는 빈 객체) |
+| Node.js ES 모듈 최상위 | `undefined` |
+| 비엄격 함수 안의 일반 호출 | `globalThis` |
+| 엄격 함수 안의 일반 호출 | `undefined` |
+
+Node.js에서 ES 모듈이 되는 조건은 확장자 `.mjs`이거나 `package.json`의 `type`이 `module`인 경우입니다.
+
+```js
+// CommonJS 파일
+this === module.exports // true
+exports.a = 1
+this.a // 1
+```
+
+```js
+// ES 모듈
+this        // undefined
+const f = () => this
+f()         // undefined (화살표 함수는 최상위 this를 그대로 쓴다)
+```
+
+- ES 모듈의 최상위 `this`가 `undefined`인 것은 모듈 코드가 엄격 모드이고 모듈 환경이 `this` 바인딩을 `undefined`로 정의하기 때문입니다(자세히는 45편, 46편).
+- Node.js의 CommonJS는 파일 전체를 함수로 감싸 `this`를 `module.exports`로 호출하므로 최상위 `this`가 `globalThis`가 아닙니다.
+- 일반 스크립트 최상위의 `var`와 함수 선언은 전역 객체의 프로퍼티가 되어 `this.x`로 읽힙니다. 모듈과 CommonJS는 파일 스코프라서 그렇지 않습니다(자세히는 13편).
+- 환경과 무관하게 전역 객체가 필요하면 최상위 `this` 대신 `globalThis`를 씁니다.
+- 최상위에 정의한 화살표 함수와 객체 리터럴의 화살표 메서드는 이 값을 `this`로 잡습니다. ES 모듈에서는 `undefined`라서 `this.v` 접근이 TypeError입니다.
+
+## bind는 다시 바인딩되지 않음
+
+`bind`가 반환하는 바운드 함수는 `this`를 내부 슬롯에 고정해 두고 호출될 때마다 그 값을 대상 함수에 넘깁니다. 그래서 이후 어떤 방법으로도 `this`를 바꿀 수 없습니다.
+
+```js
+function who() { return this.name }
+const a = who.bind({ name: 'A' })
+const b = a.bind({ name: 'B' })
+
+b()                    // 'A' (다시 bind해도 무시)
+a.call({ name: 'C' })  // 'A' (call도 무시)
+a.apply({ name: 'C' }) // 'A'
+const d = { name: 'D', f: a }
+d.f()                  // 'A' (메서드 호출도 무시)
+```
+
+- 다시 `bind`할 때 `thisArg`는 무시되지만 미리 채운 인수는 이어집니다.
+
+```js
+function add(x, y, z) { return x + y + z }
+const add12 = add.bind(null, 1).bind(null, 2)
+add12(3) // 6 (1 + 2 + 3)
+```
+
+- 이름에는 `'bound '`가 겹쳐 붙습니다. 위 예에서 `b.name`은 `'bound bound who'`입니다.
+- 화살표 함수에 `bind`해도 `this`는 바뀌지 않고 인수만 채워집니다.
+- 예외는 `new`입니다. 대상이 constructor이면 바운드 함수를 `new`로 호출할 수 있고, 이때는 고정된 `this`가 버려지고 새 인스턴스가 `this`가 됩니다. 미리 채운 인수는 유지됩니다.
+
+```js
+function P(x) { this.x = x }
+const BP = P.bind({ ignored: true }, 10)
+const p = new BP()
+p.x            // 10 (미리 채운 인수는 유지)
+p instanceof P // true
+'ignored' in p // false (bind한 this는 버려진다)
+```
+
+**흔한 실수:** 어딘가에서 이미 `bind`된 콜백을 받아 `call`로 다른 `this`를 주입하려 해도 동작하지 않습니다. 이 필요가 있다면 `bind`하지 않은 원본 함수를 받아야 합니다.
+
+## 결정 규칙 우선순위 표
+
+`this`는 위에서 아래로 보면서 처음 해당하는 규칙으로 정해집니다.
+
+| 순서 | 조건 | this |
+|------|------|------|
+| 1 | 화살표 함수 | 정의된 바깥 스코프의 `this`. 아래 규칙은 적용되지 않는다 |
+| 2 | `new`로 호출 | 새 인스턴스. 바운드 함수여도 고정된 `this`는 버려진다 |
+| 3 | 바운드 함수(`bind`의 결과) | `bind`할 때 고정한 값 |
+| 4 | `call`, `apply` | 첫 번째 인수(비엄격 모드는 `null`·`undefined`→`globalThis`, 원시 값→래퍼) |
+| 5 | 메서드 호출 `obj.f()` | 점 앞의 객체 |
+| 6 | 일반 호출 `f()` | 엄격 모드는 `undefined`, 비엄격 모드는 `globalThis` |
+
+1번에서 화살표 함수는 `new`가 TypeError이고 `call`·`apply`·`bind`의 `this`가 무시되므로 아래 규칙과 겹치지 않습니다. 콜백을 호출하는 호스트 API가 `this`를 직접 정하는 경우는 4번과 같은 위치입니다.
+
+```js
+function f() { return this.v }
+const o1 = { v: 1, f }
+const o2 = { v: 2 }
+
+o1.f()        // 1   (5. 메서드 호출)
+o1.f.call(o2) // 2   (4가 5보다 우선)
+const g = f.bind(o1)
+g.call(o2)    // 1   (3이 4보다 우선)
+o2.g = g
+o2.g()        // 1   (3이 5보다 우선)
+new g()       // f {} (2가 3보다 우선. 새 객체라 v가 없다)
+```
+
+## 핵심 정리
+
+- `this`는 함수가 호출될 때 호출 방식으로 정해집니다. 선언 위치로 정해지는 스코프와 다릅니다.
+- 일반 호출은 `globalThis`(비엄격)·`undefined`(엄격), 메서드 호출은 점 앞의 객체, `new`는 새 인스턴스, `call`·`apply`·`bind`는 지정한 값입니다.
+- 메서드를 변수·콜백·구조 분해로 떼어 내면 일반 호출이 되어 `this`를 잃습니다. 클래스 메서드는 엄격 모드라서 TypeError가 납니다.
+- 화살표 함수는 자신의 `this`가 없어 바깥 `this`를 쓰고 `call`·`apply`·`bind`·`new`로 바꿀 수 없습니다. 콜백에는 알맞고 메서드와 생성자에는 맞지 않습니다.
+- 최상위 `this`는 일반 스크립트에서 `globalThis`, ES 모듈에서 `undefined`, CommonJS에서 `module.exports`입니다.
+- 우선순위는 화살표 함수, `new`, 바운드 함수, `call`·`apply`, 메서드 호출, 일반 호출 순입니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="객체 리터럴의 프로퍼티에 화살표 함수를 대입하고 객체.메서드() 형태로 호출했을 때 그 안의 this는?"
+  options={['메서드를 호출한 객체', '항상 전역 객체', '화살표 함수가 정의된 바깥 스코프의 this', '항상 undefined']}
+  correctAnswer={3}
+  explanation="화살표 함수는 자신의 this 바인딩이 없어 정의된 위치의 바깥 this를 씁니다. 객체.메서드()로 호출해도 그 객체가 this가 되지 않습니다. 바깥 this가 전역 객체나 undefined일 수는 있지만 항상 그렇지는 않으므로 2번과 4번은 틀립니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="who.bind(objA)의 결과를 a에 담고, a.call(objB)를 호출했을 때 who 안의 this는?"
+  options={['objA', 'objB', 'undefined', 'TypeError가 발생한다']}
+  correctAnswer={1}
+  explanation="바운드 함수는 bind 때 고정한 this를 내부에 저장하므로 call로 다른 값을 주어도 무시되고 objA가 그대로 this가 됩니다. 인수는 전달되고 에러는 나지 않습니다. 바꿀 수 있는 예외는 new 호출뿐입니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="class의 메서드 inc를 const f = counter.inc로 꺼내 f()로 호출했습니다. inc 안에서 this.count를 읽으면?"
+  options={['0을 반환한다', 'undefined를 반환한다', 'TypeError가 발생한다', '전역 변수 count를 읽는다']}
+  correctAnswer={3}
+  explanation="꺼낸 메서드를 f()로 부르면 일반 호출이고, 클래스 본문은 엄격 모드라서 this가 undefined입니다. undefined의 프로퍼티를 읽으므로 TypeError가 납니다. 비엄격 모드의 일반 함수였다면 this가 globalThis가 되어 TypeError 없이 undefined가 나왔을 것입니다."
+/>
+
+## 참고 자료
+
+- [MDN — this](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/this)
+- [MDN — Function.prototype.call()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Function/call)
+- [MDN — Function.prototype.apply()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Function/apply)
+- [MDN — Function.prototype.bind()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Function/bind)
+- [MDN — Arrow function expressions](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Functions/Arrow_functions)
+- [ECMA-262 — ResolveThisBinding](https://tc39.es/ecma262/#sec-resolvethisbinding)
+- [ECMA-262 — Bound Function Exotic Objects](https://tc39.es/ecma262/#sec-bound-function-exotic-objects)
+- [DOM Standard — inner invoke](https://dom.spec.whatwg.org/#concept-event-listener-inner-invoke)

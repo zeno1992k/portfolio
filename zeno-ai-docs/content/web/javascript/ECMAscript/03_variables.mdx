@@ -1,0 +1,627 @@
+---
+title: '03. 변수'
+description: '변수와 메모리, 식별자, var·let·const 선언, 선언·초기화 단계와 호이스팅, 할당과 재할당, 네이밍 규칙과 예약어, 유니코드 식별자를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 변수가 만들어지고 값이 담기는 순서를 선언·초기화·할당 단계로 설명하고, 이름으로 쓸 수 있는 문자와 쓸 수 없는 단어를 판별할 수 있습니다.
+</Callout>
+
+## 변수의 개념과 메모리
+
+**변수**(variable)는 값을 저장한 메모리 공간에 붙인 이름입니다. 프로그램은 값을 메모리에 두고 변수 이름으로 다시 꺼내 씁니다.
+
+```js
+let score = 80      // 값 80을 담을 공간을 만들고 score라 부른다
+score = score + 5   // 읽기 80 → 계산 85 → 같은 공간에 쓰기
+console.log(score)  // 85
+```
+
+변수로 하는 일은 세 가지입니다.
+
+- 저장: 이름에 값을 담습니다.
+- 읽기: 식에 이름을 쓰면 엔진이 담긴 값으로 바꿔 계산합니다. 이를 변수 참조라 하며, 객체 참조(10편)와는 다른 말입니다.
+- 교체: 같은 이름에 다른 값을 담습니다. 이전 값은 그 변수에서 사라집니다.
+
+```text
+이름        주소(가상)    값
+score  →    0x0100   →    85
+```
+
+JavaScript에서는 메모리 주소를 직접 읽거나 계산할 수 없습니다. 값이 스택과 힙 중 어디에 놓이는지, 어떤 형태로 표현되는지는 엔진이 정하며 명세는 값의 동작만 규정합니다. 명세는 이름과 값의 연결을 바인딩이라 부르고, 바인딩을 환경 레코드(Environment Record)가 보관한다고 설명합니다(자세히는 22편).
+
+원시 값을 다른 변수에 대입하면 값이 복사되어 두 변수는 서로 독립입니다. 객체는 값 대신 객체를 가리키는 참조가 복사됩니다(자세히는 10편).
+
+```js
+let a = 1
+let b = a      // a의 값 1을 b의 공간에 복사
+b = 2
+console.log(a) // 1
+```
+
+변수를 쓰는 이유는 세 가지입니다.
+
+- 이름으로 값의 뜻을 드러냅니다. `taxRate`는 `10`보다 의미가 분명합니다.
+- 같은 값을 한 곳에서 관리해 수정이 한 번으로 끝납니다.
+- 계산 결과를 저장해 다시 계산하지 않고 재사용합니다.
+
+어떤 변수로도 접근할 수 없게 된 값은 엔진이 메모리를 회수합니다(가비지 컬렉션, 자세히는 49편).
+
+## 식별자
+
+**식별자**(identifier)는 코드 안에서 변수, 함수, 클래스 같은 대상을 구별해 가리키는 이름입니다. 변수 이름은 식별자의 한 종류입니다.
+
+문법에서 식별자는 쓰이는 자리에 따라 역할이 나뉩니다.
+
+| 역할 | 뜻 | 예 |
+|------|----|----|
+| 선언 자리 | 이름을 새로 만든다 | `let count`, `function add`, 매개변수 `a` |
+| 참조 자리 | 만들어진 이름을 쓴다 | `count + 1`, `add(1, 2)` |
+| 라벨 | 반복문 등에 붙이는 이름 | `outer: for (;;) break outer` |
+| 프로퍼티 이름 | 점 표기법과 객체 리터럴의 키 | `user.name`, `{ id: 1 }` |
+
+식별자는 문자열 값이 아닙니다. `count`는 대상을 가리키는 이름이고 `'count'`는 문자열 값입니다.
+
+식에서 식별자를 만나면 엔진은 이름이 가리키는 값으로 바꿉니다. 이를 식별자 해석이라 하며, 현재 스코프에서 이름을 찾고 없으면 바깥 스코프로 올라갑니다(자세히는 12편). 끝까지 찾지 못하면 ReferenceError입니다.
+
+```js
+const limit = 3
+console.log(limit)       // 3
+console.log(limt)        // ReferenceError
+console.log(typeof limt) // 'undefined' — typeof는 에러를 내지 않는다
+```
+
+- 프로퍼티 이름은 선언된 이름이 아니라 객체의 키이므로 스코프 탐색 대상이 아닙니다.
+- 프로퍼티 이름은 식별자 문법을 따르되 예약어도 허용합니다(아래 예약어 목록).
+
+## 변수 선언
+
+**변수 선언**(variable declaration)은 이름을 스코프에 등록해 변수를 만드는 일입니다. 선언하지 않은 이름을 읽으면 ReferenceError입니다. 선언 키워드는 `var`, `let`, `const` 세 가지입니다.
+
+```js
+var a = 1    // ES1부터. 함수 스코프
+let b = 2    // ES2015. 블록 스코프. 재할당 가능
+const c = 3  // ES2015. 블록 스코프. 재할당 불가
+```
+
+| 항목 | var | let | const |
+|------|-----|-----|-------|
+| 스코프 | 함수 | 블록 | 블록 |
+| 같은 스코프에서 재선언 | 가능 | SyntaxError | SyntaxError |
+| 재할당 | 가능 | 가능 | TypeError |
+| 초기값 생략 | 가능 | 가능 | SyntaxError |
+| 선언문 앞에서 읽기 | undefined | ReferenceError | ReferenceError |
+| 스크립트 최상위 선언이 globalThis 프로퍼티가 됨 | 된다 | 안 된다 | 안 된다 |
+
+스코프의 차이는 다음과 같습니다(자세히는 12편, 13편).
+
+```js
+{ var v = 1; let l = 2 }
+console.log(v) // 1 — var는 블록을 무시한다
+console.log(l) // ReferenceError — let은 블록에 갇힌다
+```
+
+선언 형태는 다음과 같습니다.
+
+```js
+let a, b = 2, c         // 쉼표로 여러 개. a와 c는 undefined
+const x = 1, y = x + 1  // 앞 변수를 뒤에서 쓸 수 있다
+let d                   // 초기값 없는 let은 undefined
+const e                 // ❌ SyntaxError: const는 초기값 필수
+```
+
+### 재선언과 이름 충돌
+
+`var`는 같은 스코프에서 같은 이름을 다시 선언해도 오류가 없습니다. 값 없는 두 번째 `var`는 기존 값을 건드리지 않습니다.
+
+```js
+var n = 1
+var n          // 오류 없음. 값은 그대로
+console.log(n) // 1
+```
+
+`let`·`const`는 같은 스코프의 다른 선언과 이름이 겹치면 SyntaxError입니다. `var`, `function`, `class`, 매개변수와 겹쳐도 같습니다. 이 오류는 파싱 단계에서 발견되므로 스크립트 전체가 실행되지 않습니다.
+
+```js
+let a = 1
+var a = 2                // ❌ SyntaxError: 이미 선언된 이름
+function f(p) { let p }  // ❌ 매개변수 p와 충돌
+```
+
+스코프가 다르면 같은 이름이 다른 변수입니다. 안쪽 스코프의 변수가 바깥 변수를 가립니다.
+
+### 선언문의 위치
+
+`let`·`const`·`class` 선언은 `if` 본문처럼 문 하나만 올 수 있는 자리에 쓸 수 없습니다. `var`는 가능합니다.
+
+```js
+if (true) let a = 1      // ❌ SyntaxError
+if (true) var b = 1      // 가능
+if (true) { let c = 1 }  // 블록으로 감싸면 가능
+```
+
+선언은 값을 만들지 않는 문입니다. 다른 식의 일부로 쓸 수 없습니다(자세히는 04편).
+
+### 선택 기준
+
+- 기본은 `const`입니다. 이름이 다른 값을 가리키지 않는다는 의도를 엔진이 보증합니다.
+- 재할당이 필요한 변수만 `let`을 씁니다.
+- 새 코드에서는 `var`를 쓰지 않습니다. 함수 단위 스코프와 호이스팅 때문에 의도하지 않은 값이 보입니다(자세히는 13편).
+- `const`는 값을 얼리지 않습니다. 객체를 담았다면 그 내용은 바꿀 수 있습니다(아래 할당과 재할당).
+- 구조 분해 선언 `const { a, b } = obj`는 37편에서 다룹니다.
+
+### using 선언
+
+`using`과 `await using`은 `const`처럼 재할당할 수 없고 블록 스코프를 가지며, 블록을 벗어날 때 값의 정리 메서드를 자동으로 호출하는 선언입니다(명시적 자원 관리). `using`은 `[Symbol.dispose]()`를, `await using`은 `[Symbol.asyncDispose]()`를 호출합니다. 4단계에 올라 ES2027 판에 들어갈 예정이고, MDN은 Baseline 기능이 아니라고 표시합니다. 엔진 지원은 호환성 표로 확인한 뒤 씁니다.
+
+## 선언 단계와 초기화 단계
+
+변수는 한 번에 만들어지지 않고 최대 세 단계를 거칩니다.
+
+| 단계 | 하는 일 | 명세의 연산 |
+|------|---------|-------------|
+| 선언 | 이름을 스코프에 등록해 바인딩을 만든다 | CreateMutableBinding, CreateImmutableBinding |
+| 초기화 | 바인딩에 첫 값을 담아 사용할 수 있게 한다 | InitializeBinding |
+| 할당 | 초기화된 변수에 값을 다시 담는다 | SetMutableBinding |
+
+선언 단계는 해당 스코프의 코드가 한 줄도 실행되기 전에 끝납니다. 엔진은 스코프에 진입하는 순간(스크립트 시작, 함수 호출, 블록 진입) 그 스코프의 선언을 모두 찾아 먼저 처리합니다. 명세는 이 작업을 GlobalDeclarationInstantiation, FunctionDeclarationInstantiation, BlockDeclarationInstantiation이라 부릅니다(자세히는 22편). 이후 코드가 위에서 아래로 실행되고, 선언문 줄에 도달했을 때 일어나는 일이 선언 방식마다 다릅니다.
+
+| 선언 | 선언 단계 | 초기화 단계 |
+|------|-----------|-------------|
+| var | 함수·전역 스코프에 진입할 때 | 선언 단계와 동시에 undefined로 |
+| let | 해당 스코프에 진입할 때 | 선언문이 실행될 때. 초기값이 없으면 undefined |
+| const | let과 같음 | 선언문이 실행될 때. 초기값 필수 |
+| function 선언문 | 해당 스코프에 진입할 때 | 선언 단계와 동시에 함수 객체로 |
+| class | let과 같음 | 클래스 정의가 평가될 때 |
+
+`var`는 선언과 초기화가 동시에 끝나므로 선언문 앞에서도 읽을 수 있습니다. `var score = 80`은 사실 두 동작입니다. 스코프 진입 때 선언과 `undefined` 초기화, 이 줄이 실행될 때 할당입니다.
+
+```js
+console.log(score) // undefined — 이미 선언·초기화됨
+var score = 80     // 이 줄이 실행될 때 할당
+console.log(score) // 80
+```
+
+`let`은 선언과 초기화가 분리됩니다. 선언만 된 상태에서는 읽을 수 없습니다.
+
+```js
+{                      // 블록 진입: x 선언 (아직 초기화 안 됨)
+  // 여기서 x를 읽거나 쓰면 ReferenceError
+  let x = 1            // 선언문 실행: 초기화 (값 1)
+  console.log(x)       // 1
+}
+```
+
+세부 규칙은 다음과 같습니다.
+
+- `let a;`는 `let a = undefined;`와 같습니다. 선언문이 실행되면서 `undefined`로 초기화됩니다. 반복문 안에서는 매 바퀴 새 바인딩이 만들어져 차이가 드러납니다.
+
+```js
+for (let i = 0; i < 2; i++) {
+  var v; let l
+  console.log(v, l) // 첫 바퀴: undefined undefined
+  v = i; l = i      // 둘째 바퀴: 0 undefined
+}
+```
+
+- `var` 선언문에 초기값이 없으면 실행해도 아무 일도 하지 않습니다.
+- 같은 이름의 매개변수가 있으면 `var`의 초기값은 `undefined`가 아니라 전달된 인수입니다.
+
+```js
+function f(a) { var a; return a }
+f(5) // 5
+```
+
+- `const`는 초기화가 유일한 값 저장입니다. 그래서 선언과 동시에 초기값을 줘야 합니다.
+- 선언 단계 이후 초기화 단계 전의 구간에서 접근하면 ReferenceError가 납니다. 이 구간이 일시적 사각지대이며 다음 절에서 다룹니다.
+
+## 변수 호이스팅
+
+**호이스팅**(hoisting)은 선언이 코드 실행 전에 처리되어, 선언문보다 앞선 위치에서도 그 이름이 스코프 안에 이미 존재하는 현상입니다. 코드가 실제로 위로 옮겨지는 것은 아닙니다. 명세는 호이스팅을 정의된 용어로 쓰지 않고, 앞 절의 선언 인스턴스화 연산으로 동작을 기술합니다.
+
+모든 선언이 호이스팅됩니다. 차이는 호이스팅된 직후의 상태입니다.
+
+| 선언 | 호이스팅 직후 상태 | 선언문 앞에서 읽으면 |
+|------|--------------------|----------------------|
+| var | undefined로 초기화됨 | undefined |
+| let, const | 미초기화 | ReferenceError |
+| class | 미초기화 | ReferenceError |
+| function 선언문 | 함수 객체로 초기화됨 | 정상 호출 (자세히는 11편) |
+| import | 모듈 평가 전에 연결됨 | 정상 사용 (자세히는 45편) |
+
+### var 호이스팅
+
+`var`는 블록이 아니라 함수 단위로 호이스팅됩니다. 선언문이 실행되지 않아도 선언은 이미 처리됩니다.
+
+```js
+function check() {
+  console.log(flag)  // undefined
+  if (false) {
+    var flag = true  // 실행되지 않아도 선언은 처리된다
+  }
+}
+check()
+```
+
+지역 `var`는 바깥 변수를 가립니다. 선언문이 아래에 있어도 마찬가지입니다.
+
+```js
+var x = 1
+function show() {
+  console.log(x)  // undefined — 바깥 x(1)가 아니라 지역 x
+  var x = 2
+}
+show()
+```
+
+### let·const 호이스팅과 TDZ
+
+`let`·`const`가 호이스팅되지 않는다고 설명하는 자료도 있습니다. 이 문서는 선언 단계가 스코프 진입 때 끝난다는 점을 기준으로 호이스팅된다고 봅니다. 근거는 바깥 변수가 가려지는 현상입니다.
+
+```js
+let x = 'outer'
+{
+  console.log(x)  // ReferenceError
+  let x = 'inner'
+}
+```
+
+호이스팅되지 않았다면 바깥 `x`인 `'outer'`가 출력되어야 합니다. 에러가 난다는 것은 블록에 진입할 때 지역 `x`가 이미 존재했고, 아직 초기화되지 않았다는 뜻입니다. 에러 문구(V8은 `Cannot access 'x' before initialization`)는 엔진마다 다르고 에러 종류는 같습니다.
+
+**TDZ**(Temporal Dead Zone, 일시적 사각지대)는 스코프에 진입한 시점부터 `let`·`const`·`class` 선언문이 실행되어 초기화되기까지의 구간입니다. 이 구간에서는 읽기와 쓰기 모두 ReferenceError입니다.
+
+```js
+x = 1       // ReferenceError — 쓰기도 막힌다
+let x
+let y = y   // ReferenceError — 초기화식 안에서도 TDZ
+```
+
+TDZ는 코드 위치가 아니라 실행 순서(시간)로 정해집니다. 함수 본문이 선언문보다 앞에 있어도 호출 시점에 이미 초기화되었다면 정상입니다.
+
+```js
+function show() { return n }
+// show()  ← 여기서 호출하면 ReferenceError
+let n = 1
+show()     // 1
+```
+
+`typeof`와 TDZ, `switch`의 TDZ는 13편에서 다룹니다.
+
+### 함수 선언문과 함수 표현식
+
+함수 선언문은 함수 객체까지 초기화된 채 호이스팅됩니다. 함수 표현식을 담은 `var` 변수는 변수만 `undefined`로 호이스팅됩니다(자세히는 11편).
+
+```js
+add(1, 2)  // 3
+function add(a, b) { return a + b }
+
+sub(2, 1)  // TypeError: sub is not a function
+var sub = function (a, b) { return a - b }
+```
+
+같은 이름의 `var`와 함수 선언이 겹치면 함수가 먼저 채워지고, `var`가 그 값을 `undefined`로 되돌리지 않습니다.
+
+```js
+console.log(typeof f) // 'function'
+var f = 1
+function f() {}
+console.log(typeof f) // 'number' — 할당이 덮어쓴다
+```
+
+### 실무 지침
+
+- 호이스팅에 기대지 않습니다. 변수는 쓰기 전에 선언하고 `const`·`let`을 씁니다.
+- `var`로 인한 `undefined`는 에러 없이 퍼지다가 `x.length` 같은 곳에서 `TypeError`로 터집니다. TDZ의 `ReferenceError`는 원인 지점에서 바로 터집니다.
+
+## 할당과 재할당
+
+**할당**(assignment)은 `=` 연산자로 변수에 값을 저장하는 일입니다. 이미 값이 든 변수에 다른 값을 저장하면 **재할당**(reassignment)입니다. 선언과 함께 주는 첫 값은 초기화이고, 이후의 `=`가 할당입니다.
+
+```js
+let count = 0   // 선언 + 초기화
+count = 1       // 재할당
+count = 'one'   // 다른 타입의 값도 가능 (자세히는 05편)
+```
+
+- JavaScript 변수에는 타입이 없고 값에 타입이 있어서 다른 타입으로 재할당할 수 있습니다.
+- 재할당 후 이전 값은 그 변수에서 사라집니다. 아무도 가리키지 않는 값은 가비지 컬렉션 대상이 됩니다.
+- 원시 값은 변경되지 않습니다. `s.toUpperCase()`는 새 문자열을 반환할 뿐 `s`의 값을 바꾸지 않습니다. 값을 바꾸려면 재할당해야 합니다.
+- 복합 할당(`+=` 등)은 06편, 구조 분해 할당은 37편에서 다룹니다.
+
+### const와 재할당
+
+`const`는 재할당만 금지합니다. 객체 내용을 바꾸는 것은 재할당이 아니므로 가능합니다.
+
+| 구분 | 하는 일 | const 변수에서 |
+|------|---------|----------------|
+| 재할당 | 변수가 가리키는 값을 다른 값으로 교체 | TypeError |
+| 내용 변경 | 객체의 프로퍼티를 수정 | 가능 |
+
+```js
+const user = { name: 'Kim' }
+user.name = 'Lee'        // ✅ 객체 내용 변경
+user = { name: 'Park' }  // ❌ TypeError (재할당)
+```
+
+내용 변경까지 막으려면 `Object.freeze`를 씁니다(자세히는 14편).
+
+`for` 문에서도 같은 규칙이 적용됩니다.
+
+```js
+for (const i = 0; i < 3; i++) {}  // ❌ TypeError: i++가 재할당
+for (const x of [1, 2, 3]) {}     // ✅ 반복마다 새 바인딩
+```
+
+### 할당문은 표현식
+
+할당문은 오른쪽 값을 반환하는 표현식이고 오른쪽부터 평가됩니다. 그래서 연쇄가 가능합니다.
+
+```js
+let a, b
+a = b = 5          // b = 5 가 먼저, 그 결과 5가 a에
+console.log(a, b)  // 5 5
+```
+
+선언과 연쇄를 섞으면 위험합니다.
+
+```js
+let a = b = 1  // let a = (b = 1) — b는 선언되지 않았다
+```
+
+### 선언 없는 할당
+
+`x = 10`처럼 선언 없이 쓰는 할당은 non-strict 모드에서 암묵적 전역 변수를 만듭니다. 전역 객체의 프로퍼티가 생길 뿐 선언이 아니므로 호이스팅되지 않고, 할당 전에 읽으면 ReferenceError입니다. strict 모드에서는 할당 자체가 ReferenceError입니다(자세히는 19편, 20편).
+
+```js
+function f() { total = 1 }  // total 선언 없음
+f()
+console.log(total)          // 1 — 전역으로 새어 나간다
+```
+
+철자 실수가 에러 없이 새 전역 변수를 만드는 것이 대표적인 사고입니다.
+
+## 식별자 네이밍 규칙
+
+식별자 이름은 문법 규칙을 지켜야 하며, 어기면 SyntaxError입니다.
+
+1. 첫 글자는 문자, `$`, `_` 중 하나입니다. 숫자로 시작할 수 없습니다.
+2. 둘째 글자부터는 문자, 숫자, `$`, `_`를 쓸 수 있습니다.
+3. 공백, 하이픈, 마침표 같은 연산자·구두점 문자는 쓸 수 없습니다.
+4. 예약어는 쓸 수 없습니다.
+5. 대소문자를 구분합니다.
+6. 길이 제한은 명세에 없습니다.
+7. 문자는 영문자에 한정되지 않습니다(아래 유니코드 식별자).
+
+| 이름 | 가능 여부 | 이유 |
+|------|-----------|------|
+| `userName` | 가능 | |
+| `$el`, `_id` | 가능 | `$`와 `_`는 첫 글자 가능 |
+| `item2` | 가능 | 숫자는 둘째 글자부터 |
+| `가격` | 가능 | 한글도 문자 |
+| `Class` | 가능 | 예약어는 소문자 형태만 해당 |
+| `2nd` | 불가 | 숫자로 시작 |
+| `user-name` | 불가 | 하이픈은 빼기 연산자 |
+| `user name` | 불가 | 공백이 이름을 둘로 나눔 |
+| `class` | 불가 | 예약어 |
+
+```js
+let score = 1
+console.log(Score) // ReferenceError — score와 Score는 다른 이름
+```
+
+- 식에서 `user-name`은 `user - name`이라는 뺄셈으로 읽힙니다.
+- 이름이 같은지는 이스케이프를 해석한 뒤 코드 포인트 열이 같은지로 판단합니다(아래 유니코드 식별자).
+- strict 모드에서는 `arguments`와 `eval`을 선언하거나 할당할 수 없습니다(아래 예약어 목록).
+
+## 네이밍 컨벤션
+
+**네이밍 컨벤션**(naming convention)은 엔진이 검사하지 않는 이름 짓기 관례입니다. 어겨도 실행은 되지만, 이름 모양만 보고 대상의 종류를 짐작하게 하는 역할을 합니다.
+
+| 스타일 | 예 | 쓰는 대상 |
+|--------|----|-----------|
+| camelCase | `userName`, `getUser` | 변수, 함수, 메서드, 프로퍼티 |
+| PascalCase | `UserProfile` | 클래스, 생성자 함수 |
+| UPPER_SNAKE_CASE | `MAX_RETRY` | 변하지 않는 설정값 상수 |
+| 앞쪽 밑줄 | `_cache` | 내부용이라는 표시. 접근을 막지 않음 |
+| `$` 접두·접미 | `$el` | 프로젝트마다 의미가 다름(DOM 요소 등) |
+| snake_case, kebab-case | `user_name`, `user-name` | JavaScript 식별자의 관례가 아님. kebab-case는 문법상 불가 |
+
+내장 객체도 이 관례를 따릅니다. `Math.PI`와 `Number.MAX_SAFE_INTEGER`는 대문자 상수, `Array`와 `Promise`는 PascalCase, `parseInt`와 `toString`은 camelCase입니다.
+
+이름 짓기 지침은 다음과 같습니다.
+
+- 불리언은 `is`, `has`, `can`, `should`로 시작합니다. `isActive`, `hasError`
+- 함수는 동사로 시작하고 값은 명사로 짓습니다. `fetchUser`와 `user`
+- 컬렉션은 복수형, 요소는 단수형입니다. `users`와 `user`
+- `i`, `j`는 짧은 반복문에서만 씁니다. 그 밖에는 의미가 드러나는 이름을 씁니다.
+- 타입을 이름에 붙이지 않습니다. `strName`
+- 의미 없는 숫자는 이름 붙은 상수로 바꿉니다.
+
+```js
+const MAX_RETRY = 3
+if (tries > MAX_RETRY) stop()
+```
+
+- `const`로 선언했다고 모두 대문자로 쓰지 않습니다. 대문자 상수명은 값이 변하지 않는 설정값에 씁니다. Google JavaScript 스타일 가이드는 깊게 불변인 값에만 쓰라고 합니다.
+- Google 스타일 가이드는 약어도 한 단어처럼 쓰는 `xmlHttpRequest` 형태를 따릅니다. 팀 규칙이 있으면 그것을 따르고 한 프로젝트 안에서 통일합니다.
+- ESLint의 `camelcase` 규칙은 이름 가운데 밑줄이 있는 `user_name`을 경고합니다. 전부 대문자인 상수와 앞뒤 밑줄은 허용합니다.
+- 한글 식별자는 문법상 가능하지만, 도구와 협업 환경 때문에 영어 이름을 쓰는 경우가 대부분입니다.
+
+흔한 실수는 `data`, `temp`, `flag`, `a1` 같은 이름입니다. 문맥 없이는 무엇을 담았는지 알 수 없습니다.
+
+## 예약어 목록
+
+**예약어**(reserved word)는 문법에서 의미가 정해져 있어 식별자로 쓸 수 없는 단어입니다. 변수 이름으로 쓰면 SyntaxError입니다.
+
+```js
+var class = 1  // ❌ SyntaxError
+var enum = 1   // ❌ SyntaxError — 쓰이지 않지만 예약됨
+```
+
+ECMA-262의 ReservedWord는 38개입니다. 이 중 `await`와 `yield`를 뺀 36개는 어디서나 예약어입니다.
+
+### 항상 예약된 단어
+
+| 분류 | 단어 |
+|------|------|
+| 값 | `null`, `true`, `false` |
+| 선언·모듈 | `var`, `const`, `function`, `class`, `import`, `export` |
+| 제어문 | `if`, `else`, `switch`, `case`, `default`, `for`, `while`, `do`, `break`, `continue`, `return`, `throw`, `try`, `catch`, `finally` |
+| 연산자 | `new`, `delete`, `typeof`, `instanceof`, `in`, `void` |
+| 그 밖 | `this`, `super`, `extends`, `with`, `debugger` |
+| 미래 예약 | `enum` |
+
+`let`은 이 목록에 없습니다. `enum`은 현재 문법에 쓰이지 않지만 장차 키워드로 쓰려고 예약되어 있습니다.
+
+### 문맥에 따라 예약되는 단어
+
+| 단어 | 식별자로 쓸 수 없는 조건 |
+|------|--------------------------|
+| `yield` | strict 모드, 제너레이터 함수 안 |
+| `await` | 모듈, async 함수 안 |
+| `let`, `static` | strict 모드 |
+| `implements`, `interface`, `package`, `private`, `protected`, `public` | strict 모드 |
+
+```js
+// non-strict 스크립트
+var interface = 1  // 가능
+```
+
+```js
+// strict 스크립트
+'use strict'
+var interface = 1  // ❌ SyntaxError
+```
+
+- class 본문과 모듈은 항상 strict 모드입니다. 그 안에서는 위 단어가 모두 금지됩니다(자세히는 19편, 45편).
+- `let`은 non-strict에서 `var let = 1`처럼 쓸 수 있지만, `let let = 1`처럼 let·const 선언의 이름으로는 쓸 수 없습니다.
+
+### 예약어가 아닌 특수 이름
+
+- `async`, `of`, `get`, `set`, `as`, `from`, `target`, `meta`는 특정 문법 자리에서만 키워드이고 식별자로도 쓸 수 있습니다. `const async = 1`은 정상입니다.
+- `arguments`와 `eval`은 예약어가 아니지만 strict 모드에서 선언하거나 할당하면 SyntaxError입니다.
+- `undefined`, `NaN`, `Infinity`는 예약어가 아니라 전역 객체의 쓰기 불가 프로퍼티입니다. 스크립트 최상위에서 `let`·`const`·`class`로 선언하면 SyntaxError이고, 전역에서의 할당은 non-strict에서 무시되며 strict에서 TypeError입니다. 함수 안에서 같은 이름의 지역 변수를 만들 수는 있지만 쓰지 않습니다.
+
+```js
+undefined = 1  // non-strict: 조용히 무시, strict: TypeError
+let NaN = 1    // 스크립트 최상위: SyntaxError
+```
+
+### 프로퍼티 이름과 이스케이프
+
+점 표기법과 객체 리터럴의 키는 식별자 이름 문법을 쓰므로 예약어도 허용합니다(ES5부터).
+
+```js
+const route = { default: '/', class: 'main' }
+route.default  // '/'
+route.class    // 'main'
+```
+
+유니코드 이스케이프로 예약어를 우회할 수는 없습니다. 이스케이프를 해석한 이름이 예약어와 같으면 SyntaxError입니다.
+
+```js
+var els\u0065 = 1  // ❌ SyntaxError: else와 같은 이름
+```
+
+### 해제된 옛 예약어
+
+`abstract`, `boolean`, `byte`, `char`, `double`, `final`, `float`, `goto`, `int`, `long`, `native`, `short`, `synchronized`, `throws`, `transient`, `volatile`은 ES3까지 미래 예약어였지만 ES5부터 예약어가 아닙니다. 지금은 `var int = 1`처럼 식별자로 쓸 수 있습니다.
+
+## 유니코드 식별자
+
+식별자에 쓸 수 있는 문자는 ASCII에 한정되지 않습니다. ECMAScript는 유니코드 표준의 ID_Start와 ID_Continue 속성(UAX #31)을 기준으로 삼고, `$`와 `_`를 추가로 허용합니다.
+
+| 위치 | 허용 문자 |
+|------|-----------|
+| 첫 글자 | ID_Start 속성 문자(각 언어의 글자), `$`, `_` |
+| 둘째 이후 | ID_Continue 속성 문자(글자, 숫자, 결합 기호, `_`), `$` |
+
+```js
+const 이름 = '홍길동'    // 한글
+const π = 3.14159       // 그리스 문자
+const café = 'latte'    // 악센트 라틴 문자
+console.log(이름, π)    // 홍길동 3.14159
+```
+
+- 한글, 한자, 가나, 키릴, 그리스 문자 등 각 언어의 글자가 ID_Start에 속합니다.
+- 다른 문자 체계의 숫자와 결합 기호는 ID_Continue에 속해 첫 글자가 아닌 자리에 쓸 수 있습니다.
+- 제로폭 비접합자(U+200C)와 접합자(U+200D)도 첫 글자가 아닌 자리에 쓸 수 있습니다.
+- 이모지, `①` 같은 기호, 공백, 연산자 문자는 쓸 수 없습니다.
+- 허용 문자 집합은 유니코드 표준의 갱신을 따라 늘어납니다.
+
+### 유니코드 이스케이프
+
+식별자 안에 `\uXXXX`(4자리 16진수)와 `\u{X...}`(ES2015, 1–6자리) 이스케이프를 쓸 수 있습니다. 이스케이프는 해당 문자와 같은 이름을 만듭니다.
+
+```js
+var \u0061bc = 1  // \u0061은 문자 a
+console.log(abc)   // 1
+var \u{1F600}      // ❌ 이모지는 이스케이프로도 불가
+```
+
+- 이스케이프로 만든 문자는 그 자리에 허용되는 문자여야 합니다. `\u0031a`는 숫자 `1`이 첫 글자가 되어 SyntaxError입니다.
+- 예약어와 같은 이름이 되면 SyntaxError입니다(앞 절).
+
+### 정규화되지 않는 이름
+
+식별자 비교는 정규화 없이 코드 포인트 열 그대로 합니다. 유니코드에서 같은 글자로 취급되는 서로 다른 표현은 다른 식별자입니다.
+
+```js
+const \u00e9 = 1    // é — 코드 포인트 1개
+const e\u0301 = 2   // e + 결합 악센트 — 코드 포인트 2개
+// 화면에서는 둘 다 é 이지만 서로 다른 변수
+```
+
+- 한글도 완성형 음절(U+AC00)과 자모 조합(U+1100 U+1161)이 서로 다른 이름입니다. 복사해 붙인 텍스트가 분해된 형태라면 같아 보이는 이름이 ReferenceError를 냅니다.
+- 라틴 `a`(U+0061)와 키릴 `а`(U+0430)처럼 모양이 같은 문자도 다른 식별자입니다.
+
+## 핵심 정리
+
+- 변수는 값을 저장한 메모리 공간에 붙인 이름이며, 명세에서는 이름과 값을 잇는 바인딩입니다.
+- 변수는 선언(이름 등록), 초기화(첫 값), 할당(값 교체) 순서입니다. `var`는 선언과 초기화가 동시에 일어나 `undefined`가 되고, `let`·`const`는 선언문이 실행될 때 초기화됩니다.
+- 모든 선언이 호이스팅되며, 초기화 전의 `let`·`const`·`class`에 접근하면 ReferenceError(TDZ)입니다.
+- 기본은 `const`, 재할당이 필요할 때만 `let`입니다. `const`는 재할당만 막고 객체 내용은 바꿀 수 있습니다.
+- 식별자는 문자·`$`·`_`로 시작하고 예약어가 아니어야 하며 대소문자를 구분합니다. 유니코드 문자도 허용하고 정규화하지 않습니다.
+- 이름 관례는 변수·함수 camelCase, 클래스 PascalCase, 설정 상수 UPPER_SNAKE_CASE입니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="선언문보다 앞에서 변수를 읽을 때의 결과로 옳은 것은?"
+  options={['var는 undefined, let은 ReferenceError', 'var는 ReferenceError, let은 undefined', 'var와 let 모두 undefined', 'var와 let 모두 ReferenceError']}
+  correctAnswer={1}
+  explanation="var는 스코프에 진입할 때 선언과 초기화(undefined)가 함께 끝나므로 undefined를 읽습니다. let은 선언만 되고 선언문이 실행될 때 초기화되어, 그 전 구간(TDZ)에서 읽으면 ReferenceError가 납니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="const로 선언한 변수에 대한 설명으로 옳은 것은?"
+  options={['객체를 담으면 그 객체의 프로퍼티도 바꿀 수 없다', '선언할 때 초기값을 생략할 수 있다', '다른 값으로 재할당하면 TypeError가 발생한다', '같은 스코프에서 같은 이름으로 다시 선언할 수 있다']}
+  correctAnswer={3}
+  explanation="const는 바인딩의 재할당을 막으며 재할당하면 TypeError입니다. 객체의 프로퍼티 변경은 재할당이 아니라 가능하고, 초기값을 생략하면 SyntaxError이며, 같은 스코프에서 재선언해도 SyntaxError입니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="non-strict 스크립트에서 var 선언의 변수 이름으로 쓸 수 없는 것은?"
+  options={['$price', '가격', 'interface', 'enum']}
+  correctAnswer={4}
+  explanation="enum은 어디서나 예약된 미래 예약어입니다. $는 첫 글자로 허용되고, 한글은 ID_Start에 속하는 문자이며, interface는 strict 모드에서만 예약되므로 non-strict에서는 쓸 수 있습니다."
+/>
+
+## 참고 자료
+
+- [ECMA-262 — Names and Keywords](https://tc39.es/ecma262/#sec-names-and-keywords)
+- [ECMA-262 — Let and Const Declarations](https://tc39.es/ecma262/#sec-let-and-const-declarations)
+- [ECMA-262 — Declarative Environment Records](https://tc39.es/ecma262/#sec-declarative-environment-records)
+- [MDN — Lexical grammar](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Lexical_grammar)
+- [MDN — var](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/var)
+- [MDN — let](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/let)
+- [MDN — const](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/const)
+- [MDN — using](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/using)
+- [MDN — Hoisting](https://developer.mozilla.org/en-US/docs/Glossary/Hoisting)
+- [TC39 Finished Proposals](https://github.com/tc39/proposals/blob/main/finished-proposals.md)
+- [Unicode Standard Annex #31 — Identifiers and Pattern Syntax](https://unicode.org/reports/tr31/)
+- [Google JavaScript Style Guide — Naming](https://google.github.io/styleguide/jsguide.html#naming)
+- [ESLint — camelcase](https://eslint.org/docs/latest/rules/camelcase)

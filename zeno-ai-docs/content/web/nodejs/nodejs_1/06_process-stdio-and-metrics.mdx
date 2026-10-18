@@ -1,0 +1,312 @@
+---
+title: '06. process: 표준 입출력과 측정'
+description: 'process.stdin·stdout·stderr의 성격과 파이프·TTY 차이, stdin이 흐르지 않을 때 resume, 시간·메모리·CPU·자원 사용량을 측정하는 process API를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 표준 입출력 세 스트림의 동작과 TTY·파이프 차이를 설명하고, 시간·메모리·CPU 측정 API를 목적에 맞게 골라 쓸 수 있습니다.
+</Callout>
+
+## 표준 입출력 스트림
+
+프로세스는 시작할 때 세 개의 표준 입출력 채널을 받습니다. 운영체제는 이를 파일 디스크립터(file descriptor) 0, 1, 2번으로 부르고, Node.js는 각각 `process.stdin`, `process.stdout`, `process.stderr`로 노출합니다.
+
+| 속성 | fd | 방향 | 용도 |
+|------|----|------|------|
+| `process.stdin` | 0 | 읽기 | 입력 |
+| `process.stdout` | 1 | 쓰기 | 정상 출력(결과) |
+| `process.stderr` | 2 | 쓰기 | 에러·진단 출력 |
+
+- 세 속성은 스트림입니다. 연결된 대상이 파일이면 `Readable`·`Writable`이고, 그 밖(터미널, 파이프)이면 `net.Socket`입니다.
+- `fd` 속성이 각각 `0`, `1`, `2`로 고정되어 있습니다. Worker 스레드에는 이 속성이 없습니다.
+- 스트림의 일반 규칙은 중급 과목에서 다룹니다. 이 편은 표준 입출력에 필요한 부분만 다룹니다.
+
+### stdin
+
+`process.stdin`은 표준 입력(fd 0)에서 읽는 `Readable` 스트림입니다. 터미널에서 사용자가 친 글자나 파이프로 들어온 데이터를 받습니다.
+
+```js
+let text = ''
+process.stdin.setEncoding('utf8')
+process.stdin.on('data', (chunk) => { text += chunk })
+process.stdin.on('end', () => {
+  console.log(text.length) // 입력 전체의 글자 수
+})
+```
+
+```bash
+printf 'hi\nthere' | node read.mjs
+# 8
+```
+
+- 데이터는 조각(chunk)으로 옵니다. 입력이 모두 끝나면 `'end'`가 발생합니다.
+- 인코딩을 지정하지 않으면 조각이 `Buffer`입니다. `setEncoding('utf8')`를 부르면 문자열로 받습니다(자세히는 19편, 20편).
+- `for await (const chunk of process.stdin)`으로도 읽을 수 있습니다.
+
+```js
+let total = 0
+for await (const chunk of process.stdin) {
+  total += chunk.length
+}
+console.log(total) // 'abcdef'가 입력되면 6
+```
+
+### stdout
+
+`process.stdout`은 표준 출력(fd 1)에 쓰는 `Writable` 스트림입니다. `console.log()`가 내부에서 쓰는 스트림이 이것입니다.
+
+```js
+process.stdout.write('no newline')   // 줄바꿈이 붙지 않음
+process.stdout.write('line\n')
+console.log('line')                  // 'line\n'을 씀
+```
+
+- `write()`는 문자열이나 `Buffer`를 받고 줄바꿈을 붙이지 않습니다. `console.log`는 끝에 줄바꿈을 붙입니다.
+- 프로그램의 결과물(다른 프로그램이 읽을 데이터)을 여기로 보냅니다.
+- 입력을 그대로 출력하려면 `process.stdin.pipe(process.stdout)`으로 연결합니다.
+
+### stderr
+
+`process.stderr`는 표준 에러(fd 2)에 쓰는 `Writable` 스트림입니다. `console.error()`가 내부에서 씁니다.
+
+```js
+console.log('result: 42')        // stdout
+console.error('warning: slow')   // stderr
+process.stderr.write('fatal\n')  // stderr
+```
+
+- 에러와 진단 메시지는 stderr로 보냅니다. 결과와 섞이지 않아서 `node app.mjs > out.txt`처럼 stdout만 리다이렉트해도 에러는 터미널에 남습니다.
+- 터미널에서는 두 출력이 같은 화면에 나오므로 겉으로는 구분되지 않습니다. 리다이렉트나 파이프에서 차이가 드러납니다.
+- stdout과 stderr를 나누는 설계는 26편에서 자세히 다룹니다.
+
+**흔한 실수:** 진단 메시지를 `console.log`로 찍어 파이프 뒤의 프로그램이 읽는 데이터에 섞는 것입니다.
+
+## stdin이 흐르지 않을 때 resume
+
+`Readable` 스트림은 처음에 일시 정지(paused) 상태로 시작합니다. 소비하는 쪽이 없으면 데이터를 내보내지 않고, 소비자가 붙으면 흐름(flowing) 상태가 됩니다. 흐름 상태로 바꾸는 방법은 세 가지입니다.
+
+- `'data'` 이벤트 리스너를 붙인다.
+- `resume()`을 호출한다.
+- `pipe()`로 `Writable`에 연결한다.
+
+```js
+process.stdin.pause()
+process.stdin.on('data', (c) => console.log(c.length))
+// ❌ 명시적으로 정지했으므로 데이터가 오지 않고 프로세스가 끝남
+
+process.stdin.resume()
+// ✅ 흐름 상태로 되돌려 3이 출력됨 (입력이 abc일 때)
+```
+
+- 한 번 `pause()`로 정지한 스트림은 `'data'` 리스너를 붙여도 자동으로 풀리지 않습니다. `resume()`이 필요합니다.
+- 리스너 없이 `resume()`만 부르면 데이터를 읽어서 버립니다. 입력을 다 소비해야 하지만 내용은 필요 없을 때 씁니다. `'end'`는 발생합니다.
+- `'readable'` 리스너를 붙이면 `resume()`은 효과가 없습니다. `'readable'` 안에서 `read()`로 직접 꺼내야 하고, 꺼내지 않으면 `'end'`가 발생하지 않습니다.
+- 정지 상태에서 이벤트 루프에 다른 할 일이 없으면 프로세스는 입력을 기다리지 않고 끝납니다.
+- 위 규칙은 `stream.Readable` 일반의 규칙입니다(스트림은 중급 과목).
+
+## 파이프와 TTY 차이
+
+TTY(텍스트 터미널)에 연결됐는지, 파이프나 파일에 연결됐는지에 따라 표준 입출력의 성격이 달라집니다. 연결 대상은 `isTTY` 속성으로 확인합니다.
+
+```bash
+node -p "Boolean(process.stdin.isTTY)"
+# true
+echo foo | node -p "Boolean(process.stdin.isTTY)"
+# false
+node -p "Boolean(process.stdout.isTTY)" | cat
+# false
+```
+
+- TTY에 연결된 스트림에서만 `isTTY`가 `true`입니다. 파이프나 파일이면 `isTTY`는 `false`가 아니라 `undefined`이므로 `Boolean()`으로 감싸거나 `if (process.stdout.isTTY)`처럼 씁니다.
+- TTY일 때 `process.stdout.columns`와 `rows`로 터미널 크기를 읽을 수 있고, `'resize'` 이벤트로 변화를 받습니다. 파이프에서는 이 값이 없습니다.
+- TTY의 `process.stdin`은 `tty.ReadStream`이라서 `setRawMode()`로 글자를 한 자씩 받는 원시 모드(raw mode)를 쓸 수 있습니다.
+
+쓰기가 동기인지 비동기인지도 연결 대상과 운영체제에 따라 다릅니다.
+
+| 연결 대상 | Windows | POSIX(Linux·macOS) |
+|-----------|---------|--------------------|
+| 파일 | 동기 | 동기 |
+| TTY(터미널) | 비동기 | 동기 |
+| 파이프·소켓 | 동기 | 비동기 |
+
+- 동기 쓰기는 `console.log` 출력이 뒤섞이거나 `process.exit()` 전에 유실되는 문제를 줄입니다. 대신 쓰기가 끝날 때까지 이벤트 루프를 막습니다.
+- 읽는 쪽이 느리거나 읽지 않는 파이프, 느린 터미널·파일시스템에서는 동기 쓰기가 이벤트 루프를 길게 막을 수 있어서 운영 로그를 쓸 때 주의가 필요합니다.
+- 파이프는 POSIX에서 비동기라서 출력 직후 `process.exit()`를 부르면 일부가 사라질 수 있습니다. `exit` 대신 `exitCode`를 쓰는 이유입니다(자세히는 05편).
+
+**흔한 실수:** 터미널에서 테스트한 출력 코드를 파이프로 돌릴 때 색상 코드나 진행 표시줄이 그대로 섞여 나오는 것입니다. `isTTY`를 확인해 TTY일 때만 꾸밉니다.
+
+## 시간 측정
+
+### process.hrtime
+
+`process.hrtime([time])`은 고해상도 실시간을 `[초, 나노초]` 배열로 돌려줍니다. 안정성 지수는 3(Legacy)이며 `process.hrtime.bigint()`를 쓰라고 안내합니다.
+
+```js
+const start = process.hrtime()
+// ... 측정할 작업
+const [sec, nano] = process.hrtime(start)
+console.log(sec * 1e9 + nano) // 걸린 시간(나노초)
+```
+
+- 값은 과거의 임의의 시점을 기준으로 하며 시각(wall clock)과 관계가 없습니다. 시계 드리프트의 영향을 받지 않아서 구간 측정에 씁니다.
+- 이전 호출의 결과를 인수로 넘기면 그 시점부터의 차이를 돌려줍니다. 사용자가 만든 배열을 넘기면 동작이 정의되지 않고, 배열이 아니면 `TypeError`입니다.
+- 나노초는 초 단위로 표현하고 남은 부분이라서 합칠 때 `초 * 1e9 + 나노초`로 계산합니다.
+
+### process.hrtime.bigint
+
+`process.hrtime.bigint()`는 같은 시간을 나노초 단위의 `bigint` 하나로 돌려줍니다(v10.7.0). 이전 값을 인수로 받지 않고, 두 값을 직접 뺍니다.
+
+```js
+const start = process.hrtime.bigint()
+await somethingAsync()
+const end = process.hrtime.bigint()
+console.log(`${end - start} ns`)       // 예: 1154389282 ns
+console.log(Number(end - start) / 1e6) // 밀리초
+```
+
+- `bigint`끼리만 연산됩니다. 숫자와 섞으면 `TypeError`이므로 밀리초로 바꾸려면 `Number()`로 변환한 뒤 나눕니다.
+
+### performance.now
+
+`performance.now()`는 현재 프로세스가 시작된 시점을 0으로 하는 고해상도 밀리초 값을 소수로 돌려줍니다. 브라우저의 같은 API와 같은 방식이라서 코드를 공유하기 쉽습니다.
+
+```js
+const t0 = performance.now()
+await somethingAsync()
+const ms = performance.now() - t0
+console.log(ms) // 예: 12.3456 (밀리초, 소수)
+```
+
+- 전역 `performance`는 v16.0.0부터 있습니다. `node:perf_hooks` 모듈의 `perf_hooks.performance`와 같은 객체이고 이 모듈의 안정성 지수는 2(Stable)입니다.
+- `performance.timeOrigin`은 프로세스가 시작된 Unix 시각(밀리초)입니다.
+- 구간 측정에는 `Date.now()`보다 `hrtime`이나 `performance.now()`를 씁니다. `Date.now()`는 시각(wall clock)이고 해상도가 밀리초입니다.
+
+| API | 반환 | 단위 | 기준점 |
+|-----|------|------|--------|
+| `process.hrtime()` | `[초, 나노초]` 배열 | 나노초 | 임의의 과거 시점 |
+| `process.hrtime.bigint()` | `bigint` | 나노초 | 임의의 과거 시점 |
+| `performance.now()` | 소수 `number` | 밀리초 | 프로세스 시작 |
+| `Date.now()` | 정수 `number` | 밀리초 | Unix 시각 |
+
+## process.uptime
+
+`process.uptime()`은 현재 Node.js 프로세스가 실행된 시간을 초 단위 숫자로 돌려줍니다. 소수 부분(초 미만)이 포함됩니다.
+
+```js
+console.log(process.uptime()) // 0.0451 (시작 직후)
+console.log(Math.floor(process.uptime())) // 0
+```
+
+- 정수 초가 필요하면 `Math.floor()`로 자릅니다.
+- 상태 점검 응답에 가동 시간을 실을 때 씁니다.
+
+## 자원 사용량 측정
+
+### process.memoryUsage
+
+`process.memoryUsage()`는 프로세스의 메모리 사용량을 바이트 단위로 담은 객체를 돌려줍니다.
+
+```js
+console.log(process.memoryUsage())
+// { rss: 4935680, heapTotal: 1826816, heapUsed: 650472,
+//   external: 49879, arrayBuffers: 9386 }
+```
+
+| 필드 | 의미 |
+|------|------|
+| `rss` | 프로세스가 주 메모리에 차지한 전체 크기(Resident Set Size). C++ 객체, JavaScript 객체, 코드를 모두 포함 |
+| `heapTotal` | V8이 확보한 힙 크기 |
+| `heapUsed` | V8 힙에서 실제로 쓰는 크기 |
+| `external` | V8이 관리하는 JavaScript 객체에 묶인 C++ 객체의 메모리 |
+| `arrayBuffers` | `ArrayBuffer`와 `SharedArrayBuffer`(모든 `Buffer` 포함)에 할당된 메모리. `external`에도 포함됨 |
+
+- 단위는 바이트입니다. 사람이 읽으려면 `/ 1024 / 1024`로 MiB로 바꿉니다.
+- 메모리 누수를 의심할 때는 `heapUsed`가 시간이 지나며 계속 늘어나는지 봅니다. 힙 상세는 고급 과목에서 다룹니다.
+- Worker 스레드에서 `rss`는 프로세스 전체 값이고, 나머지 필드는 현재 스레드 값입니다.
+- 이 메서드는 메모리 페이지를 순회해서 수집하므로 할당이 많으면 느릴 수 있습니다. `rss`만 필요하면 더 빠른 `process.memoryUsage.rss()`를 씁니다(v15.6.0).
+- glibc를 쓰는 Linux에서는 `heapTotal`이 안정적인데 `rss`만 계속 늘 수 있습니다. malloc 구현의 단편화 때문이라고 공식 문서가 설명합니다.
+
+### process.cpuUsage
+
+`process.cpuUsage([previousValue])`는 프로세스가 쓴 CPU 시간을 `user`와 `system` 두 값으로 돌려줍니다. 단위는 마이크로초(100만분의 1초)입니다(v6.1.0).
+
+```js
+const start = process.cpuUsage()
+// ... CPU를 쓰는 작업
+const diff = process.cpuUsage(start)
+console.log(diff) // { user: 514883, system: 11226 }
+```
+
+- `user`는 애플리케이션 코드가 쓴 시간, `system`은 운영체제 커널이 쓴 시간입니다.
+- 이전 결과를 인수로 넘기면 그 이후의 차이를 돌려줍니다.
+- 여러 코어가 이 프로세스를 위해 일하면 CPU 시간이 실제 경과 시간보다 커질 수 있습니다.
+- 경과 시간은 벽시계 시간이고 CPU 시간은 일한 시간입니다. 대기(I/O)하는 동안은 경과 시간만 늘어납니다.
+
+### process.resourceUsage
+
+`process.resourceUsage()`는 운영체제의 자원 사용 통계를 객체로 돌려줍니다(v12.6.0). 값은 libuv의 `uv_getrusage`가 반환한 구조체에서 옵니다.
+
+```js
+const r = process.resourceUsage()
+r.userCPUTime       // 82872 (마이크로초)
+r.maxRSS            // 33164 (KiB)
+r.fsRead            // 파일시스템 읽기 횟수
+r.voluntaryContextSwitches // 79
+```
+
+| 필드 | 의미 |
+|------|------|
+| `userCPUTime`, `systemCPUTime` | 마이크로초 단위 CPU 시간. `cpuUsage()`의 `user`·`system`과 같은 값 |
+| `maxRSS` | 사용한 최대 상주 메모리 크기(KiB, 1024바이트 단위) |
+| `minorPageFault`, `majorPageFault` | 마이너·메이저 페이지 폴트 횟수. 메이저는 Windows에서 미지원 |
+| `fsRead`, `fsWrite` | 파일시스템이 입력·출력을 수행한 횟수 |
+| `voluntaryContextSwitches`, `involuntaryContextSwitches` | 자발적·비자발적 CPU 컨텍스트 전환 횟수. Windows에서 미지원 |
+
+- `sharedMemorySize`, `unsharedDataSize`, `unsharedStackSize`, `swappedOut`, `ipcSent`, `ipcReceived`, `signalsCount`는 어느 플랫폼에서도 지원하지 않습니다. 항상 `0`입니다.
+- `maxRSS`의 단위는 KiB이고 `memoryUsage().rss`는 바이트입니다. 비교할 때 단위를 맞춥니다.
+- 현재 메모리 값은 `memoryUsage()`가, 프로세스 수명 동안의 최대 상주 메모리는 `maxRSS`가 알려 줍니다.
+
+## 핵심 정리
+
+- `stdin`(0)은 읽기, `stdout`(1)은 결과 출력, `stderr`(2)는 에러·진단 출력이며 `console.log`와 `console.error`가 각각 stdout, stderr에 씁니다.
+- `Readable`은 처음에 정지 상태이고 `'data'` 리스너, `resume()`, `pipe()`로 흐릅니다. 명시적으로 `pause()`한 stdin은 `resume()`을 불러야 다시 흐릅니다.
+- TTY인지는 `isTTY`로 확인하며 파이프에서는 `undefined`입니다. 쓰기의 동기 여부는 파일·TTY·파이프와 Windows·POSIX 조합에 따라 다릅니다.
+- 구간 시간은 `process.hrtime.bigint()`나 `performance.now()`로 재고, `process.hrtime()`은 Legacy입니다. 가동 시간은 `process.uptime()`(초)입니다.
+- `memoryUsage()`는 바이트 단위 메모리, `cpuUsage()`는 마이크로초 단위 CPU 시간, `resourceUsage()`는 최대 RSS(KiB)와 페이지 폴트·컨텍스트 전환 같은 운영체제 통계입니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="process.stdin.pause()를 호출한 뒤 data 이벤트 리스너만 붙이고 resume()을 호출하지 않았다. 입력이 파이프로 들어올 때 결과는?"
+  options={['리스너를 붙이는 순간 흐름 상태로 바뀌어 데이터를 받는다', '데이터를 받지 못하고 프로세스가 그대로 끝난다', 'TypeError가 발생한다', '데이터는 받지만 Buffer가 아니라 문자열로 받는다']}
+  correctAnswer={2}
+  explanation="명시적으로 pause()한 스트림은 data 리스너를 붙여도 자동으로 흐르지 않습니다. 흐름 상태로 되돌리려면 resume()이 필요하고, 호출하지 않으면 데이터가 오지 않으며 이벤트 루프에 남은 일이 없으므로 프로세스가 끝납니다."
+  optionExplanations={['처음 시작한 정지 상태와 달리 명시적으로 정지한 상태는 data 리스너만으로 풀리지 않는다', '정답. resume()을 호출하지 않으면 데이터가 오지 않고 프로세스는 끝난다', 'pause()와 리스너 등록은 에러를 일으키지 않는다', '문자열 변환은 setEncoding을 호출했을 때만 일어난다']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="echo hi | node app.mjs 로 실행했을 때 app.mjs 안에서 process.stdin.isTTY의 값은?"
+  options={['true', 'false', 'undefined', 'null']}
+  correctAnswer={3}
+  explanation="isTTY는 TTY에 연결된 스트림에서만 true로 정의됩니다. 파이프로 연결된 stdin은 net.Socket이라서 isTTY 속성이 없고 값은 undefined입니다. Boolean으로 감싸면 false가 되지만 속성 자체는 false가 아닙니다."
+  optionExplanations={['true는 터미널에 연결됐을 때의 값이다', 'Boolean으로 감싼 결과는 false이지만 속성값은 false가 아니다', '정답. 파이프에서는 isTTY 속성이 정의되지 않아 undefined이다', 'null이 되는 경우는 없다']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="코드 구간의 실행 시간을 나노초 단위로 재려고 한다. 가장 적절한 방법은?"
+  options={['Date.now()의 차이를 구한다', 'process.uptime()의 차이를 구한다', 'process.hrtime.bigint()의 차이를 구한다', 'process.cpuUsage()의 user 값을 그대로 쓴다']}
+  correctAnswer={3}
+  explanation="process.hrtime.bigint()는 나노초 단위의 bigint를 돌려주고 구간 측정을 위한 API입니다. Date.now()는 밀리초 단위이고, uptime은 초 단위이고, cpuUsage는 경과 시간이 아니라 CPU 사용 시간을 마이크로초로 줍니다."
+  optionExplanations={['Date.now()는 밀리초 단위라서 나노초를 잴 수 없다', 'uptime은 초 단위라서 짧은 구간을 재기에는 해상도가 부족하다', '정답. 나노초 단위이고 구간 측정을 위한 API이다', 'cpuUsage는 경과 시간이 아니라 CPU가 일한 시간을 마이크로초로 돌려준다']}
+/>
+
+## 참고 자료
+
+- [Node.js — process: stdin·stdout·stderr, A note on process I/O](https://nodejs.org/api/process.html#a-note-on-process-io)
+- [Node.js — process: hrtime, memoryUsage, cpuUsage, resourceUsage, uptime](https://nodejs.org/api/process.html#processhrtimetime)
+- [Node.js — TTY](https://nodejs.org/api/tty.html)
+- [Node.js — Stream: Readable의 두 가지 읽기 모드](https://nodejs.org/api/stream.html#two-reading-modes)
+- [Node.js — Performance measurement APIs](https://nodejs.org/api/perf_hooks.html#performancenow)

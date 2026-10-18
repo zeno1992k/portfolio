@@ -1,0 +1,67 @@
+---
+title: '09. 제네릭 클래스로 저장소 만들기'
+description: 'Storage 제네릭 클래스로 거래 데이터를 localStorage에 저장하고 불러옵니다'
+---
+
+08편에서 `sortBy`, `filterBy` 제네릭 유틸 함수로 정렬·필터를 완성했습니다. 하지만 거래 데이터는 여전히 `main.ts`의 배열 변수에만 있어, 브라우저를 새로고침하면 사라집니다. 이 편에서는 어떤 데이터 타입이든 담을 수 있는 제네릭 클래스로 저장소를 만들어 `localStorage`에 저장합니다.
+
+## 개념 정리
+
+### 제네릭 인터페이스와 제네릭 클래스
+
+인터페이스나 클래스 이름 뒤에 타입 매개변수를 붙이면 실제 타입은 사용하는 쪽에서 정합니다.
+
+| 구문 | 의미 |
+|------|------|
+| `interface DataStore<T>` | `T` 자리에 어떤 타입이 와도 되는 인터페이스 |
+| `class Storage<T> implements DataStore<T>` | 인터페이스의 `T`를 그대로 이어받는 제네릭 클래스 |
+| `new Storage<Transaction>(...)` | 이 저장소를 쓸 때 `T`를 `Transaction`으로 확정 |
+
+08편의 `sortBy<T, K extends keyof T>`는 함수를 제네릭으로 만들었다면, 이번에는 클래스 전체를 제네릭으로 만드는 차이가 있습니다.
+
+### localStorage와 타입 정보 손실
+
+`localStorage`는 문자열만 저장합니다. `JSON.stringify(items)`로 배열을 문자열로 바꿔 저장하고, `JSON.parse(raw)`로 다시 객체로 되돌립니다.
+
+### id를 문자열로 바꾸는 이유
+
+지금까지 `nextId = transactions.length + 1`처럼 배열 길이로 다음 `id`를 계산했습니다. 이 방식은 데이터가 메모리에만 있을 때는 문제없지만, `localStorage`에서 다시 불러온 뒤 배열 길이가 달라지면(예: 항목을 지운 뒤) 같은 `id`가 중복될 수 있습니다.
+
+## 자주 하는 실수
+
+| 증상 | 원인 | 고치는 법 |
+|------|------|-----------|
+| 새로고침하면 방금 추가한 거래가 사라짐 | `addTransaction`에서 `transactionStorage.save`를 빠뜨리고 배열만 바꿈 | 배열을 바꿀 때마다 저장소도 함께 갱신한다 |
+| 저장된 값을 불러오면 이상하게 동작 | `JSON.parse` 결과를 `as T[]`로 단언만 하고 실제 모양은 검증하지 않음 | 중요한 데이터는 저장 전후로 필드가 있는지 직접 확인한다 |
+| 거래 두 개의 id가 똑같음 | 여전히 배열 길이로 id를 계산함 | `crypto.randomUUID()`로 매번 새 id를 만든다 |
+
+## 확인 문제
+
+<Quiz
+  questionNumber={1}
+  question={"제네릭 인터페이스 DataStore에서 T가 하는 역할은 무엇인가"}
+  options={["항상 문자열 타입으로 고정된다","이 저장소를 사용할 때 실제 타입으로 채워지는 자리표시자다","런타임에 자동으로 계산된다","JSON으로 변환할 수 없는 타입을 막는다"]}
+  correctAnswer={2}
+  explanation={"T는 타입 매개변수로, 저장소를 사용하는 쪽에서 실제 타입을 채워 넣습니다."}
+/>
+
+<Quiz
+  questionNumber={2}
+  question={"JSON.parse(raw)의 반환 타입에 대한 설명으로 옳은 것은"}
+  options={["항상 T[]로 정확히 추론된다","any이므로 as T[]로 개발자가 직접 타입을 알려줘야 한다","컴파일 타임에 항상 오류가 난다","localStorage 전용 타입으로 자동 변환된다"]}
+  correctAnswer={2}
+  explanation={"JSON.parse는 반환 타입이 any이기 때문에 실제 데이터 모양을 컴파일러가 검증하지 않으며, as T[]는 개발자의 단언일 뿐입니다."}
+/>
+
+<Quiz
+  questionNumber={3}
+  question={"이 편에서 id 타입을 number에서 string으로 바꾼 이유는"}
+  options={["문자열이 숫자보다 저장 용량이 작아서","배열 길이 기반 계산 방식이 삭제·재로드 상황에서 id가 중복될 수 있어서","localStorage가 숫자를 저장할 수 없어서","crypto.randomUUID가 숫자를 반환하지 않기 때문일 뿐 다른 이유는 없어서"]}
+  correctAnswer={2}
+  explanation={"배열 길이로 다음 id를 계산하는 방식은 데이터가 삭제되거나 다시 로드되는 상황에서 값이 겹칠 수 있어, 매번 고유한 문자열을 만드는 방식으로 바꿨습니다."}
+/>
+
+## 참고 자료
+
+- [TypeScript Handbook — Generics](https://www.typescriptlang.org/docs/handbook/2/generics.html)
+- [MDN — Window: localStorage property](https://developer.mozilla.org/en-US/docs/Web/API/Window/localStorage)

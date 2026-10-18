@@ -1,0 +1,755 @@
+---
+title: '82. 애플리케이션 코어 설계 — 서비스와 부트스트랩'
+description: 'Fetch Client, Overlay Manager, Form Controller, 오류·로딩 통합, 오류 보고 연결, 환경 설정, Feature Module, 앱 부트스트랩의 설계 판단과 핵심 코드를 읽습니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 앱 코어의 서비스들이 맡는 책임과 의존 방향을 구분하고, 설정 읽기부터 첫 화면까지 부트스트랩이 서비스를 조립하는 순서를 설명할 수 있습니다.
+</Callout>
+
+## 서비스 계층 구성
+
+서비스는 컴포넌트 밖에 두는 앱 전역 기능 모듈입니다. 컴포넌트는 서비스의 메서드만 부르고, 서비스는 DOM 구조를 모릅니다. 81편의 기반 클래스·라우터·스토어 위에 아래 서비스가 올라갑니다.
+
+| 서비스 | 책임 | 의존 |
+|--------|------|------|
+| 설정(`config`) | 환경별 값 제공 | 없음 |
+| 오류 보고(`report`) | 오류 수집·전송 | 설정 |
+| Fetch Client(`http`) | 요청 구성, 오류 정규화, 타임아웃·재시도 | 설정 |
+| 작업 실행기(`tasks`) | 로딩·오류 상태 기록, 메시지 선택 | 스토어, 보고 |
+| Overlay 서비스(`overlays`) | 모달 열기·닫기·결과 반환 | 없음 |
+| Form Controller | 제출, 검증 오류 표시, 중복 제출 방지 | `http` 또는 작업 |
+| Feature Module | 기능 단위의 라우트·컴포넌트·초기 상태 묶음 | 위 서비스 전부 |
+
+- 서비스는 모듈 전역에서 가져오지 않고 한 객체(`ctx`)로 묶어 컴포넌트에 전달합니다. 테스트에서 가짜 서비스로 바꿀 수 있습니다(자세히는 68편).
+- 객체를 컴포넌트에 전달하는 방법은 Context 이벤트입니다(아래 "App Bootstrap", 자세히는 25편).
+- 코드는 설계를 읽기 위한 축약본입니다.
+
+## Fetch Client 만들기
+
+Fetch Client는 `fetch`를 감싸 기본 URL, JSON 처리, 오류 정규화, 타임아웃, 재시도를 한곳에 두는 모듈입니다. 컴포넌트는 `http.get('users/1')`처럼 부르고 `fetch` 옵션을 모릅니다(자세히는 36편, 37편).
+
+### 오류 타입
+
+```js
+export class HttpError extends Error {
+  constructor(kind, opts = {}) {
+    super(kind, { cause: opts.cause })
+    this.kind = kind    // network | timeout | http | parse
+    this.status = opts.status
+    this.res = opts.res
+  }
+}
+```
+
+- `fetch`는 HTTP 오류 상태(404, 500)에서 거부하지 않고 네트워크 실패와 취소에서만 거부합니다. 클라이언트가 이를 모두 `HttpError` 하나로 맞춥니다.
+- `kind`로 종류를 가르고, `http`이면 `status`와 읽지 않은 응답(`res`)을 담습니다. 서버가 오류 본문에 검증 오류를 담아 주는 경우가 많기 때문입니다.
+- 취소(`AbortError`)는 호출자가 일으킨 것이므로 변환하지 않고 그대로 던집니다.
+
+### 요청 만들기
+
+```js
+function build(method, path, opt) {
+  const url = new URL(path, baseUrl)
+  for (const [k, v] of Object.entries(opt.query ?? {})) {
+    url.searchParams.set(k, v)
+  }
+  const headers = { Accept: 'application/json' }
+  const init = { method, headers }
+  if (opt.body !== undefined) {
+    init.body = JSON.stringify(opt.body)
+    headers['Content-Type'] = 'application/json'
+  }
+  return [url, init]
+}
+```
+
+- 경로는 `new URL(path, baseUrl)`로 합칩니다. 쿼리는 `searchParams`가 인코딩합니다(자세히는 34편).
+- 기준 URL에 경로가 있을 때 요청 경로가 `/`로 시작하면 기준 경로가 통째로 대체됩니다. `https://x.com/api/`에 `/users`를 합치면 `https://x.com/users`입니다. 기준 URL은 `/`로 끝내고 요청 경로는 `users`처럼 상대 경로로 씁니다.
+
+### 전송과 타임아웃
+
+```js
+function toHttpError(e) {
+  if (e.name === 'AbortError') throw e
+  const t = e.name === 'TimeoutError'
+  const kind = t ? 'timeout' : 'network'
+  throw new HttpError(kind, { cause: e })
+}
+```
+
+```js
+async function send(url, init, signal) {
+  const sigs = [AbortSignal.timeout(timeout)]
+  if (signal) sigs.push(signal)
+  const opts = { ...init, signal: AbortSignal.any(sigs) }
+  const res = await fetch(url, opts).catch(toHttpError)
+  if (res.ok) return res
+  throw new HttpError('http', { status: res.status, res })
+}
+```
+
+- 호출자의 신호와 타임아웃 신호를 `AbortSignal.any()`로 합칩니다. 먼저 취소된 쪽의 이유가 `reason`이 되어 `TimeoutError`와 `AbortError`를 구분할 수 있습니다(Baseline 2024, 자세히는 37편).
+- `fetch`가 `TypeError`로 거부되면 네트워크 실패입니다. CORS 실패도 같은 `TypeError`라서 스크립트는 구분하지 못합니다(자세히는 62편).
+
+### 응답 해석과 재시도
+
+```js
+async function parse(res) {
+  if (res.status === 204) return null
+  try { return await res.json() }
+  catch (e) { throw new HttpError('parse', { cause: e }) }
+}
+```
+
+```js
+async function withRetry(fn, { retries = 2, signal } = {}) {
+  for (let i = 0; ; i++) {
+    try { return await fn() }
+    catch (e) {
+      const again = ['network', 'timeout'].includes(e.kind)
+        || [502, 503, 504].includes(e.status)
+      if (i >= retries || !again) throw e
+      await sleep(300 * 2 ** i, signal)
+    }
+  }
+}
+```
+
+- 본문이 없는 응답(204)은 `json()`을 부르지 않습니다. 부르면 파싱 오류입니다.
+- 재시도는 멱등 요청(`GET`)에만 겁니다. `POST`를 재시도하면 같은 주문이 두 번 생길 수 있습니다. 지터와 `Retry-After`는 37편의 규칙을 따릅니다.
+- `sleep(ms, signal)`은 신호가 취소되면 대기를 끝내며 거부하는 지연 함수입니다.
+
+### 조립과 로딩 알림
+
+```js
+export function createHttp(cfg) {
+  const { baseUrl, timeout = 8000, hooks = {} } = cfg
+  const bus = new EventTarget()
+  let pending = 0
+  const count = (n) => {
+    pending += n
+    const detail = pending
+    const e = new CustomEvent('loading', { detail })
+    bus.dispatchEvent(e)
+  }
+  // 위의 build, send, parse, withRetry와 request가 이 안에 놓인다
+}
+```
+
+```js
+async function request(method, path, opt = {}) {
+  const [url, init] = build(method, path, opt)
+  await hooks.beforeRequest?.(init)   // 인증 헤더 등
+  const run = () => send(url, init, opt.signal)
+  count(1)
+  try {
+    const get = method === 'GET'
+    const call = get ? () => withRetry(run, opt) : run
+    return await parse(await call())
+  } finally { count(-1) }
+}
+```
+
+```js
+return {
+  bus,
+  get: (p, o) => request('GET', p, o),
+  post: (p, body, o) => request('POST', p, { ...o, body }),
+  put: (p, body, o) => request('PUT', p, { ...o, body }),
+  delete: (p, o) => request('DELETE', p, o),
+}
+```
+
+- `hooks.beforeRequest`는 요청이 나가기 전에 `init`을 고치는 자리입니다. 인증 헤더, 요청 ID 같은 공통 처리를 클라이언트 밖에서 주입합니다.
+- 진행 중 요청 수를 `loading` 이벤트로 알립니다. 앱 맨 위의 진행 표시줄이 이 이벤트 하나만 구독하면 모든 요청을 반영합니다.
+- 응답 데이터의 모양 변환과 캐시는 클라이언트가 아니라 그 위의 리포지토리 계층에서 합니다(자세히는 37편).
+
+**흔한 실수:**
+
+- 인증 토큰을 클라이언트 안에 고정하는 것입니다. 갱신되는 값이므로 `beforeRequest`에서 그때그때 읽습니다.
+- 재시도 가능 여부를 구분하지 않아 `POST`를 재시도하는 것입니다.
+
+## Overlay Manager 만들기
+
+앱 수준의 Overlay 서비스는 45편의 스택·닫기 정책을 서비스 객체로 바꾼 것입니다. 호출하는 쪽이 대화상자 요소를 직접 만들지 않고 `await overlays.confirm('삭제할까요?')`처럼 결과를 약속으로 받게 합니다. 네이티브 `dialog`가 최상위 레이어, Escape, 포커스 복귀를 처리하므로 서비스는 그 위의 일만 합니다(자세히는 44편, 45편).
+
+| 책임 | 방법 |
+|------|------|
+| 요소 생성 | `dialog`를 만들고 내용 컴포넌트를 안에 넣음 |
+| 결과 전달 | `close` 이벤트에서 `returnValue`를 약속에 이행 |
+| 정리 | 닫힌 `dialog`를 DOM에서 제거 |
+| 일괄 닫기 | 라우트 전환 때 열린 것을 모두 닫음 |
+
+### 열기와 결과
+
+```js
+export class OverlayService {
+  #open = new Set()
+  open(tag, props = {}) {
+    const dlg = document.createElement('dialog')
+    const body = document.createElement(tag)
+    Object.assign(body, props)
+    dlg.append(body)
+    const closed = this.#watch(dlg, body)
+    document.body.append(dlg)
+    dlg.showModal()
+    return { el: body, closed, close: (v) => dlg.close(v) }
+  }
+  // #watch는 아래
+}
+```
+
+```js
+#watch(dlg, body) {
+  this.#open.add(dlg)
+  body.addEventListener('overlay-result', (e) => {
+    dlg.close(e.detail)
+  })
+  return new Promise((resolve) => {
+    dlg.addEventListener('close', () => {
+      this.#open.delete(dlg)
+      dlg.remove()
+      resolve(dlg.returnValue)
+    }, { once: true })
+  })
+}
+```
+
+- 내용 컴포넌트는 결과를 `overlay-result` 이벤트로 올리고 서비스가 `dialog.close(값)`을 부릅니다. 컴포넌트가 `dialog`의 존재를 몰라도 됩니다.
+- 어떤 경로로 닫혀도(Escape, 결과 이벤트, 코드) `close` 이벤트가 하나로 모입니다. 이 한곳에서 정리하고 약속을 이행합니다. Escape로 닫으면 `returnValue`가 비어 있어서 취소와 같은 값으로 취급됩니다.
+- 포커스는 `dialog`가 닫힐 때 열기 전 요소로 돌아갑니다. 서비스가 따로 저장하지 않습니다.
+
+### 편의 메서드와 일괄 닫기
+
+```js
+async confirm(message) {
+  const { closed } = this.open('confirm-box', { message })
+  return (await closed) === 'ok'
+}
+
+closeAll() {
+  for (const dlg of [...this.#open].reverse()) dlg.close()
+}
+```
+
+- `confirm`은 `'ok'`로 닫혔을 때만 참입니다. 취소, Escape, 일괄 닫기는 모두 거짓이 됩니다.
+- `closeAll`은 안쪽(나중에 열린) 대화상자부터 닫습니다. 라우트가 바뀔 때 호출해 이전 화면의 대화상자가 남지 않게 합니다.
+- 팝오버, 메뉴, 토스트처럼 종류가 다르거나 겹침 정책이 필요한 오버레이는 45편의 스택 매니저가 맡습니다. 이 서비스는 모달 대화상자만 다룹니다.
+
+**흔한 실수:** 닫을 때 `dialog`를 DOM에서 지우지 않는 것입니다. 대화상자가 문서에 쌓이고 내용 컴포넌트의 구독도 정리되지 않습니다(자세히는 67편).
+
+## Form Controller 만들기
+
+Form Controller는 폼 하나의 제출 흐름을 맡는 객체입니다. 네이티브 폼이 해 주는 일(검증, 값 수집)은 그대로 쓰고, 그 앞뒤의 반복 작업만 맡습니다. 제출 가로채기, 중복 제출 방지, 비동기 제출, 서버 검증 오류의 표시입니다(자세히는 11편, 12편).
+
+### 연결과 제출
+
+```js
+export class FormController {
+  #form
+  #opts
+  #busy = false
+  #ac = null
+
+  constructor(form, opts) {
+    this.#form = form
+    this.#opts = opts   // submit, onError
+  }
+}
+```
+
+```js
+attach(signal) {
+  const f = this.#form
+  const submit = (e) => this.#onSubmit(e)
+  f.addEventListener('submit', submit, { signal })
+  f.addEventListener('input', (e) => {
+    e.target.setCustomValidity?.('')   // 입력하면 서버 오류 해제
+  }, { signal })
+  signal.addEventListener('abort', () => this.#ac?.abort())
+}
+```
+
+```js
+#setBusy(on) {
+  this.#busy = on
+  this.#form.setAttribute('aria-busy', String(on))
+}
+```
+
+```js
+async #onSubmit(e) {
+  e.preventDefault()
+  if (this.#busy) return
+  this.#setBusy(true)
+  this.#ac = new AbortController()
+  try {
+    const data = new FormData(this.#form, e.submitter)
+    await this.#opts.submit(data, this.#ac.signal)
+  } catch (err) {
+    await this.#fail(err)
+  } finally {
+    this.#setBusy(false)
+  }
+}
+```
+
+- `submit` 이벤트는 브라우저의 제약 검증을 통과한 뒤에만 발생합니다(`novalidate`가 없을 때). 검증을 다시 구현하지 않습니다. 코드로 제출할 때는 검증을 건너뛰는 `submit()` 대신 `requestSubmit()`을 씁니다(자세히는 11편).
+- `new FormData(form, submitter)`는 폼의 이름 있는 활성 컨트롤 값을 모으고, 제출 버튼의 이름과 값도 포함합니다. 폼 연결 커스텀 요소의 값도 `setFormValue`로 넣은 만큼 포함됩니다(자세히는 26편).
+- 진행 중인 제출이 있으면 새 제출을 무시합니다. 제출 버튼을 `disabled`로 만들면 포커스가 사라지므로 `aria-busy`를 쓰고 중복은 플래그로 막습니다.
+- 컨트롤러는 연결 신호(`signal`)에 묶입니다. 컴포넌트가 떼이면 리스너가 해제되고 진행 중인 요청도 취소됩니다(자세히는 81편).
+
+### 서버 검증 오류 표시
+
+```js
+async #fail(err) {
+  if (err.name === 'AbortError') return
+  if (err.status === 422) {
+    const { fields = {} } = await err.res.json()
+    for (const [name, msg] of Object.entries(fields)) {
+      this.#form.elements[name]?.setCustomValidity?.(msg)
+    }
+    this.#form.reportValidity()
+    return
+  }
+  this.#opts.onError(err)
+}
+```
+
+- 서버가 필드별 메시지를 주면 각 컨트롤에 `setCustomValidity(메시지)`를 걸고 `reportValidity()`로 브라우저의 검증 UI에 표시합니다. 서버 검증 오류가 클라이언트 검증 오류와 같은 모양과 같은 접근성 처리를 받습니다(자세히는 12편).
+- 사용자가 값을 고치면 `input` 이벤트에서 `setCustomValidity('')`로 지웁니다. 지우지 않으면 오류가 남아 이후 제출이 계속 막힙니다.
+- 폼 연결 커스텀 요소는 자기 `internals.setValidity()`로 오류를 걸고 지웁니다. 요소에 `setCustomValidity`가 없으면 위 코드가 건너뜁니다.
+- 처리하지 못하는 오류는 `onError`로 넘겨 공통 오류 처리가 맡습니다(다음 절).
+
+**흔한 실수:** 제출을 가로채면서 `preventDefault()`를 빼먹어 페이지가 새로 로드되는 것입니다.
+
+## Error / Loading 처리 통합
+
+로딩과 오류 처리를 컴포넌트마다 다르게 쓰면 메시지와 화면이 제각각이 됩니다. 비동기 작업을 한 함수로 실행하고, 그 상태와 사용자 메시지를 한곳에서 정하게 합니다(자세히는 39편).
+
+### 작업 실행기
+
+```js
+const setTask = (store, key, v) => store.set((s) => ({
+  ...s, tasks: { ...s.tasks, [key]: v },
+}))
+```
+
+```js
+export function createTasks(store, report) {
+  const set = (k, v) => setTask(store, k, v)
+  return async function run(key, fn) {
+    set(key, { status: 'loading' })
+    try {
+      const data = await fn()
+      set(key, { status: 'success' })
+      return data
+    } catch (e) {
+      if (e.name === 'AbortError') return
+      set(key, { status: 'error', message: messageOf(e) })
+      if (isUnexpected(e)) report(e)
+    }
+  }
+}
+```
+
+- 키별로 `loading`, `success`, `error` 중 하나인 `status` 하나만 둡니다. 불리언 여러 개로 나누면 불가능한 조합이 생깁니다.
+- 취소는 오류가 아니므로 상태를 건드리지 않고 끝냅니다.
+- 컴포넌트는 `tasks.run('orders', () => repo.list())`로 실행하고, 스토어의 `tasks.orders`를 구독해 그립니다.
+
+### 사용자 메시지 정하기
+
+| 오류 | 사용자에게 | 보고 |
+|------|-----------|------|
+| `network` | 연결을 확인하라는 안내와 재시도 | 안 함 |
+| `timeout` | 응답이 늦다는 안내와 재시도 | 안 함 |
+| `http` 401 | 로그인 화면으로 이동 | 안 함 |
+| `http` 403, 404 | 권한 없음, 찾을 수 없음 | 안 함 |
+| `http` 422 | 입력 오류 표시(폼이 처리) | 안 함 |
+| `http` 5xx, `parse`, 그 밖의 예외 | 일반 오류 안내와 재시도 | 함 |
+
+```js
+const isUnexpected = (e) =>
+  e.kind === 'parse' || e.status >= 500
+  || !(e instanceof HttpError)
+
+function messageOf(e) {
+  if (e.kind === 'network') return '연결을 확인해 주세요.'
+  if (e.kind === 'timeout') return '응답이 늦어지고 있어요.'
+  if (e.status === 404) return '찾을 수 없어요.'
+  return '문제가 생겼어요. 다시 시도해 주세요.'
+}
+```
+
+- 사용자가 어쩔 수 없는 예상된 상황(연결 끊김, 없는 항목)은 보고하지 않습니다. 개발자가 고쳐야 하는 오류(서버 오류, 파싱 실패, 코드의 예외)만 보고합니다. 보고가 소음이 되면 아무도 보지 않습니다.
+- 메시지는 오류 객체의 `message`를 그대로 보여 주지 않고 종류에서 골라 씁니다. 내부 정보가 화면에 새지 않습니다.
+
+### 상태를 그리는 경계 컴포넌트
+
+```html
+<async-boundary status="error">
+  <order-list slot="success"></order-list>
+  <p slot="error">문제가 생겼어요. <button>다시 시도</button></p>
+  <p slot="loading">불러오는 중…</p>
+</async-boundary>
+```
+
+```css
+::slotted([slot]) { display: none; }
+:host([status='loading']) ::slotted([slot='loading']),
+:host([status='error']) ::slotted([slot='error']),
+:host([status='success']) ::slotted([slot='success']) {
+  display: block;
+}
+```
+
+- 경계 컴포넌트는 `status` 속성에 맞는 슬롯의 내용만 보이게 하는 컴포넌트입니다. 상태별 화면은 사용하는 쪽이 슬롯으로 넣고, 경계는 어느 것을 보일지만 정합니다(자세히는 22편, 23편).
+- 바깥 문서의 스타일이 슬롯된 요소의 `display`를 지정하면 `::slotted` 규칙보다 우선합니다. 슬롯된 요소에는 바깥 스타일에서 `display`를 지정하지 않습니다.
+- 로딩 표시는 요청이 짧을 때 깜빡이지 않도록 약 200밀리초 뒤에 보여 줍니다(자세히는 39편).
+- 전역 상태 두 가지는 앱 루트에 둡니다. `http.bus`의 `loading` 이벤트를 받는 맨 위 진행 표시줄과, 예상하지 못한 오류를 알리는 토스트입니다.
+
+## 오류 보고 연결
+
+보고는 사용자의 화면에서 난 오류를 개발자가 알 수 있게 서버로 보내는 일입니다. 수집 지점은 전역 이벤트 세 가지와 Reporting API입니다.
+
+| 수집 지점 | 잡는 것 | 비고 |
+|-----------|---------|------|
+| `window`의 `error` 이벤트 | 잡히지 않은 동기 예외 | `ErrorEvent`의 `error`, `message`, `filename` |
+| `error` 이벤트(캡처 단계) | `img`, `script`, `link` 로드 실패 | 요소의 `error`는 버블링하지 않아서 캡처로 받음 |
+| `unhandledrejection` | 처리기가 없는 프라미스 거부 | `event.reason`, 교차 출처 스크립트는 발생하지 않음 |
+| `ReportingObserver` | 사용 중단 API, 브라우저 개입 | Baseline 2026 |
+
+### 전역 수집
+
+```js
+const toError = (x) =>
+  x instanceof Error ? x : new Error(String(x))
+
+export function installReporting(report) {
+  addEventListener('error', (e) => onError(e, report), true)
+  addEventListener('unhandledrejection', (e) => {
+    report(toError(e.reason), { source: 'promise' })
+  })
+}
+```
+
+```js
+function onError(e, report) {
+  if (e instanceof ErrorEvent) {
+    const err = toError(e.error ?? e.message)
+    return report(err, { source: 'error' })
+  }
+  const src = e.target.src ?? e.target.href
+  const err = new Error(`load failed: ${src}`)
+  report(err, { source: 'resource' })
+}
+```
+
+- 캡처 단계의 `error` 리스너 하나가 `ErrorEvent`(스크립트 예외)와 일반 `Event`(요소 로드 실패)를 모두 받습니다. 둘은 `instanceof ErrorEvent`로 구분합니다.
+- `window.onerror`는 인수를 다섯 개 받는 옛 형태입니다. `addEventListener('error')`는 `ErrorEvent` 하나를 받습니다.
+- 잡아서 처리한 오류를 같은 수집 경로로 보내려면 `reportError(err)`를 씁니다. 던지지 않고 `error` 이벤트로 전달해 코드를 중단시키지 않습니다.
+- `unhandledrejection`은 `preventDefault()`로 콘솔 출력을 막을 수 있지만, 보고만 하고 기본 동작은 유지하는 편이 개발 중 단서를 남깁니다.
+
+### 보고기
+
+```js
+export function createReporter({ endpoint, max = 20 }) {
+  const seen = new Set()
+  const queue = []
+  function report(err, extra = {}) {
+    const key = `${err.name}:${err.message}`
+    if (seen.has(key) || seen.size >= max) return
+    seen.add(key)
+    const { name, message, stack } = err
+    const path = location.pathname
+    queue.push({ name, message, stack, path, ...extra })
+  }
+  // 아래 flush와 리스너가 이 안에 놓이고, 마지막에 report를 반환
+}
+```
+
+```js
+function flush() {
+  if (!queue.length) return
+  const json = JSON.stringify(queue.splice(0))
+  const type = 'application/json'
+  const body = new Blob([json], { type })
+  navigator.sendBeacon(endpoint, body)
+}
+addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flush()
+})
+```
+
+- 같은 오류는 한 번만 큐에 넣고 총 개수에도 상한을 둡니다. 반복문 안의 오류 하나가 수천 건의 요청이 되는 것을 막습니다.
+- 전송은 페이지가 숨겨질 때(`visibilitychange`) 합니다. `sendBeacon`은 페이지가 닫히는 중에도 요청을 큐에 넣는 API이고 본문 상한은 64KiB입니다. 더 크거나 응답이 필요하면 `fetch`의 `keepalive: true`를 씁니다. `sendBeacon`은 Baseline 널리 지원(2018년 4월부터)입니다.
+- 위치는 `pathname`만 보냅니다. 쿼리나 해시에 개인 정보가 들어 있을 수 있습니다. 메시지에 사용자 입력이 섞이지 않도록 하고 쿠키·토큰은 보내지 않습니다.
+- 샘플링과 서버 쪽 중복 집계는 서버가 합니다. 클라이언트는 최소한만 보냅니다.
+
+### Reporting API
+
+Reporting API는 브라우저가 만들어 내는 보고(사용 중단 API 호출, 브라우저 개입, CSP 위반, 권한 정책 위반, 충돌)를 수집하는 표준입니다. Baseline 2026입니다. 두 경로가 있습니다.
+
+| 경로 | 설정 | 특징 |
+|------|------|------|
+| 서버 엔드포인트 | 응답 헤더 `Reporting-Endpoints: default="https://..."` | 브라우저가 JSON(`application/reports+json`)으로 직접 전송. 페이지가 충돌해도 보고됨 |
+| `ReportingObserver` | 스크립트에서 관찰 | 페이지가 살아 있을 때만 받음. 충돌 보고는 받을 수 없음 |
+
+```js
+if ('ReportingObserver' in window) {
+  const ro = new ReportingObserver((list) => {
+    for (const r of list) {
+      const err = new Error(JSON.stringify(r))
+      report(err, { source: 'reporting' })
+    }
+  }, {
+    types: ['deprecation', 'intervention'],
+    buffered: true,
+  })
+  ro.observe()
+}
+```
+
+- 엔드포인트 URL은 HTTPS여야 하고 헤더 값에 따옴표로 감쌉니다. `default`라는 이름의 엔드포인트가 헤더 연결이 없는 보고(사용 중단 등)를 받습니다.
+- CSP 위반은 `Content-Security-Policy`의 `report-to` 지시어에 엔드포인트 이름을 적어 보냅니다(자세히는 63편).
+- 보고는 전달을 보장하지 않습니다. 오류 수집을 전역 이벤트에 걸고, Reporting API는 브라우저가 알려 주는 경고를 얻는 보조 수단으로 씁니다.
+
+## 환경 설정과 Configuration
+
+설정은 환경(개발, 스테이징, 운영)마다 다른 값을 코드 밖에서 주입하는 구조입니다. 값의 예는 API 기본 URL, 보고 엔드포인트, 기능 플래그, 환경 이름입니다. 브라우저로 내려가는 값은 모두 사용자가 볼 수 있으므로 비밀 값(비공개 키, 비밀번호)은 설정에 넣지 않습니다.
+
+| 주입 방식 | 시점 | 특징 |
+|-----------|------|------|
+| 번들러 환경 변수 | 빌드 시 | 환경마다 빌드를 따로 만들어야 함 |
+| HTML 안의 JSON | 서버 응답 시 | 같은 빌드를 환경마다 재사용, 추가 요청 없음 |
+| 설정 파일 요청 | 시작 시 | 배포 없이 값을 바꿀 수 있으나 요청 한 번이 첫 화면을 늦춤 |
+
+```js
+const DEFAULTS = {
+  env: 'production',
+  api: { baseUrl: '/api/', timeout: 8000 },
+  report: { endpoint: '/_report' },
+  flags: {},
+}
+```
+
+```js
+export function loadConfig() {
+  const el = document.getElementById('app-config')
+  const raw = el ? JSON.parse(el.textContent) : {}
+  const cfg = { ...DEFAULTS, ...raw }
+  cfg.api = { ...DEFAULTS.api, ...raw.api }
+  if (!cfg.api.baseUrl.endsWith('/')) {
+    throw new Error('api.baseUrl must end with /')
+  }
+  return deepFreeze(cfg)
+}
+```
+
+```js
+function deepFreeze(o) {
+  for (const v of Object.values(o)) {
+    if (v && typeof v === 'object') deepFreeze(v)
+  }
+  return Object.freeze(o)
+}
+```
+
+- 서버가 `type="application/json"`인 `script` 요소에 값을 심으면 브라우저는 그 내용을 실행하지 않습니다. `textContent`를 `JSON.parse`합니다(자세히는 33편, 63편).
+- 기본값 위에 주입 값을 겹쳐 합칩니다. 얕은 합치기는 중첩 객체를 통째로 대체하므로 중첩된 `api`는 따로 합칩니다.
+- 시작할 때 값을 검사해서 잘못된 설정이 있으면 첫 요청이 아니라 부팅에서 실패하게 합니다. 오류 위치가 원인 가까이에 있습니다.
+- 동결한 객체는 이후 실수로 고칠 수 없습니다. 환경은 앱이 도는 동안 바뀌지 않습니다.
+- 기능 플래그는 `flags` 아래에 두고 `config.flags.newCart`처럼 읽습니다. 플래그는 임시 장치이므로 정리할 때 찾기 쉽게 한곳에 모읍니다.
+- 설정은 상태 스토어와 다릅니다. 시작 때 한 번 정해지고 바뀌지 않는 값은 설정이고, 사용자 조작으로 바뀌는 값은 스토어입니다.
+
+**흔한 실수:** 환경 이름(`env === 'production'`)으로 코드 분기를 흩뿌리는 것입니다. 분기가 필요하면 의미 있는 설정 값(`flags`, `timeout`)으로 바꿔 쓰면 환경이 늘어도 코드가 그대로입니다.
+
+## Feature Module 구성
+
+Feature Module은 기능 하나를 앱에 붙이는 단위입니다. 모듈은 자기 라우트, 컴포넌트 등록, 초기 상태를 한 객체로 선언하고, 앱은 이 객체의 목록만 압니다. 폴더 구조는 33편의 기능 폴더를 따릅니다.
+
+```js
+// features/orders/module.js
+export default {
+  name: 'orders',
+  state: { orders: [] },
+  routes: (ctx) => [{
+    path: '/orders', tag: 'orders-page', title: '주문',
+    load: async () => {
+      const m = await import('./register.js')
+      m.register(ctx)
+    },
+  }],
+}
+```
+
+```js
+// features/orders/register.js
+export function register(ctx) {
+  if (customElements.get('orders-page')) return
+  customElements.define('orders-page', OrdersPage)
+  customElements.define('order-list', OrderList)
+}
+```
+
+| 필드 | 뜻 |
+|------|----|
+| `name` | 기능 이름. 태그 이름 접두사와 상태 키에 씀 |
+| `state` | 이 기능이 스토어에 더하는 초기 상태 |
+| `routes(ctx)` | 서비스가 만들어진 뒤 호출되어 라우트 목록을 돌려주는 함수 |
+
+- 모듈 선언 파일은 가볍게 유지합니다. 무거운 구현은 `load`가 부르는 `register.js`에 두어서 해당 라우트에 처음 들어갈 때 불러옵니다(자세히는 35편).
+- `register`는 두 번 불러도 안전해야 합니다. 같은 이름을 두 번 `define()`하면 `NotSupportedError`입니다. 라우트가 여러 개여도 같은 `register`를 쓰고 앞의 검사가 중복을 막습니다.
+- 서비스는 `register`와 `routes`에 `ctx`로 전달됩니다. 기능이 서비스를 직접 만들지 않으므로 테스트에서 가짜 `ctx`를 넣을 수 있습니다.
+- 기능끼리는 서로의 파일을 가져오지 않습니다. 상태 키는 `name` 아래에 두고 이벤트나 스토어로 연결합니다(자세히는 25편, 33편).
+- 라우트 경로와 태그 이름은 기능 사이에서 겹치면 안 됩니다. 부트스트랩에서 겹침을 검사해 개발 중에 바로 알립니다.
+
+## App Bootstrap
+
+부트스트랩은 서비스를 만들고 연결해서 첫 화면까지 가는 한 함수입니다. 순서에는 이유가 있습니다. 설정이 먼저 있어야 보고기와 클라이언트를 만들 수 있고, 보고기가 먼저 있어야 이후 단계의 오류를 잡을 수 있습니다.
+
+### 조립
+
+```js
+import orders from '../features/orders/module.js'
+import cart from '../features/cart/module.js'
+
+const mods = [orders, cart]
+const initialState = () =>
+  Object.assign({ tasks: {} }, ...mods.map((m) => m.state))
+```
+
+```js
+export async function bootstrap() {
+  const config = loadConfig()
+  const report = createReporter(config.report)
+  installReporting(report)
+  const http = createHttp(config.api)
+  const store = createStore(initialState())
+  const overlays = new OverlayService()
+  const tasks = createTasks(store, report)
+  const ctx = {
+    config, report, http, store, overlays, tasks,
+  }
+  return start(ctx)
+}
+```
+
+### 컨텍스트 제공과 시작
+
+```js
+export const APP = Symbol('app')
+
+export function provide(host, key, value) {
+  host.addEventListener('context-request', (e) => {
+    if (e.context !== key) return
+    e.stopImmediatePropagation()
+    e.callback(value)
+  })
+}
+```
+
+```js
+function start(ctx) {
+  provide(document.body, APP, ctx)
+  registerUi()
+  customElements.define('app-root', AppRoot)
+  const routes = mods.flatMap((m) => m.routes(ctx))
+  const outlet = document.querySelector('main')
+  const router = new Router(routes, outlet)
+  router.addEventListener('routechange', () => {
+    ctx.overlays.closeAll()
+  })
+  router.start()
+  return { ctx, router }
+}
+```
+
+```js
+// 81편의 BaseElement에 더하는 도우미
+consume(key) {
+  let value
+  const ask = (v) => { value = v }
+  const ev = new ContextRequestEvent(key, ask, false)
+  this.dispatchEvent(ev)
+  return value
+}
+```
+
+- `ctx`는 `document.body`에서 제공하고 컴포넌트는 `connected()`에서 `this.consume(APP)`으로 받습니다. 요청 이벤트가 `composed`이므로 Shadow DOM 안에서도 닿고, 컴포넌트는 서비스 모듈이 아니라 키에만 의존합니다(자세히는 25편).
+- 컴포넌트는 아래 층에서 위로 정의하고 루트를 마지막에 정의합니다. 루트가 정의되며 레이아웃이 그려지고 `main`이 생긴 뒤에야 라우터가 출구를 찾을 수 있습니다(자세히는 33편).
+- 라우터는 마지막에 시작합니다. 시작할 때 현재 주소의 화면을 그리므로 서비스와 컴포넌트 정의가 모두 끝난 뒤여야 합니다.
+- 상태 초기값은 모듈들이 선언한 `state`를 합쳐 만듭니다. 서버가 심은 초기 상태와 합치는 규칙은 33편을 따릅니다.
+- 전체를 `async`로 둔 이유는 설정 파일 요청처럼 시작에 비동기 단계가 들어갈 수 있기 때문입니다. 첫 화면에 필요 없는 요청(사용자 정보, 분석)은 라우터 시작 뒤로 미룹니다(자세히는 66편).
+
+### 시작 실패 처리
+
+```js
+// main.js
+import { bootstrap } from './app/bootstrap.js'
+
+bootstrap().catch((e) => {
+  document.body.textContent = '앱을 시작하지 못했습니다.'
+  reportError(e)
+})
+```
+
+- 부트스트랩이 실패하면 빈 화면으로 남지 않게 컴포넌트에 의존하지 않는 일반 텍스트 화면을 보여 줍니다. 이 시점에는 컴포넌트가 정의되지 않았을 수 있습니다.
+- `reportError(e)`는 던지지 않고 `error` 이벤트로 전달합니다. 보고기가 이미 설치됐으면 보고되고, 아니면 콘솔에 남습니다. 설정 로딩이 실패한 경우처럼 보고기가 없는 단계의 오류는 콘솔에만 남는다는 한계가 있습니다.
+- 서비스와 컴포넌트의 정리는 부트스트랩의 책임이 아닙니다. 앱은 문서와 수명이 같습니다. 테스트에서는 `bootstrap`을 호출할 때마다 새 `ctx`가 만들어지므로 서로 영향을 주지 않습니다(자세히는 68편, 69편).
+
+**흔한 실수:** 서비스를 모듈 최상위에서 만들어 가져오는 것입니다. 가져오는 순간 실행되어 설정이 읽히기 전에 만들어질 수 있고, 테스트에서 바꿔 끼울 수 없습니다.
+
+## 핵심 정리
+
+- Fetch Client는 오류를 `network`, `timeout`, `http`, `parse`로 정규화하고 취소는 그대로 던지며, 타임아웃은 `AbortSignal.any()`로 호출자의 신호와 합치고 재시도는 `GET`에만 겁니다.
+- Overlay 서비스는 네이티브 `dialog`를 감싸 결과를 약속으로 돌려주고, 모든 닫기 경로가 `close` 이벤트 하나로 모이게 해서 정리합니다.
+- Form Controller는 브라우저 검증을 그대로 쓰고, 제출 가로채기·중복 방지·서버 오류의 `setCustomValidity` 표시만 맡으며 연결 신호에 묶입니다.
+- 작업 실행기는 키별 `status` 하나로 로딩·오류를 기록하고 종류에서 사용자 메시지를 고르며, 예상하지 못한 오류만 보고합니다.
+- 보고는 `error`(캡처 포함), `unhandledrejection`, `ReportingObserver`로 모아 `sendBeacon`으로 보내고, 설정은 시작 때 합치고 검증하고 동결합니다.
+- Feature Module은 라우트·등록·초기 상태를 선언하고, 부트스트랩은 설정, 보고, 서비스, 스토어, 컴포넌트 정의, 라우터 시작 순서로 `ctx`를 조립합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="Fetch Client에서 서버가 404를 응답했습니다. fetch 자체의 동작으로 옳은 것은?"
+  options={['fetch의 프라미스가 거부되어 catch로 간다', 'fetch의 프라미스는 이행되고 res.ok가 false이므로 클라이언트가 직접 오류로 바꿔야 한다', 'fetch가 자동으로 재시도한다', 'fetch의 프라미스는 이행되고 res.ok가 true이다']}
+  correctAnswer={2}
+  explanation="fetch는 네트워크 실패나 취소에서만 거부하고 HTTP 오류 상태에서는 응답을 이행합니다. 그래서 클라이언트가 ok를 확인해 HttpError로 바꾸는 것이 오류 정규화의 출발점입니다. 404는 ok가 false이고 자동 재시도는 없습니다."
+  optionExplanations={['HTTP 오류 상태에서는 거부하지 않습니다.', '정답입니다. 응답은 이행되고 ok는 false입니다.', 'fetch에는 자동 재시도가 없습니다.', '404의 ok는 false입니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="기준 URL이 https://x.com/api/ 일 때 new URL('/users', base)의 결과는?"
+  options={['https://x.com/api/users', 'https://x.com/api//users', 'https://x.com/users', 'TypeError가 발생한다']}
+  correctAnswer={3}
+  explanation="요청 경로가 슬래시로 시작하면 기준 URL의 경로가 통째로 대체되어 https://x.com/users가 됩니다. 기준 경로 아래에 붙이려면 기준 URL을 슬래시로 끝내고 요청 경로를 users처럼 상대 경로로 씁니다."
+  optionExplanations={['슬래시로 시작하는 경로는 기준 경로를 유지하지 않습니다.', '슬래시가 겹쳐 이어 붙는 일은 없습니다.', '정답입니다. 슬래시로 시작하면 origin 기준의 절대 경로가 됩니다.', '기준 URL이 유효하므로 오류가 아닙니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="img 요소의 이미지 로드 실패를 window 수준에서 한 곳에서 수집하려면 어떻게 해야 하나요?"
+  options={['window에 버블링 단계의 error 리스너를 단다', 'window에 캡처 단계의 error 리스너를 단다', 'unhandledrejection 이벤트를 듣는다', 'window.onerror 속성에 함수를 대입한다']}
+  correctAnswer={2}
+  explanation="요소의 error 이벤트는 버블링하지 않으므로 버블링 단계 리스너는 받지 못합니다. 캡처 단계는 문서 위에서 아래로 내려오므로 window의 캡처 리스너가 요소의 로드 실패를 받을 수 있습니다. unhandledrejection은 프라미스 거부용입니다."
+  optionExplanations={['버블링하지 않는 이벤트라 도달하지 않습니다.', '정답입니다. 캡처 단계에서 받습니다.', '프라미스 거부를 위한 이벤트이고 리소스 로드 실패와 무관합니다.', 'onerror는 스크립트 예외를 위한 핸들러이며 요소의 로드 실패는 받지 못합니다.']}
+/>
+
+## 참고 자료
+
+- [MDN — fetch()](https://developer.mozilla.org/en-US/docs/Web/API/Window/fetch)
+- [MDN — URL() constructor](https://developer.mozilla.org/en-US/docs/Web/API/URL/URL)
+- [MDN — FormData() constructor](https://developer.mozilla.org/en-US/docs/Web/API/FormData/FormData)
+- [MDN — HTMLFormElement: requestSubmit()](https://developer.mozilla.org/en-US/docs/Web/API/HTMLFormElement/requestSubmit)
+- [MDN — Window: error event](https://developer.mozilla.org/en-US/docs/Web/API/Window/error_event)
+- [MDN — HTMLElement: error event](https://developer.mozilla.org/en-US/docs/Web/API/HTMLElement/error_event)
+- [MDN — Window: unhandledrejection event](https://developer.mozilla.org/en-US/docs/Web/API/Window/unhandledrejection_event)
+- [MDN — Window: reportError()](https://developer.mozilla.org/en-US/docs/Web/API/Window/reportError)
+- [MDN — Navigator: sendBeacon()](https://developer.mozilla.org/en-US/docs/Web/API/Navigator/sendBeacon)
+- [MDN — Reporting API](https://developer.mozilla.org/en-US/docs/Web/API/Reporting_API)
+- [MDN — Reporting-Endpoints header](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Reporting-Endpoints)
+- [MDN — CustomElementRegistry: define()](https://developer.mozilla.org/en-US/docs/Web/API/CustomElementRegistry/define)

@@ -1,0 +1,420 @@
+---
+title: '21. Shadow DOM'
+description: 'attachShadow와 ShadowRoot, open·closed 모드, 경계가 DOM·CSS·이벤트에 미치는 규칙, Declarative Shadow DOM과 직렬화, Shadow DOM을 쓰지 않는 선택 기준을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** Shadow DOM이 DOM 탐색·스타일·이벤트를 어디까지 가리는지 규칙으로 설명하고, 컴포넌트에 Shadow DOM을 붙일지와 어떤 옵션으로 붙일지 판단할 수 있습니다.
+</Callout>
+
+## attachShadow
+
+`attachShadow()`는 요소에 **shadow root**를 붙여 그 요소를 **shadow host**로 만드는 메서드입니다. shadow root는 host의 일반 자식과 분리된 별도의 DOM 트리(shadow tree)의 뿌리입니다. 호출하면 만들어진 `ShadowRoot`를 반환합니다. Baseline 2020, 널리 지원됩니다.
+
+```js
+class UserCard extends HTMLElement {
+  constructor() {
+    super()
+    const root = this.attachShadow({ mode: 'open' })
+    root.innerHTML = '<p>shadow content</p>'
+  }
+}
+customElements.define('user-card', UserCard)
+```
+
+- 요소 하나에는 shadow root를 하나만 붙일 수 있습니다.
+- 사용자 정의 요소를 정의하는 방법은 17편, 생성자와 `connectedCallback` 중 어디서 붙일지는 18편에서 다룹니다.
+
+### 옵션
+
+| 옵션 | 기본값 | 효과 |
+|------|--------|------|
+| `mode` | 필수 | `'open'` 또는 `'closed'`. 외부에서 shadow root에 접근할 수 있는지를 정함 |
+| `delegatesFocus` | `false` | host가 포커스를 직접 받지 않고 내부의 첫 포커스 가능 요소에 위임 |
+| `slotAssignment` | `'named'` | `'named'`는 `slot` 속성으로 자동 배정, `'manual'`은 `assign()`으로 직접 배정(자세히는 22편) |
+| `clonable` | `false` | `cloneNode()`·`importNode()`가 shadow root까지 복제 |
+| `serializable` | `false` | `getHTML()`이 shadow root를 HTML 문자열에 포함할 수 있음 |
+| `customElementRegistry` | `null` | 범위가 제한된 레지스트리를 shadow root에 지정. 미Baseline(Chrome·Edge 146, Safari 26) |
+
+`delegatesFocus: true`일 때의 규칙은 다음과 같습니다(HTML Standard).
+
+- host 자체는 포커스 가능한 영역이 아닙니다. Tab 순서는 host를 건너뛰고 shadow tree 안의 요소로 들어갑니다.
+- `host.focus()`를 호출하거나 shadow tree 안의 포커스 불가능한 영역을 클릭하면 첫 번째 포커스 가능 요소가 포커스를 받습니다.
+- 포커스가 내부에 있는 동안 host에 `:focus` 스타일이 적용됩니다(MDN).
+
+### 붙일 수 있는 요소
+
+DOM Standard가 정한 유효한 shadow host 이름은 다음과 같습니다. 내장 요소가 나중에 자체 내부 shadow tree를 가질 수 있도록 일부러 좁게 제한한 목록입니다.
+
+- 유효한 이름을 가진 사용자 정의 요소
+- `article`, `aside`, `blockquote`, `body`, `div`, `footer`, `header`, `main`, `nav`, `p`, `section`, `span`
+- `h1`–`h6`
+
+```js
+const div = document.createElement('div')
+const input = document.createElement('input')
+div.attachShadow({ mode: 'open' })   // 성공
+input.attachShadow({ mode: 'open' }) // NotSupportedError
+```
+
+### 예외
+
+`NotSupportedError`가 발생하는 경우입니다.
+
+- 요소가 HTML 네임스페이스에 없거나 위 목록에 없는 요소일 때
+- 사용자 정의 요소의 정의가 `disabledFeatures`에 `'shadow'`를 포함할 때
+- 이미 shadow root가 있을 때. 단, 선언적으로 만들어진 shadow root이고 `mode`가 같으면 예외 없이 그 root를 재사용합니다. 기존 자식은 비워지고 root가 반환됩니다.
+
+**흔한 실수:** `connectedCallback`에서 `attachShadow()`를 호출하는 것입니다. 요소가 DOM에서 떼어졌다 다시 붙으면 콜백이 다시 실행되어 두 번째 호출이 `NotSupportedError`를 던집니다. 생성자에서 한 번만 붙입니다.
+
+## ShadowRoot
+
+`ShadowRoot`는 `DocumentFragment`를 상속한 노드이며 `Element`가 아닙니다. 속성이나 `class`를 가질 수 없고, 부모가 없으며(`parentNode`가 `null`), 자식 노드를 담는 뿌리 역할만 합니다. 그래서 `querySelector()`, `getElementById()`, `append()` 같은 `DocumentFragment`의 메서드를 그대로 씁니다.
+
+```js
+const host = document.createElement('div')
+const root = host.attachShadow({ mode: 'open' })
+root.innerHTML = '<p id="msg">Hi</p>'
+root.host === host                     // true
+root.getElementById('msg').textContent // 'Hi'
+root instanceof DocumentFragment       // true
+root instanceof Element                // false
+```
+
+| 멤버 | 설명 |
+|------|------|
+| `host` | root가 붙은 요소 |
+| `mode`, `delegatesFocus`, `slotAssignment`, `clonable`, `serializable` | `attachShadow()` 옵션 값(읽기 전용) |
+| `innerHTML` | shadow tree 전체를 문자열로 읽고 교체 |
+| `activeElement` | shadow tree 안에서 포커스를 가진 요소 |
+| `elementFromPoint()`, `elementsFromPoint()` | 좌표 아래의 요소. shadow tree 안의 요소를 반환 |
+| `getHTML()`, `setHTMLUnsafe()` | 직렬화와 파싱(아래 "getHTML()과 serializable") |
+| `adoptedStyleSheets`, `styleSheets` | root에 적용되는 스타일시트(자세히는 24편) |
+| `getAnimations()` | 이 shadow tree 안 요소의 애니메이션 |
+| `slotchange` 이벤트 | 슬롯의 배정 노드가 바뀔 때(자세히는 22편) |
+
+## open vs closed
+
+`mode`는 외부 코드가 shadow root에 닿을 수 있는지를 정합니다.
+
+```js
+const a = hostA.attachShadow({ mode: 'open' })
+const b = hostB.attachShadow({ mode: 'closed' })
+hostA.shadowRoot === a // true
+hostB.shadowRoot       // null
+```
+
+closed 모드에서 달라지는 것은 다음과 같습니다.
+
+| 접근 경로 | open | closed |
+|-----------|------|--------|
+| `host.shadowRoot` | root | `null` |
+| `attachShadow()`의 반환값 | root | root |
+| 외부 리스너의 `composedPath()` | 내부 노드 포함 | 내부 노드가 빠지고 host부터 시작 |
+| 슬롯된 노드의 `assignedSlot` | 슬롯 | `null` |
+| 사용자 정의 요소 자신의 `internals.shadowRoot` | root | root |
+
+- `attachShadow()`가 돌려준 참조를 어디에도 보관하지 않으면 closed root에는 다시 닿을 수 없습니다. 클래스 필드나 `WeakMap`에 보관합니다.
+- 사용자 정의 요소는 `attachInternals()`로 얻은 `ElementInternals`의 `shadowRoot`로 자기 root를 mode와 관계없이 다시 얻을 수 있습니다. 이 경로는 host 자신의 코드만 씁니다.
+- MDN은 closed가 강한 보안 수단이 아니라고 명시합니다. 외부 스크립트가 못 보게 막는 용도가 아니라, 내부 구조를 공개 API가 아니라고 선언하는 용도입니다.
+- 개발자 도구와 테스트 도구는 closed root 내부를 직접 다루기 어렵습니다(자세히는 69편). 특별한 이유가 없으면 open을 씁니다.
+
+## Shadow Boundary
+
+**Shadow boundary**는 shadow tree가 끝나고 바깥 DOM이 시작되는 경계입니다. 용어는 다음과 같이 정리됩니다.
+
+| 용어 | 뜻 |
+|------|----|
+| shadow host | shadow root가 붙은 일반 요소 |
+| shadow root | shadow tree의 뿌리 노드 |
+| shadow tree | shadow root 아래의 DOM 트리 |
+| light tree (light DOM) | host를 포함한 바깥 쪽 일반 DOM |
+| flat tree | 렌더링에 쓰이는 합쳐진 트리. host는 자식 대신 shadow tree의 자식을 가지고, 슬롯은 배정된 노드로 채워짐 |
+
+경계는 세 가지에 영향을 줍니다. 세 영역은 규칙이 서로 다르므로 아래에서 각각 다룹니다.
+
+- DOM 탐색: 선택자와 ID 검색이 경계를 넘지 못합니다.
+- CSS: 선택자와 규칙이 경계를 넘지 못합니다. 단, 상속 속성과 커스텀 속성은 통과합니다.
+- 이벤트: 이벤트는 경계를 넘을 수 있지만 target이 host로 바뀌고, `composed` 값에 따라 아예 멈추기도 합니다.
+
+## DOM 캡슐화
+
+shadow tree 안의 노드는 바깥 DOM의 탐색 API에 잡히지 않고, 바깥 노드도 안쪽 탐색에 잡히지 않습니다.
+
+```js
+// <my-box> 의 shadow tree 안에 <span id="in"> 이 있음
+document.querySelector('span')       // null (경계를 못 넘음)
+document.getElementById('in')        // null
+myBox.querySelector('span')          // null (host 의 자식이 아님)
+myBox.children.length                // 0 (light DOM 자식만 셈)
+myBox.shadowRoot.querySelector('span') // <span> (open 일 때)
+```
+
+- `querySelector()`, `getElementById()`, `getElementsByTagName()`, `closest()`, `children`, `childNodes`는 모두 자기 트리 안에서만 동작합니다.
+- ID는 트리마다 독립적입니다. 같은 `id`를 문서와 여러 shadow tree에서 중복해서 써도 충돌하지 않습니다. `label`의 `for`와 `form` 속성 같은 ID 참조도 같은 트리 안에서만 찾습니다.
+- shadow tree 최상위 노드의 `parentNode`는 `ShadowRoot`이고 `parentElement`는 `null`입니다. root의 `host`로만 바깥으로 올라갑니다.
+- host가 문서에 연결되어 있으면 shadow tree 안 노드의 `isConnected`도 `true`입니다.
+- `host.innerHTML`은 shadow tree를 포함하지 않습니다(아래 "getHTML()과 serializable").
+
+**흔한 실수:** 전역 `querySelectorAll()`로 컴포넌트 내부 요소를 세려는 것입니다. 경계 때문에 0개가 나옵니다. 안쪽 요소는 컴포넌트가 공개한 API로 다루게 설계합니다(자세히는 19편).
+
+## CSS 캡슐화
+
+shadow tree 안의 `style`과 스타일시트는 그 shadow tree 안의 요소에만 적용됩니다. 문서의 스타일시트도 shadow tree 안의 요소에는 적용되지 않습니다.
+
+```html
+<style> p { color: red } </style>
+<p>바깥: 빨강</p>
+<my-box></my-box>  <!-- 안쪽 p 는 영향 없음 -->
+```
+
+- 안쪽 `p { color: blue }`도 바깥 `p`에 영향을 주지 않습니다. 클래스 이름 충돌이 생기지 않습니다.
+- host는 바깥 문서의 요소이므로 문서의 스타일을 받습니다. 안쪽 스타일시트에서는 `:host`로만 host를 선택할 수 있습니다(자세히는 23편).
+- 상속은 경계를 통과합니다. `color`, `font-family` 같은 상속 속성과 CSS 커스텀 속성은 host에서 shadow tree의 요소로 이어집니다. 그래서 바깥에서 `--theme-color`를 정의하면 안쪽에서 `var()`로 읽을 수 있습니다.
+- 상속을 끊으려면 안쪽의 `:host`에 `all: initial`을 씁니다. 단, `all`은 커스텀 속성을 초기화하지 않습니다(자세히는 23편).
+- 스타일시트를 여러 shadow root에 공유하는 방법은 24편에서 다룹니다.
+
+## Event Retargeting
+
+shadow tree 안에서 발생한 이벤트가 경계 밖의 리스너에 도달하면, 그 리스너에게 보이는 `event.target`은 실제 요소가 아니라 shadow host로 바뀝니다. 이를 **retargeting**이라고 합니다. 바깥 코드가 컴포넌트의 내부 구조를 알지 못하게 하려는 규칙입니다.
+
+```js
+// <my-box> 의 shadow tree 안의 <button> 을 클릭
+document.addEventListener('click', (e) => {
+  e.target.localName // 'my-box' (host 로 바뀜)
+})
+myBox.shadowRoot.addEventListener('click', (e) => {
+  e.target.localName // 'button' (같은 트리라서 실제 요소)
+})
+```
+
+retargeting 규칙은 DOM Standard의 알고리즘으로, 리스너가 속한 트리에서 볼 수 있는 가장 가까운 노드를 찾습니다. 대상 A를 기준 노드 B에 대해 retarget할 때, A의 root가 shadow root가 아니거나 그 root가 B의 shadow-including 조상이면 A를 그대로 쓰고, 아니면 A를 root의 host로 바꾸어 반복합니다.
+
+- 중첩된 shadow tree에서는 경계를 넘을 때마다 한 단계씩 바깥 host로 올라갑니다.
+- `relatedTarget`(예: `focusin`·`mouseover`)도 같은 방식으로 retarget됩니다.
+- 포커스도 같은 규칙입니다. `document.activeElement`는 shadow tree 안에 포커스가 있어도 host를 돌려주고, `shadowRoot.activeElement`는 안쪽의 실제 요소를 돌려줍니다.
+- `elementFromPoint()`도 대상 트리 기준으로 retarget됩니다. `document.elementFromPoint()`는 host를, `shadowRoot.elementFromPoint()`는 안쪽 요소를 반환합니다.
+
+**흔한 실수:** 문서 수준의 이벤트 위임에서 `e.target.matches('button')`로 내부 버튼을 찾는 것입니다. target이 host이므로 일치하지 않습니다. 실제 시작점이 필요하면 `composedPath()`를 씁니다.
+
+## composedPath
+
+`event.composedPath()`는 이벤트가 지나가는 경로의 노드 배열을 target부터 `window`까지 순서대로 돌려줍니다. retargeting과 달리 경계 안쪽의 실제 요소를 알려 줍니다. 단, 경로의 일부는 mode에 따라 숨겨집니다.
+
+```js
+// open 컴포넌트의 안쪽 <p> 를 클릭했을 때
+document.addEventListener('click', (e) => {
+  e.composedPath()
+  // [p, ShadowRoot, my-box, body, html, document, window]
+})
+```
+
+- closed shadow tree 안의 노드는 그 root에 닿을 수 없는 리스너에게는 경로에서 빠집니다. 위 예가 closed였다면 `[my-box, body, html, document, window]`입니다.
+- 경로는 `currentTarget` 기준으로 계산됩니다. closed root 안에 등록한 리스너에서는 같은 이벤트의 `composedPath()`에 내부 노드가 모두 보입니다.
+- 이벤트 디스패치가 끝난 뒤에는 빈 배열이 됩니다. 비동기 코드에서 읽으려면 리스너 안에서 미리 복사해 둡니다.
+- 경로에서 `composedPath()[0]`이 실제 시작 노드입니다(closed가 숨기지 않은 경우).
+
+경계를 넘을지는 이벤트의 `composed` 플래그가 정합니다.
+
+| 상태 | 동작 |
+|------|------|
+| `composed: true` | 경계를 넘어 문서와 `window`까지 경로가 이어짐 |
+| `composed: false` | shadow root가 경로의 마지막. host와 바깥 조상은 이벤트를 받지 못함 |
+
+- `composed`는 이벤트가 shadow tree 안에서 디스패치될 때만 의미가 있습니다. host 자체나 바깥 요소에서 디스패치한 이벤트에는 영향이 없습니다.
+- 경계를 넘은 이벤트가 `bubbles: false`이면 host까지는 도달하지만(host에서는 target 단계로 처리됨) host의 조상으로는 버블링되지 않습니다.
+- 사용자 정의 이벤트의 기본값은 `bubbles: false`, `composed: false`입니다. 바깥에서 받게 하려면 둘 다 지정합니다(컴포넌트 통신은 25편).
+
+```js
+this.dispatchEvent(new CustomEvent('selected', {
+  detail: { id: 7 },
+  bubbles: true,
+  composed: true,
+}))
+```
+
+## 경계를 넘지 않는 이벤트
+
+브라우저가 만드는 이벤트는 종류마다 `composed`가 정해져 있습니다.
+
+| 구분 | 이벤트 | 근거 |
+|------|--------|------|
+| 경계를 넘음 | 마우스·키보드 이벤트, `focus`·`blur`·`focusin`·`focusout`, `input`, composition 이벤트 등 | UI Events 명세는 사용자 동작으로 브라우저가 디스패치하는 UI 이벤트를 composed로 정함. HTML 명세는 `input`을 composed로 지정 |
+| 경계를 넘지 않음 | `change`, `select`, `submit`, `reset`, `formdata`, `invalid`, `cancel`, `close`, `toggle`, `load`, `error`, `slotchange` | HTML·DOM 명세가 이 이벤트를 `composed` 지정 없이 발생시킴 |
+
+- `input`은 넘고 `change`는 넘지 않는 것이 대표적인 비대칭입니다. shadow tree 안의 `input` 요소에서 값을 확정해도 문서 쪽의 `change` 리스너는 호출되지 않습니다.
+- 컴포넌트가 `change`를 바깥에 알려야 하면 안쪽 이벤트를 받아 새 이벤트를 만들어 다시 디스패치합니다.
+
+```js
+root.addEventListener('change', () => {
+  this.dispatchEvent(
+    new Event('change', { bubbles: true, composed: true }),
+  )
+})
+```
+
+- 경계를 넘지 않는 이벤트도 shadow tree 안에서는 정상적으로 버블링됩니다. `slotchange`는 `bubbles: true`로 발생해 슬롯에서 shadow root까지만 올라갑니다.
+- 폼 컨트롤을 컴포넌트 안에 두었을 때 폼 제출·검증과 어떻게 이어지는지는 26편에서 다룹니다.
+
+## Light DOM과 Shadow DOM 상호작용
+
+host의 일반 자식(light DOM)은 shadow tree와 별개로 문서 DOM에 그대로 남아 있습니다. 두 트리는 슬롯으로만 합쳐집니다.
+
+- shadow root가 있는 host의 light 자식은 슬롯에 배정되지 않으면 렌더링되지 않습니다. DOM에는 있어도 flat tree에서 빠집니다.
+- 슬롯에 배정된 노드도 DOM상 위치는 host의 자식 그대로입니다. 렌더링할 때만 슬롯 자리에 나타납니다(자세히는 22편).
+- host의 `children`과 `querySelector()`는 light DOM만 봅니다. shadow tree는 `shadowRoot`로만 닿을 수 있습니다.
+- 스타일은 서로 영향을 주지 못하지만 상속은 host에서 shadow tree로 흐릅니다. 슬롯된 노드는 flat tree에서 슬롯의 자식이므로, 원래 부모가 아니라 슬롯에서 상속받습니다.
+- 이벤트는 flat tree를 따라 흐릅니다. 슬롯된 노드에서 시작한 이벤트의 경로에는 슬롯과 shadow tree의 조상이 포함됩니다.
+- `lang`과 `dir`은 shadow tree 안의 요소는 host에서, 슬롯된 노드는 DOM상의 실제 부모에서 결정됩니다(MDN). 스타일 상속과 출처가 다릅니다.
+
+두 트리의 책임을 나누면 다음과 같습니다.
+
+| 영역 | 소유자 | 외부에서 바꿀 수 있는가 |
+|------|--------|--------------------------|
+| host의 속성·프로퍼티·메서드 | 컴포넌트가 공개한 API | 가능 |
+| light DOM 자식 | 컴포넌트 사용자 | 가능 |
+| shadow tree | 컴포넌트 구현 | 불가(open이면 가능하지만 비공개 영역) |
+
+## Declarative Shadow DOM
+
+**Declarative Shadow DOM**(DSD)은 JavaScript 없이 HTML만으로 shadow root를 만드는 방법입니다. `template`에 `shadowrootmode`를 지정하면 HTML 파서가 그 `template`을 부모 요소의 shadow root로 바꿉니다. 서버가 렌더링한 HTML에 컴포넌트의 shadow tree를 포함시키는 용도입니다(자세히는 76편). Baseline 2024이며 널리 지원됩니다.
+
+```html
+<user-card>
+  <template shadowrootmode="open">
+    <style> p { color: teal } </style>
+    <p>shadow content</p>
+  </template>
+</user-card>
+```
+
+`template`에 쓰는 속성은 다음과 같습니다.
+
+| 속성 | 대응하는 옵션 |
+|------|---------------|
+| `shadowrootmode` | `mode` (`open` 또는 `closed`). 이 속성이 있어야 DSD로 처리됨 |
+| `shadowrootdelegatesfocus` | `delegatesFocus` |
+| `shadowrootclonable` | `clonable` |
+| `shadowrootserializable` | `serializable` |
+| `shadowrootslotassignment` | `slotAssignment` (`manual`) |
+
+- 파서가 `template` 요소를 제거하고 그 내용을 shadow root의 자식으로 넣습니다. `template` 요소가 DOM에 남지 않습니다.
+- 한 host에 DSD가 여러 개 있으면 첫 번째만 root가 되고, 나머지는 root 안의 일반 `template`으로 남습니다.
+- HTML 파서가 처리해야 만들어집니다. `innerHTML`에 대입하면 DSD로 처리되지 않고 일반 `template`이 됩니다. 대신 `setHTMLUnsafe()`와 `parseHTMLUnsafe()`는 DSD를 처리합니다(MDN).
+- 사용자 정의 요소에 DSD가 이미 붙어 있으면 요소가 업그레이드될 때 생성자의 `attachShadow()`는 예외 없이 그 root를 재사용합니다(mode가 같을 때, 위 "예외" 참고). 이때 기존 자식은 비워지므로 생성자가 내용을 다시 채우거나 `this.shadowRoot`로 기존 root를 먼저 확인합니다. 자세한 업그레이드 흐름은 18편입니다.
+
+## getHTML()과 serializable
+
+`innerHTML`은 shadow tree를 직렬화하지 않습니다. shadow root를 포함한 HTML 문자열이 필요하면 `getHTML()`을 씁니다(Baseline 2024, 2024년 9월부터 핵심 브라우저 전체 지원).
+
+```js
+host.getHTML()                    // shadow 제외
+host.getHTML({
+  serializableShadowRoots: true,  // serializable 인 root 포함
+})
+host.getHTML({ shadowRoots: [r] }) // 지정한 root 포함
+```
+
+- `serializableShadowRoots: true`는 `serializable: true`로 만든 root만 포함합니다. 기본값은 `false`이므로 직렬화하려면 root를 만들 때 옵션을 켜야 합니다.
+- `shadowRoots` 배열에 root를 직접 넘기면 `serializable`과 `mode`에 관계없이 그 root가 포함됩니다. closed root를 가진 쪽에서만 가능한 방법입니다.
+- 포함된 root는 `template shadowrootmode="..."` 형태로 출력되고, 켜져 있는 옵션이 `shadowrootdelegatesfocus`, `shadowrootserializable`, `shadowrootclonable` 속성으로 함께 적힙니다. 이 문자열을 `setHTMLUnsafe()`로 읽으면 다시 shadow tree가 만들어집니다.
+- `ShadowRoot.getHTML()`은 root 안의 내용만 직렬화합니다.
+- `clonable: true`인 root는 `cloneNode(true)`와 `importNode(node, true)`로 복제할 때 root도 함께 복제됩니다. `false`이면 host만 복제되고 shadow tree는 비어 있습니다.
+
+## 내부 탐색과 getRootNode
+
+shadow tree 안에서 바깥으로, 바깥에서 안으로 이동하는 API는 다음과 같습니다.
+
+| 하려는 일 | 방법 |
+|-----------|------|
+| host에서 root 얻기 | `host.shadowRoot` (open일 때) |
+| root에서 host 얻기 | `root.host` |
+| 어떤 노드가 속한 트리의 뿌리 얻기 | `node.getRootNode()` |
+| 문서 뿌리까지 얻기 | `node.getRootNode({ composed: true })` |
+| root 안 포커스 요소 | `root.activeElement` |
+| root 안 좌표의 요소 | `root.elementFromPoint(x, y)` |
+
+```js
+const inner = host.shadowRoot.querySelector('span')
+inner.getRootNode() === host.shadowRoot       // true
+inner.getRootNode({ composed: true }) === document // true
+inner.getRootNode().host === host             // true
+```
+
+- `getRootNode()`는 기본적으로 shadow root에서 멈춥니다. `composed: true`를 주면 shadow root를 지나 host의 트리까지 올라가 문서(연결된 경우)를 돌려줍니다. 연결되지 않은 트리이면 그 트리의 뿌리입니다.
+- `getRootNode()`가 `ShadowRoot`인지 확인하면 노드가 shadow tree 안에 있는지 알 수 있습니다.
+
+## Shadow DOM을 쓰지 않는 선택
+
+사용자 정의 요소가 Shadow DOM을 꼭 가져야 하는 것은 아닙니다. shadow root를 붙이지 않고 `this`에 직접 내용을 렌더링하는 컴포넌트를 light DOM 컴포넌트라고 부릅니다.
+
+| 기준 | Shadow DOM | light DOM |
+|------|-----------|-----------|
+| CSS 충돌 | 막힘 | 전역 CSS와 섞임 |
+| 문서의 전역 스타일·CSS 프레임워크 적용 | 안 됨 (테마 변수·`::part`·스타일시트 공유 필요) | 그대로 적용 |
+| 안쪽 폼 컨트롤과 바깥 `form` | 연결되지 않음 (form-associated 사용자 정의 요소 필요) | 일반 폼처럼 동작 |
+| `label for`, ARIA의 ID 참조 | 같은 트리 안에서만 | 문서 전체에서 동작 |
+| 전역 선택자·이벤트 위임·테스트 도구 | 경계 때문에 별도 처리 | 그대로 동작 |
+| 슬롯으로 내용 합성 | 사용 가능 | 사용 불가 (`slot` 요소가 동작하지 않음) |
+| 서버 렌더링 | Declarative Shadow DOM 필요 | 일반 HTML |
+
+- 안쪽 `input`은 shadow tree 밖의 `form`에 속하지 않습니다. 폼 소유자와 `form` 속성은 같은 트리 안에서 찾기 때문입니다. 제출 값에 포함하려면 `ElementInternals`로 폼과 연결합니다(자세히는 26편).
+- 컴포넌트의 구조를 사용자가 직접 스타일하거나 확장해야 하면 light DOM이 단순합니다. 배포 대상의 스타일을 컴포넌트가 책임져야 하면 Shadow DOM이 낫습니다.
+- 슬롯 합성이 필요 없고 전역 CSS 시스템을 그대로 쓰는 앱 내부 컴포넌트라면 light DOM이 단순합니다.
+- 같은 컴포넌트를 앱 내부용과 외부 배포용으로 나눠 제공하는 방식도 있습니다(자세히는 72편).
+
+## 핵심 정리
+
+- `attachShadow()`는 정해진 목록의 요소(사용자 정의 요소, 일부 블록·제목 요소)에만 한 번 쓸 수 있고, 옵션은 `mode`·`delegatesFocus`·`slotAssignment`·`clonable`·`serializable`입니다.
+- closed는 `host.shadowRoot`와 외부 `composedPath()`를 가릴 뿐 보안 수단이 아니며, 일반적으로는 open을 씁니다.
+- 경계는 DOM 탐색과 CSS 선택자를 막지만 상속 속성과 커스텀 속성은 통과시킵니다.
+- 이벤트는 경계에서 target이 host로 바뀌고(retargeting), `composed: false`이면 shadow root에서 멈춥니다. `input`은 넘고 `change`와 `slotchange`는 넘지 않습니다.
+- DSD는 HTML 파서로만 만들어지고 `getHTML()`은 `serializable` root만 직렬화하며, 둘 다 서버 렌더링의 기반입니다.
+- 전역 CSS, 폼 연결, ID 참조가 중요하면 Shadow DOM 없이 light DOM으로 만드는 것도 설계 선택입니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="다음 중 attachShadow 호출이 NotSupportedError를 던지는 경우는?"
+  options={['div 요소에 mode open으로 호출', 'input 요소에 mode open으로 호출', '유효한 이름의 사용자 정의 요소에 mode closed로 호출', 'section 요소에 delegatesFocus를 true로 호출']}
+  correctAnswer={2}
+  explanation="유효한 shadow host는 사용자 정의 요소와 article, aside, blockquote, body, div, footer, h1부터 h6, header, main, nav, p, section, span뿐입니다. input은 목록에 없어 NotSupportedError가 발생합니다. 나머지는 허용되며 옵션은 호출 가능 여부에 영향을 주지 않습니다."
+  optionExplanations={['div는 허용되는 요소입니다', 'input은 shadow host 목록에 없습니다', 'closed 모드도 사용자 정의 요소에는 허용됩니다', 'section은 허용되는 요소이고 delegatesFocus는 호출 가능 여부와 무관합니다']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="shadow tree 안의 button을 클릭했을 때, 문서에 등록된 click 리스너에서 event.target은 무엇인가?"
+  options={['안쪽 button 요소', 'ShadowRoot 객체', 'shadow host 요소', 'window 객체']}
+  correctAnswer={3}
+  explanation="이벤트가 shadow 경계를 넘으면 retargeting에 의해 바깥 리스너에게 보이는 target이 shadow host로 바뀝니다. 실제 시작점이 필요하면 open 모드에 한해 composedPath의 첫 요소를 읽습니다. ShadowRoot는 경로에는 있지만 target이 되지 않고, window는 경로의 끝입니다."
+  optionExplanations={['안쪽 button은 같은 트리 안의 리스너에게만 target으로 보입니다', 'ShadowRoot는 composedPath에 나타날 뿐 target이 아닙니다', 'retargeting으로 host가 target이 됩니다', 'window는 경로의 마지막 노드일 뿐 target이 아닙니다']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="shadow tree 안의 input 요소에서 값을 입력한 뒤 확정했다. 문서 수준에서 별도 처리 없이 받을 수 있는 이벤트는?"
+  options={['input 이벤트만 받는다', 'change 이벤트만 받는다', 'input과 change 모두 받는다', '둘 다 받지 못한다']}
+  correctAnswer={1}
+  explanation="HTML 명세는 input 이벤트를 bubbles와 composed가 true로 발생시키므로 경계를 넘습니다. change는 composed 지정 없이 발생하므로 shadow root에서 멈춥니다. change를 바깥에 알리려면 컴포넌트가 bubbles와 composed를 true로 준 새 이벤트를 다시 디스패치해야 합니다."
+  optionExplanations={['input은 composed라서 경계를 넘고 change는 넘지 못합니다', 'change는 composed가 아니어서 문서 리스너에 도달하지 못합니다', 'change는 경계를 넘지 못하므로 둘 다 받을 수 없습니다', 'input은 경계를 넘어 받을 수 있습니다']}
+/>
+
+## 참고 자료
+
+- [MDN — Element.attachShadow()](https://developer.mozilla.org/en-US/docs/Web/API/Element/attachShadow)
+- [MDN — ShadowRoot](https://developer.mozilla.org/en-US/docs/Web/API/ShadowRoot)
+- [MDN — Using shadow DOM](https://developer.mozilla.org/en-US/docs/Web/API/Web_components/Using_shadow_DOM)
+- [MDN — Event.composedPath()](https://developer.mozilla.org/en-US/docs/Web/API/Event/composedPath)
+- [MDN — Event.composed](https://developer.mozilla.org/en-US/docs/Web/API/Event/composed)
+- [MDN — Node.getRootNode()](https://developer.mozilla.org/en-US/docs/Web/API/Node/getRootNode)
+- [MDN — Element.getHTML()](https://developer.mozilla.org/en-US/docs/Web/API/Element/getHTML)
+- [MDN — Element.setHTMLUnsafe()](https://developer.mozilla.org/en-US/docs/Web/API/Element/setHTMLUnsafe)
+- [MDN — ElementInternals.shadowRoot](https://developer.mozilla.org/en-US/docs/Web/API/ElementInternals/shadowRoot)
+- [DOM Standard — Shadow trees, retargeting, event dispatch](https://dom.spec.whatwg.org/)
+- [HTML Standard — The template element](https://html.spec.whatwg.org/multipage/scripting.html#the-template-element)
+- [HTML Standard — Focus delegation](https://html.spec.whatwg.org/multipage/interaction.html#focus-delegate)
+- [UI Events (W3C)](https://www.w3.org/TR/uievents/)
+- [CSS Shadow Module Level 1](https://drafts.csswg.org/css-shadow-1/)
+- [web.dev — Baseline](https://web.dev/baseline)

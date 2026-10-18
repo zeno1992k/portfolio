@@ -1,0 +1,709 @@
+---
+title: '43. async와 await'
+description: 'async 함수와 await의 동작 규칙, try...catch, 순차·병렬 실행, 반복문, 최상위 await, for await...of, 비동기 제너레이터와 흔한 실수를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** async 함수가 프로미스를 반환하는 규칙과 await가 실행을 멈추고 재개하는 방식을 바탕으로, 순차·병렬 실행, 반복문, 비동기 이터레이터를 에러 없이 작성할 수 있습니다.
+</Callout>
+
+## async 함수
+
+async 함수(ES2017)는 `async` 키워드를 붙여 선언하며, 항상 프로미스를 반환하고 본문에서 `await`를 쓸 수 있는 함수입니다. 프로미스(자세히는 41편) 체인을 위에서 아래로 읽히는 코드로 쓰기 위해 도입됐습니다.
+
+```js
+async function a() {}          // 선언문
+const b = async function () {} // 표현식
+const c = async () => {}       // 화살표 함수
+const obj = { async m() {} }   // 객체 메서드
+class K {
+  async m() {}                 // 클래스 메서드
+  static async s() {}          // 정적 메서드
+}
+```
+
+본문의 결과가 반환된 프로미스의 상태를 정합니다.
+
+| 본문에서 | 반환된 프로미스 |
+|----------|-----------------|
+| `return 값` | 그 값으로 이행 |
+| return 없이 끝남 | `undefined`로 이행 |
+| `throw 값` | 그 값으로 거부 |
+
+```js
+async function ok() { return 1 }
+async function bad() { throw new Error('x') }
+
+ok()  // Promise { 1 }
+bad() // Promise { <rejected> Error: x }
+```
+
+본문은 첫 `await`를 만나기 전까지 호출한 자리에서 동기로 실행됩니다. `await` 이후의 나머지만 나중에 재개됩니다.
+
+```js
+async function f() {
+  console.log(1)
+  await null
+  console.log(3)
+}
+f()
+console.log(2) // 출력 순서: 1, 2, 3
+```
+
+예외는 호출자에게 던져지지 않고 거부로 바뀝니다. 본문 첫 줄의 인수 검사에서 던진 에러도 마찬가지입니다.
+
+```js
+async function f(x) { if (!x) throw new TypeError('x') }
+
+try { f() } catch (e) { /* 실행되지 않는다 */ }
+f().catch(e => console.log(e.name)) // 'TypeError'
+```
+
+- async 함수는 생성자가 아닙니다. `new f()`는 TypeError이고 `prototype` 프로퍼티도 없습니다.
+- async를 붙일 수 없는 곳은 클래스의 `constructor`, getter, setter입니다(아래 마지막 절).
+- `async`는 예약어가 아니라 문맥 키워드이므로 `async`라는 변수 이름은 여전히 유효합니다.
+
+## 반환값의 프로미스 래핑
+
+async 함수에서 `return`한 값은 무엇이든 프로미스 하나로 감싸집니다. 프로미스를 반환해도 `Promise<Promise<값>>`처럼 중첩되지 않습니다.
+
+| return 하는 것 | 반환된 프로미스 |
+|----------------|-----------------|
+| 일반 값 | 그 값으로 이행 |
+| 프로미스 | 그 프로미스의 결과를 따라간다 (이행이면 값, 거부면 사유) |
+| thenable (`then` 메서드를 가진 객체) | `then`을 호출해 결과를 따라간다 |
+
+```js
+async function a() { return 1 }
+async function b() { return Promise.resolve(2) }
+async function c() { return Promise.reject(new Error('x')) }
+
+a().then(v => console.log(v))          // 1
+b().then(v => console.log(v))          // 2 (프로미스가 아니라 값)
+c().catch(e => console.log(e.message)) // 'x'
+```
+
+- async 함수는 호출할 때마다 새 프로미스를 만듭니다. 내부에서 `return p`를 해도 `f() === p`는 `false`입니다.
+- 프로미스를 따라가는 데 마이크로태스크(자세히는 40편) 단계가 추가되므로 값을 바로 반환할 때보다 이행이 늦습니다(아래 return await 절).
+
+## await
+
+`await` 연산자는 프로미스가 확정될 때까지 async 함수의 실행을 멈추고, 이행되면 그 값을 식의 결과로, 거부되면 그 사유를 예외로 던집니다.
+
+```js
+// getUser, getPosts는 프로미스를 반환한다고 가정
+async function load() {
+  const user = await getUser(1)         // 이행 값이 user에 담긴다
+  const posts = await getPosts(user.id) // 앞 줄이 끝난 뒤 시작
+  return posts.length
+}
+```
+
+| 피연산자 | await의 결과 |
+|----------|--------------|
+| 이행되는 프로미스 | 이행 값 |
+| 거부되는 프로미스 | 그 사유를 throw |
+| thenable | `then`을 호출해 확정을 기다린 뒤 위와 같이 처리 |
+| 그 외의 값 | 그 값 (단, 다음 줄은 마이크로태스크 뒤에 실행) |
+
+```js
+// async 함수 안에서
+const v = await 10 // 10
+const t = { then(resolve) { resolve('T') } }
+const w = await t  // 'T'
+```
+
+동작 규칙은 다음과 같습니다.
+
+- 멈추는 것은 그 async 함수뿐입니다. 스레드는 멈추지 않고, 제어는 호출자에게 돌아가며, 이벤트 루프는 그동안 다른 작업을 처리합니다(자세히는 40편).
+- 이미 이행된 값이나 프로미스를 기다려도 재개는 항상 마이크로태스크로 일어납니다. `await`는 값이 즉시 있어도 반드시 비동기 지점입니다.
+- 사용할 수 있는 곳은 async 함수 본문과 모듈 최상위(아래 Top-level await 절)입니다. async 함수 안에 중첩된 일반 함수 안에서는 쓸 수 없습니다.
+- async 함수의 매개변수 기본값 안에서도 쓸 수 없습니다. SyntaxError입니다.
+- 스크립트에서 async 함수 밖의 `await 1`은 SyntaxError입니다. 이때 `await`는 예약어가 아니라 일반 식별자입니다.
+
+`await`는 단항 연산자라서 우선순위가 `.`과 호출보다 낮습니다. 프로미스의 결과에서 프로퍼티를 읽으려면 괄호가 필요합니다.
+
+```js
+const a = await getUser(1).name   // ❌ 프로미스의 name(undefined)
+const b = (await getUser(1)).name // ✅ 이행 값의 name
+const c = await x ** 2            // ❌ SyntaxError
+const d = (await x) ** 2          // ✅
+```
+
+`await`로 멈춘 사이에 같은 함수의 다른 호출이나 다른 코드가 실행됩니다. 읽기와 쓰기 사이에 `await`가 끼면 값이 덮어쓰입니다.
+
+```js
+// sleep(ms): ms 뒤에 이행되는 프로미스
+let count = 0
+async function inc() {
+  const cur = count   // 읽기
+  await sleep(1)      // 이 사이에 다른 inc()가 읽는다
+  count = cur + 1     // 쓰기
+}
+Promise.all([inc(), inc(), inc()])
+  .then(() => console.log(count)) // 1 (3이 아니다)
+```
+
+async/await는 프로미스 체인의 다른 표기입니다.
+
+| async/await | 프로미스 체인 |
+|-------------|----------------|
+| `const v = await p` | `p.then(v => ...)` |
+| `try { } catch { }` | `.catch()` |
+| `finally { }` | `.finally()` |
+| `throw e` | 거부 |
+
+```js
+async function f() {
+  const a = await step1()
+  return step2(a)
+}
+// 같은 동작
+const g = () => step1().then(a => step2(a))
+```
+
+## try...catch
+
+`await`한 프로미스가 거부되면 그 자리에서 예외가 던져지므로 동기 코드처럼 `try...catch`로 잡습니다.
+
+```js
+async function load() {
+  try {
+    const user = await getUser(1) // 거부되면 catch로 이동
+    return user.name
+  } catch (err) {
+    return 'unknown'              // 복구한 값을 반환
+  } finally {
+    hideSpinner()                 // 항상 실행
+  }
+}
+```
+
+- try 안에서 `await`하지 않은 프로미스의 거부는 catch에 걸리지 않습니다(아래 return await, await 누락 절).
+- 잡지 않은 예외는 async 함수가 반환한 프로미스를 거부시킵니다. 호출자가 그 프로미스를 `await`하거나 `.catch()`로 받아야 합니다. 끝까지 처리되지 않으면 처리되지 않은 거부(unhandled rejection)가 되고, Node.js 15부터는 기본 설정에서 프로세스가 에러로 종료됩니다(자세히는 44편).
+- try 안에서 선언한 `const`와 `let`은 catch 뒤에서 보이지 않습니다. 결과를 밖에서 쓰려면 변수를 try 앞에서 선언합니다.
+
+```js
+let data
+try { data = await load() } catch (err) { data = [] }
+console.log(data) // 실패하면 []
+```
+
+- 모르는 에러는 삼키지 말고 다시 던집니다.
+
+```js
+try {
+  await save(form)
+} catch (err) {
+  if (err.code !== 'CONFLICT') throw err // 처리 못 하면 위로
+  await resolveConflict(form)
+}
+```
+
+- 호출 하나에만 기본값을 주려면 `.catch()`를 `await`와 함께 씁니다.
+
+```js
+const user = await getUser(1).catch(() => null)
+// 이행되면 그 값, 거부되면 null
+```
+
+- 한 try 안에 `await`가 여러 개면 어느 호출이 실패했는지 catch에서 구분하기 어렵습니다. 호출마다 `.catch()`를 붙이거나 try를 나눕니다.
+- `setTimeout` 콜백처럼 `await`되지 않는 비동기 콜백의 예외는 감싼 try에 닿지 않습니다(자세히는 44편).
+
+## return await와 return
+
+try 블록 안에서는 `return 프로미스`와 `return await 프로미스`의 동작이 다릅니다. 앞의 것은 프로미스를 반환 값으로 넘기고 함수를 끝내므로, 거부가 try 블록을 벗어난 뒤에 일어납니다.
+
+```js
+async function a() {
+  try { return fail() }        // 프로미스를 그대로 반환
+  catch (e) { return 'caught' }
+}
+async function b() {
+  try { return await fail() }  // 여기서 기다림
+  catch (e) { return 'caught' }
+}
+// fail()은 거부되는 async 함수
+// a() → 거부 (catch 실행 안 됨), b() → 'caught'
+```
+
+`finally`도 영향을 받습니다. `return 프로미스`에서는 프로미스가 확정되기 전에 finally가 실행되고, `return await`에서는 확정된 뒤에 실행됩니다.
+
+| 위치 | 쓸 형태 | 이유 |
+|------|---------|------|
+| try 안 | `return await` | 거부를 같은 함수의 catch와 finally가 처리 |
+| try 밖 | 둘 다 가능 | 결과는 같고, `return await`가 거부 시 스택 트레이스에 이 함수를 남긴다 |
+
+try 밖에서는 이행 시점이 다릅니다. 값을 반환할 때보다 `return await`는 마이크로태스크 1단계, `return 프로미스`는 2단계 늦게 이행됩니다.
+
+```js
+async function v() { return 'x' }
+async function w() { return await Promise.resolve('x') }
+async function p() { return Promise.resolve('x') }
+p().then(() => console.log('p'))
+w().then(() => console.log('w'))
+v().then(() => console.log('v'))
+// v, w, p (호출 순서와 반대로 끝난다)
+```
+
+이 차이는 마이크로태스크 몇 번 분량이라 선택 기준이 되지 않습니다. try 안인지 여부가 기준입니다.
+
+## await 누락
+
+`await`를 빠뜨리면 값 대신 프로미스를 받습니다. 에러 없이 틀린 값이 흘러가는 것이 문제입니다.
+
+```js
+const user = getUser(1)    // ❌ await 누락
+console.log(user.name)     // undefined
+
+const ok = validate(form)  // async 함수라면 프로미스
+if (!ok) return            // ❌ 프로미스는 항상 참: 검증 무시
+```
+
+| 누락한 곳 | 증상 |
+|-----------|------|
+| 값을 읽을 때 | 프로미스 객체의 프로퍼티를 읽어 `undefined` |
+| 조건식 | 프로미스는 항상 참이라 검증이 무시됨 |
+| 연산·비교 | `p + 1`은 `'[object Promise]1'`, `p === 1`은 `false` |
+| try 안 | 거부가 catch에 걸리지 않음 |
+| 함수의 마지막 | 작업이 끝나기 전에 함수가 반환되고, 거부는 처리되지 않은 거부가 됨 |
+
+```js
+try {
+  save(data)  // ❌ 실패해도 catch에 닿지 않는다
+} catch (err) {
+  report(err)
+}
+```
+
+- 의도적으로 기다리지 않을 때도 거부는 처리해야 합니다. `.catch()`를 붙이고, `void`로 의도를 표시합니다.
+
+```js
+void sendLog(event).catch(reportError) // 기다리지 않되 거부는 처리
+```
+
+- 프로미스가 아닌 값에 `await`를 붙여도 에러는 나지 않고 마이크로태스크 한 번만 늦어집니다. 불필요한 `await`는 위험하지 않지만 누락은 위험합니다.
+- typescript-eslint의 `no-floating-promises` 규칙이 `await`·`.catch()` 없이 버려진 프로미스를 찾아 줍니다.
+
+## 순차와 병렬
+
+`await`는 다음 줄을 멈추므로, 서로 독립인 작업을 `await`로 이어 쓰면 순차 실행이 되어 시간이 합산됩니다. 병렬은 프로미스를 모두 먼저 시작한 뒤 한꺼번에 기다리는 방식입니다. JavaScript는 싱글 스레드이므로 병렬은 계산이 아니라 입출력 대기 시간을 겹치는 것입니다.
+
+```js
+// task(name, ms): ms 뒤에 name으로 이행되는 프로미스
+const a = await task('a', 100) // 순차: 앞이 끝나야 다음 시작
+const b = await task('b', 100) // 총 약 200ms
+
+const [c, d] = await Promise.all([
+  task('c', 100), // 둘 다 즉시 시작
+  task('d', 100), // 총 약 100ms
+])
+```
+
+| 방식 | 시작 시점 | 총 시간 | 하나가 실패하면 |
+|------|-----------|---------|-----------------|
+| 순차 `await` | 앞 작업이 끝난 뒤 | 합 | 뒤 작업은 시작도 안 함 |
+| `Promise.all` | 전부 즉시 | 가장 긴 것 | 즉시 거부, 나머지는 계속 실행 |
+| `Promise.allSettled` | 전부 즉시 | 가장 긴 것 | 전부 끝난 뒤 결과 배열 반환 |
+
+- 프로미스는 만들어지는 순간 시작됩니다(자세히는 41편). 병렬로 만드는 것은 `await`를 늦추는 일이 아니라 시작을 앞당기는 일입니다.
+- 뒤 작업이 앞 결과를 입력으로 쓰면 순차, 서로 무관하면 병렬입니다.
+- `Promise.all`은 결과를 입력 순서대로 담습니다. 완료 순서가 아닙니다.
+- `Promise.all`이 거부돼도 이미 시작된 나머지 작업은 취소되지 않고 계속 실행됩니다.
+- 일부 실패를 허용하려면 `allSettled`를 씁니다.
+
+```js
+const rs = await Promise.allSettled([f(), g()])
+// [{ status: 'fulfilled', value: ... },
+//  { status: 'rejected', reason: ... }]
+```
+
+흔한 실수는 프로미스를 먼저 시작해 두고 변수별로 따로 `await`하는 것입니다. 앞 프로미스를 기다리는 동안 뒤 프로미스가 거부되면, 그 시점에 뒤 프로미스에는 처리기가 없어 처리되지 않은 거부가 됩니다. try...catch로도 잡히지 않습니다.
+
+```js
+const p1 = slow() // 100ms 뒤 이행
+const p2 = fail() // 10ms 뒤 거부
+try {
+  await p1        // p2에는 아직 처리기가 없다
+  await p2
+} catch (e) {}    // 잡히지 않고 Node.js는 프로세스를 종료한다
+```
+
+`await Promise.all([p1, p2])`는 두 프로미스에 즉시 처리기를 붙이므로 이 문제가 없습니다. 브라우저에서는 프로세스 종료 대신 `unhandledrejection` 이벤트와 콘솔 에러가 나옵니다.
+
+## 반복문과 await
+
+`for`, `while`, `for...of` 안의 `await`는 각 반복을 순서대로 기다립니다. 반복마다 앞 반복이 끝나야 다음이 시작되는 순차 실행입니다.
+
+```js
+for (const id of ids) {
+  const user = await getUser(id) // 앞 반복이 끝나야 다음 시작
+  console.log(user.name)
+}
+```
+
+- 순서가 중요하거나 앞 결과가 필요하거나 서버 부하를 줄여야 할 때 씁니다. 독립 작업이면 느리며, ESLint의 `no-await-in-loop` 규칙이 이 형태를 경고합니다.
+- `forEach`, `map`, `filter` 같은 고차 함수의 콜백은 일반 함수로 취급됩니다. 콜백을 async로 만들어도 고차 함수는 반환된 프로미스를 기다리지 않습니다.
+
+```js
+ids.forEach(async (id) => {
+  await sleep(10)
+  console.log('item', id)
+})
+console.log('after forEach')
+// after forEach → item 1 → item 2 → item 3
+```
+
+`forEach`는 콜백의 반환값을 버리고 `undefined`를 반환합니다. `await ids.forEach(...)`는 `undefined`를 기다릴 뿐이며, 콜백 안에서 난 에러는 처리되지 않은 거부가 됩니다. `await`가 필요하면 `for...of`로 바꿉니다.
+
+병렬이 목적이면 `map`이 만든 프로미스 배열을 `Promise.all`로 기다립니다. 결과 순서는 입력 순서입니다.
+
+```js
+const names = await Promise.all(
+  ids.map(async (id) => {
+    const user = await getUser(id)
+    return user.name
+  })
+)
+```
+
+`filter`, `some`, `every`, `find` 같은 판정 콜백이 async이면 반환값은 프로미스이고 프로미스는 항상 참입니다. 모든 요소가 통과합니다.
+
+```js
+[1, 2, 3, 4].filter(async (n) => n % 2 === 0)
+// [1, 2, 3, 4]
+```
+
+판정 결과를 먼저 `Promise.all`로 모은 뒤 인덱스로 거릅니다.
+
+```js
+const flags = await Promise.all(items.map(isValid))
+const valid = items.filter((_, i) => flags[i])
+```
+
+| 목적 | 방법 |
+|------|------|
+| 순서대로 하나씩 | `for...of` + `await` |
+| 독립 작업을 한꺼번에 | `await Promise.all(arr.map(async ...))` |
+| 한꺼번에 하되 개수 제한 | 아래 동시 실행 수 제한 절 |
+| async 판정으로 거르기 | `map`으로 판정 → 인덱스로 `filter` |
+| 비동기 데이터 소스 순회 | `for await...of` |
+
+## 동시 실행 수 제한
+
+`Promise.all`로 수천 개를 한꺼번에 시작하면 서버의 요청 제한, 소켓·파일 핸들 수, 메모리에 걸릴 수 있습니다. 진행 중인 작업 수를 일정 개수 이하로 유지하는 것을 동시 실행 수 제한이라고 합니다.
+
+첫 번째 방법은 묶음 처리입니다. N개씩 잘라 `Promise.all`을 반복합니다. 단순하지만 묶음 안의 가장 느린 작업이 끝나야 다음 묶음이 시작되므로 빈 자리가 생깁니다.
+
+```js
+for (let i = 0; i < items.length; i += 3) {
+  const chunk = items.slice(i, i + 3)
+  await Promise.all(chunk.map(handle)) // 3개씩 끝나길 기다림
+}
+```
+
+두 번째 방법은 작업자 풀입니다. `limit`개의 작업자가 같은 이터레이터에서 항목을 하나씩 꺼내 처리하고, 끝나는 즉시 다음 항목을 가져갑니다.
+
+```js
+async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length)
+  const entries = items.entries() // 모든 작업자가 공유
+  async function worker() {
+    for (const [i, item] of entries) {
+      results[i] = await fn(item, i)
+    }
+  }
+  await Promise.all(Array.from({ length: limit }, worker))
+  return results
+}
+```
+
+- 이터레이터의 `next()` 호출은 동기이고 싱글 스레드이므로 한 항목이 두 작업자에게 가지 않습니다.
+- 결과는 인덱스 `i`에 저장해 입력 순서를 유지합니다.
+- 항목 7개, 한도 3, 작업당 50ms이면 최대 3개만 동시에 진행되고 총 약 150ms가 걸립니다.
+- `fn`이 거부되면 그 작업자는 멈추고 `Promise.all`이 거부되지만, 다른 작업자는 남은 항목을 계속 처리합니다. 실패해도 계속하려면 `fn` 안에서 try...catch로 처리합니다.
+- p-limit 같은 라이브러리도 같은 원리로 동작합니다.
+
+## Top-level await
+
+최상위 await(ES2022)는 async 함수 밖, 모듈의 최상위에서 `await`를 쓰는 기능입니다. 모듈 전체가 async 함수 본문처럼 평가되어 비동기 초기화를 바로 적을 수 있습니다.
+
+```js
+// config.mjs
+export const config = await loadConfig()
+
+const { default: parse } = await import('./parse.js')
+export const parsed = parse(config)
+```
+
+- 모듈에서만 가능합니다. 브라우저의 `<script type="module">`, Node.js의 `.mjs` 파일이나 package.json의 `type`이 `module`인 범위에서 쓸 수 있습니다. CommonJS와 일반 스크립트에서는 SyntaxError입니다(자세히는 45·46편).
+- 최상위 await가 있는 모듈은 `await`가 끝날 때까지 평가가 멈춥니다. 그 모듈을 import하는 모듈은 평가가 끝난 뒤에 실행되고, 의존 관계가 없는 형제 모듈은 병렬로 계속 평가됩니다.
+- import한 값은 항상 초기화가 끝난 상태로 보입니다.
+- `await`한 프로미스가 거부되면 그 모듈의 평가가 실패하고, 이를 import하는 모듈도 같은 에러로 실패합니다.
+- 확정되지 않는 프로미스를 `await`하면 그 모듈과 이를 import하는 모든 모듈이 시작하지 못합니다. Node.js는 이벤트 루프에 남은 일이 없는데 최상위 await가 끝나지 않았으면 경고를 내고 종료 코드 13으로 종료합니다.
+
+```js
+console.log('before')       // before
+await new Promise(() => {}) // 영원히 대기
+console.log('after')        // 출력되지 않는다 (Node.js: 종료 코드 13)
+```
+
+- 라이브러리 모듈에서 오래 걸리는 최상위 await는 그 모듈을 쓰는 모든 앱의 시작을 늦춥니다. 설정 로딩, 조건부 동적 `import()`, 리소스 초기화처럼 앱 쪽 모듈에서 쓰는 용도가 일반적입니다.
+- 브라우저 개발자 도구 콘솔과 Node.js REPL은 모듈이 아니어도 최상위 `await`를 허용합니다. 도구의 편의 기능이며 스크립트 문법이 아닙니다.
+- 모듈이 아닌 곳에서는 async 함수를 만들어 호출하는 방식을 씁니다.
+
+```js
+async function main() {
+  const data = await load()
+  console.log(data)
+}
+main().catch(console.error) // 거부를 처리하지 않으면 처리되지 않은 거부
+```
+
+## for await...of
+
+`for await...of`(ES2018)는 비동기 이터러블을 순회하며 매 반복에서 다음 값을 기다리는 반복문입니다. async 함수 안이나 모듈 최상위에서만 쓸 수 있습니다.
+
+```js
+async function* ticks() {
+  yield 1
+  yield 2
+}
+for await (const n of ticks()) console.log(n) // 1, 2
+```
+
+순회 대상은 다음 순서로 결정됩니다.
+
+| 순서 | 대상에 있는 메서드 | 동작 |
+|------|--------------------|------|
+| 1 | `[Symbol.asyncIterator]` | 비동기 이터레이터로 순회 |
+| 2 | `[Symbol.iterator]` | 일반 이터레이터로 순회하며 각 값을 `await` |
+| 3 | 둘 다 없음 | TypeError (`5 is not async iterable`) |
+
+일반 이터러블의 값이 프로미스이면 그 결과를 기다립니다. 입력 순서대로 진행합니다.
+
+```js
+// sleep(ms, v): ms 뒤에 v로 이행되는 프로미스
+const jobs = [sleep(30, 'slow'), sleep(10, 'fast'), 3]
+for await (const v of jobs) console.log(v)
+// 'slow', 'fast', 3 (fast가 먼저 끝나도 slow 뒤)
+```
+
+- 이전 반복의 본문과 `next()` 결과가 끝나야 다음 `next()`를 호출합니다. 항상 순차입니다.
+- 변수 자리에는 `const`, `let`, `var`, 구조 분해, 이미 선언된 변수를 쓸 수 있습니다. `for await...in`은 없습니다(SyntaxError).
+- `break`, `return`, `throw`로 반복을 빠져나가면 이터레이터의 `return()`을 호출하고 그 결과를 기다립니다. 정리 코드(`finally`)가 실행됩니다.
+- 이터레이터가 거부되거나 일반 이터러블의 요소가 거부된 프로미스이면 반복문이 예외를 던집니다. try...catch로 잡습니다.
+- async 함수 밖의 `for await`는 SyntaxError이고, `for...of`로 비동기 이터러블을 순회하면 TypeError입니다.
+- Node.js의 Readable 스트림과 `readline` 인터페이스는 비동기 이터러블이라 `for await (const line of rl)`로 읽습니다.
+- 값이 프로미스가 아닌 일반 배열에는 `for...of`를 씁니다. `for await`는 값마다 마이크로태스크 지연을 더할 뿐입니다.
+
+이미 시작된 프로미스 배열을 `for await`로 순회하는 것은 순차 `await`와 같은 위험을 가집니다. 앞 프로미스를 기다리는 동안 뒤 프로미스가 거부되면 처리되지 않은 거부가 됩니다. 이런 경우에는 `Promise.all`을 씁니다.
+
+`Array.fromAsync`(ES2026)는 비동기 이터러블이나 프로미스 배열을 `for await...of`처럼 순서대로 기다려 배열로 모읍니다. 두 번째 인수로 변환 함수를 줄 수 있습니다.
+
+```js
+await Array.fromAsync(ticks())                // [1, 2]
+await Array.fromAsync([Promise.resolve(1), 2]) // [1, 2]
+await Array.fromAsync([1, 2], async (x) => x * 2) // [2, 4]
+```
+
+## Async Iterator·Async Generator
+
+비동기 이터레이터는 `next()`가 `{ value, done }` 객체를 프로미스로 감싸 반환하는 이터레이터입니다. 비동기 이터러블은 `[Symbol.asyncIterator]()` 메서드로 그 이터레이터를 돌려주는 객체입니다. `for await...of`가 이 프로토콜을 사용합니다(동기 이터레이터는 35편).
+
+```js
+const countdown = {
+  [Symbol.asyncIterator]() {
+    let n = 3
+    return {
+      async next() {
+        await sleep(10)
+        if (n === 0) return { done: true }
+        return { value: n--, done: false }
+      },
+    }
+  },
+}
+for await (const n of countdown) console.log(n) // 3, 2, 1
+```
+
+직접 구현하는 대신 비동기 제너레이터를 씁니다. `async function*`으로 선언하며 본문에서 `await`와 `yield`를 모두 쓸 수 있습니다(제너레이터는 42편).
+
+```js
+async function* countdown(n) {
+  while (n > 0) {
+    await sleep(10)
+    yield n--
+  }
+}
+for await (const n of countdown(3)) console.log(n)
+// 3, 2, 1
+```
+
+| 구분 | 제너레이터 | 비동기 제너레이터 |
+|------|------------|-------------------|
+| 선언 | `function*` | `async function*` |
+| `next()` 반환 | `{ value, done }` | `{ value, done }`의 프로미스 |
+| 프로토콜 심볼 | `Symbol.iterator` | `Symbol.asyncIterator` |
+| 순회 | `for...of` | `for await...of` |
+| 본문의 `await` | 불가 | 가능 |
+
+- 호출해도 본문은 실행되지 않고 제너레이터 객체만 반환됩니다. 첫 `next()`에서 시작합니다.
+- `next()`, `return()`, `throw()`가 모두 프로미스를 반환합니다.
+- `yield 프로미스`는 프로미스를 기다린 결과를 내보냅니다. 따로 `yield await`를 쓰지 않아도 됩니다. `return 프로미스`도 마찬가지로 기다립니다.
+- `next()`를 기다리지 않고 연속으로 호출해도 요청이 큐에 쌓여 호출 순서대로 처리됩니다.
+- 비동기 제너레이터 객체는 `[Symbol.asyncIterator]()`가 자기 자신을 반환하므로 한 번만 순회할 수 있습니다.
+- `next(값)`으로 보낸 값이 `yield` 식의 결과가 되는 양방향 통신도 제너레이터와 같습니다.
+- 화살표 형태는 없습니다.
+
+`yield*`는 다른 비동기 이터러블(또는 일반 이터러블)에 위임합니다.
+
+```js
+async function* all() {
+  yield* countdown(2) // 2, 1
+  yield* [10, 20]     // 일반 이터러블도 위임 가능
+}
+```
+
+객체와 클래스에서는 `async *이름() {}` 형태로 메서드를 만듭니다. 클래스를 비동기 이터러블로 만드는 표준적인 방법입니다.
+
+```js
+class Pager {
+  constructor(pages) { this.pages = pages }
+  async *[Symbol.asyncIterator]() {
+    for (const p of this.pages) yield loadPage(p)
+  }
+}
+for await (const page of new Pager([1, 2])) {
+  console.log(page) // 페이지가 하나씩 도착한다
+}
+```
+
+소비자가 `break`하면 `return()`이 호출되어 `finally`가 실행됩니다. 연결이나 파일 같은 자원을 닫는 자리입니다.
+
+```js
+async function* lines() {
+  try {
+    yield 'a'
+    yield 'b'
+  } finally {
+    console.log('close') // 소비자가 break해도 실행된다
+  }
+}
+```
+
+페이지네이션 API를 항목 단위 흐름으로 바꾸는 것이 대표적인 용도입니다. 소비자는 페이지 경계를 모르고, `break`하면 이후 페이지는 요청하지 않습니다.
+
+```js
+async function* fetchAll(url) {
+  let next = url
+  while (next) {
+    const page = await fetchPage(next) // { items, next }
+    yield* page.items
+    next = page.next
+  }
+}
+```
+
+본문에서 던진 에러는 소비자의 `next()` 프로미스를 거부시키고, `for await`에서 예외가 됩니다. 그 뒤 제너레이터는 종료 상태입니다.
+
+## 생성자에 async를 못 쓰는 이유
+
+생성자는 `new`가 만든 인스턴스를 돌려주는 함수이고, async 함수는 항상 프로미스를 돌려줍니다. 두 역할이 충돌하므로 명세는 클래스의 `constructor`에 `async`를 붙이는 것을 구문 오류로 정했습니다.
+
+```js
+class User {
+  async constructor() {} // SyntaxError
+}
+```
+
+- `constructor` 안에서는 `await`도 쓸 수 없습니다(SyntaxError). 생성자는 async 함수가 아니기 때문입니다.
+- async 함수는 생성 가능한 함수가 아니므로 `new asyncFn()`은 TypeError입니다.
+- getter와 setter에도 `async`를 붙일 수 없습니다. getter가 프로미스를 반환하는 것은 가능합니다.
+- 생성자가 객체를 `return`하면 `new`의 결과가 그 객체로 바뀌므로 프로미스를 반환하는 방법이 기술적으로는 가능합니다. 그러나 결과가 인스턴스가 아니어서 `instanceof`와 상속이 깨지므로 쓰지 않습니다.
+
+```js
+class Bad { constructor() { return Promise.resolve(1) } }
+new Bad() instanceof Bad     // false
+new Bad() instanceof Promise // true
+```
+
+비동기 초기화가 필요하면 다음 방법을 씁니다.
+
+| 방법 | 형태 | 특징 |
+|------|------|------|
+| 정적 팩토리 | `static async create()` | 완성된 인스턴스만 얻는다. 가장 많이 쓴다 |
+| 초기화 프로미스 보관 | `this.ready = this.#init()` | `new` 뒤에 `await obj.ready` |
+| init 메서드 | `await obj.init()` | 초기화 전 인스턴스가 노출된다 |
+
+```js
+class User {
+  static async create(id) {
+    const user = new User()
+    user.name = await getName(id) // 비동기 초기화
+    return user                   // 완성된 인스턴스
+  }
+}
+const user = await User.create(1)
+```
+
+- 정적 팩토리를 써도 `new User()`로 미완성 인스턴스를 직접 만드는 것을 문법으로 막을 수는 없습니다. 팩토리 사용을 문서로 약속합니다.
+- 초기화 프로미스를 보관하는 방식에서는 아무도 `ready`를 기다리지 않으면 초기화 실패가 처리되지 않은 거부가 됩니다.
+
+```js
+class Db {
+  ready
+  constructor() { this.ready = this.#init() } // 프로미스만 저장
+  async #init() { /* 연결 */ }
+}
+const db = new Db()
+await db.ready
+```
+
+## 핵심 정리
+
+- async 함수는 항상 프로미스를 반환합니다. `return`은 이행, `throw`는 거부가 되고, 본문은 첫 `await` 전까지 동기로 실행됩니다.
+- `await`는 그 함수만 멈추고 이행 값을 돌려주거나 거부 사유를 던집니다. 거부를 잡으려면 `await`하고 try...catch를 씁니다. try 안에서는 `return await`를 씁니다.
+- 독립 작업은 먼저 시작해 `Promise.all`로 기다립니다. `forEach`·`filter` 콜백의 async는 기다려 주지 않으며, 개수 제한이 필요하면 작업자 풀을 씁니다.
+- `await` 누락은 에러 없이 프로미스가 값 자리에 들어가는 실수입니다.
+- 최상위 await는 모듈에서만 가능합니다(ES2022). `for await...of`와 `async function*`(ES2018)는 비동기 이터러블을 소비하고 만듭니다.
+- 생성자는 async로 만들 수 없으므로 `static async` 팩토리를 씁니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="async 함수 f의 본문이 console.log('A'), await null, console.log('B') 순서로 작성되어 있다. f()를 호출한 바로 다음 줄에서 console.log('C')를 실행하면 출력 순서는?"
+  options={['A, B, C', 'A, C, B', 'C, A, B', 'C, B, A']}
+  correctAnswer={2}
+  explanation="async 함수의 본문은 첫 await를 만나기 전까지 호출한 자리에서 동기로 실행되므로 A가 먼저 출력됩니다. await에서 함수가 멈추고 제어가 호출자에게 돌아와 C가 출력되며, 나머지 B는 마이크로태스크로 재개되어 마지막에 출력됩니다. 따라서 A, C, B입니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="async 함수의 try 블록 안에서 return fail()을 쓰고 fail()이 거부되는 프로미스를 반환할 때, 같은 함수의 catch 블록은 어떻게 되는가?"
+  options={['catch 블록이 실행된다', 'catch 블록은 실행되지 않고, 함수가 반환한 프로미스가 거부된다', 'catch 블록이 실행되지 않고 SyntaxError가 발생한다', 'finally 블록이 있을 때만 catch 블록이 실행된다']}
+  correctAnswer={2}
+  explanation="return fail()은 프로미스를 그대로 반환값으로 넘기고 함수를 끝내므로 거부가 try 블록을 벗어난 뒤에 일어나 catch가 처리하지 못합니다. return await fail()로 바꾸면 거부가 try 안에서 예외로 던져져 catch가 실행됩니다. SyntaxError는 발생하지 않고, finally 유무는 catch 실행과 관계가 없습니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="배열의 forEach에 async 콜백을 넘기고 바로 다음 줄에서 결과를 사용할 때 옳은 설명은?"
+  options={['forEach가 콜백이 반환한 프로미스를 모두 기다린 뒤 다음 줄이 실행된다', 'forEach는 콜백이 반환한 프로미스를 기다리지 않으므로 다음 줄이 콜백의 await 이후 코드보다 먼저 실행된다', 'async 콜백을 forEach에 넘기면 SyntaxError가 발생한다', 'forEach가 프로미스 배열을 반환하므로 await forEach로 기다릴 수 있다']}
+  correctAnswer={2}
+  explanation="forEach는 콜백의 반환값을 버리고 undefined를 반환하므로 프로미스를 기다리지 않습니다. 콜백 안의 await 이후 코드는 나중에 실행됩니다. 구문 오류는 없으며, await forEach는 undefined를 기다릴 뿐입니다. 기다려야 하면 for...of를 쓰거나 map과 Promise.all을 씁니다."
+/>
+
+## 참고 자료
+
+- [MDN — async function](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function)
+- [MDN — await](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/await)
+- [MDN — for await...of](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/for-await...of)
+- [MDN — Array.fromAsync()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/fromAsync)
+- [ECMA-262 — Async Function Definitions](https://tc39.es/ecma262/#sec-async-function-definitions)
+- [V8 — Top-level await](https://v8.dev/features/top-level-await)
+- [Node.js — process exit codes](https://nodejs.org/api/process.html#exit-codes)
+- [TC39 Finished Proposals](https://github.com/tc39/proposals/blob/main/finished-proposals.md)
+- [ESLint — no-await-in-loop](https://eslint.org/docs/latest/rules/no-await-in-loop)
+- [typescript-eslint — no-floating-promises](https://typescript-eslint.io/rules/no-floating-promises/)

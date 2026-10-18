@@ -1,0 +1,366 @@
+---
+title: '05. process: 인수·환경변수·종료'
+description: 'process 객체로 명령행 인수, 환경변수, 작업 디렉터리를 읽고, 종료 코드와 종료 이벤트, 프로세스 식별자와 제목을 다루는 방법을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** `process` 객체로 실행 시점의 입력(인수·환경변수·작업 디렉터리)을 읽고, 종료 코드와 종료 이벤트의 동작 규칙을 설명할 수 있습니다.
+</Callout>
+
+## process 객체
+
+`process`는 현재 실행 중인 Node.js 프로세스의 정보를 읽고 제어하는 객체입니다. 전역 객체라서 import 없이 쓸 수 있고, 명시적으로 불러올 수도 있습니다.
+
+```js
+import process from 'node:process'
+import { argv, env, exit } from 'node:process'
+
+process === globalThis.process // true
+```
+
+- 이 편의 코드는 ES Modules 기준입니다. CommonJS에서는 `require('node:process')`로 같은 객체를 얻습니다.
+- `process`는 `EventEmitter`의 인스턴스입니다. `process.on('exit', fn)`처럼 이벤트를 듣습니다(자세히는 21편).
+- 속성 대부분은 한 프로세스 안에서 읽는 값이고, 일부(`exit`, `chdir`)는 프로세스 전체를 바꿉니다.
+- Worker 스레드에서는 `chdir`가 없고 `exit`가 스레드만 끝내는 등 동작이 다릅니다.
+
+## 명령행 인수
+
+### process.argv
+
+`process.argv`는 실행할 때 넘긴 명령행 인수를 담은 문자열 배열입니다.
+
+```bash
+node args.mjs one two=three
+```
+
+```js
+console.log(process.argv)
+// [
+//   '/usr/local/bin/node',   (process.execPath)
+//   '/work/args.mjs',        (진입 파일의 절대 경로)
+//   'one',
+//   'two=three'
+// ]
+```
+
+- 0번은 node 실행 파일의 경로, 1번은 진입 파일의 절대 경로입니다.
+- 사용자가 넘긴 인수는 2번부터라서 보통 `process.argv.slice(2)`로 씁니다.
+- 모든 요소가 문자열입니다. 숫자가 필요하면 `Number(process.argv[2])`로 변환합니다.
+- `--flag=value` 같은 형식을 해석해 주지 않습니다. 파싱은 직접 하거나 `util.parseArgs`를 씁니다(자세히는 28편).
+
+### process.argv0
+
+`process.argv0`는 시작할 때 `argv[0]`으로 전달된 원래 값을 읽기 전용으로 복사한 것입니다. `argv[0]`은 실행 파일의 실제 경로로 바뀌어 있을 수 있어서, 다른 이름으로 호출된 경우에 원래 이름을 확인할 때 씁니다.
+
+```bash
+bash -c 'exec -a customArgv0 ./node'
+```
+
+```js
+// REPL에서
+process.argv[0] // '/Volumes/code/node/out/Release/node'
+process.argv0   // 'customArgv0'
+```
+
+### process.execArgv
+
+`process.execArgv`는 node 자체에 넘긴 옵션만 모은 배열입니다. `argv`에는 이 옵션이 들어 있지 않습니다.
+
+```bash
+node --max-old-space-size=100 script.mjs --version
+```
+
+```js
+process.execArgv // ['--max-old-space-size=100']
+process.argv.slice(2) // ['--version']
+```
+
+- 스크립트 이름 뒤의 옵션은 스크립트의 인수이고, 앞의 옵션은 node의 옵션입니다.
+
+## 환경변수
+
+`process.env`는 현재 프로세스의 환경변수를 담은 객체입니다. 환경변수는 운영체제가 프로세스를 시작할 때 복사해 주는 이름-값 쌍입니다.
+
+```js
+console.log(process.env.HOME)    // '/home/kim'
+console.log(process.env.NOPE)    // undefined
+process.env.MODE = 'debug'
+console.log(process.env.MODE)    // 'debug'
+delete process.env.MODE
+```
+
+- 없는 변수를 읽으면 `undefined`입니다. 에러가 아닙니다.
+- 값을 바꿔도 프로세스 밖에는 반영되지 않습니다. 부모 셸의 변수는 그대로이고, 이후 만드는 자식 프로세스에만 전달됩니다.
+- 제거는 `delete`로 합니다. `undefined`를 대입해도 지워지지 않습니다.
+- Windows에서는 변수 이름의 대소문자를 구분하지 않아서 `env.TEST`와 `env.test`가 같은 값입니다.
+- Worker 스레드는 부모의 `process.env` 복사본을 받습니다. 한쪽의 변경은 다른 쪽에 보이지 않습니다.
+
+### 환경변수는 문자열
+
+`process.env`의 값은 항상 문자열입니다. 문자열이 아닌 값을 대입하면 문자열로 바뀝니다. 이 암묵적 변환은 v10.0.0부터 비권장이고, 공식 문서는 이후 버전이 문자열·숫자·불리언이 아닌 값에 에러를 던질 수 있다고 적습니다.
+
+```js
+process.env.PORT = 3000
+typeof process.env.PORT // 'string'
+process.env.FLAG = undefined
+process.env.FLAG        // 'undefined' (문자열)
+process.env.FLAG = null
+process.env.FLAG        // 'null' (문자열)
+```
+
+**흔한 실수:** 환경변수를 불리언이나 숫자로 착각하는 것입니다.
+
+```js
+// DEBUG=false 로 실행했을 때
+if (process.env.DEBUG) { /* ❌ 'false'는 truthy */ }
+if (process.env.DEBUG === 'true') { /* ✅ */ }
+
+const port = Number(process.env.PORT ?? 3000) // ✅ 변환
+```
+
+- 빈 문자열을 제외한 모든 문자열은 truthy입니다. `'false'`와 `'0'`도 참으로 평가됩니다.
+- 값이 없을 때를 위한 기본값은 `??`로 지정합니다. `||`는 빈 문자열까지 기본값으로 바꿉니다.
+
+## 작업 디렉터리
+
+### process.cwd
+
+`process.cwd()`는 프로세스의 현재 작업 디렉터리(current working directory)를 절대 경로 문자열로 돌려줍니다. 스크립트 파일이 있는 위치가 아니라 node를 실행한 위치입니다.
+
+```bash
+cd /work/app
+node src/main.mjs
+```
+
+```js
+process.cwd() // '/work/app' (src가 아님)
+```
+
+- 상대 경로(`./data.json`)는 `cwd`를 기준으로 해석됩니다. 다른 위치에서 실행하면 같은 코드가 다른 파일을 가리킵니다.
+- 스크립트 파일 기준의 경로가 필요하면 `cwd()`가 아니라 파일의 위치를 써야 합니다(자세히는 07편).
+
+### process.chdir
+
+`process.chdir(directory)`는 현재 작업 디렉터리를 바꿉니다. 디렉터리가 없는 등 실패하면 예외를 던집니다.
+
+```js
+try {
+  process.chdir('/tmp')
+  process.cwd() // '/tmp'
+  process.chdir('/nonexistent')
+} catch (err) {
+  err.code // 'ENOENT'
+}
+```
+
+- Worker 스레드에서는 쓸 수 없습니다.
+- `chdir`는 프로세스 전체의 상태를 바꿉니다. 이후 모든 상대 경로 해석이 달라지므로 라이브러리 코드에서는 쓰지 않는 편이 안전합니다. 경로는 절대 경로로 만들어 넘깁니다(자세히는 15편).
+
+## 프로세스 종료
+
+### process.exit
+
+`process.exit([code])`는 프로세스를 즉시 동기적으로 종료합니다. `code`를 생략하면 `process.exitCode`가 있으면 그 값, 없으면 `0`을 씁니다.
+
+```js
+process.exit(1) // 종료 코드 1로 즉시 종료
+```
+
+- 종료 전에 `'exit'` 이벤트 리스너는 모두 실행됩니다.
+- 대기 중인 비동기 작업은 완료를 기다리지 않고 버려집니다. `process.stdout`과 `process.stderr`로의 쓰기도 포함됩니다.
+- Worker 스레드에서는 프로세스가 아니라 그 스레드만 끝납니다.
+- 인수는 숫자 또는 정수를 나타내는 문자열(`'1'`)만 받습니다(v20.0.0부터). 그 밖의 값은 에러입니다.
+
+**흔한 실수:** 출력 직후 `exit`를 호출해 출력이 잘리는 것입니다. 표준 출력으로의 쓰기가 비동기일 수 있기 때문입니다(자세히는 06편).
+
+```js
+printUsage()
+process.exit(1)       // ❌ 출력이 일부 사라질 수 있음
+
+printUsage()
+process.exitCode = 1  // ✅ 이벤트 루프가 비면 자연 종료
+```
+
+- 작업이 끝날 때까지 기다리면 프로세스는 스스로 끝납니다. 대부분의 경우 `exit`를 직접 부를 필요가 없습니다.
+- 에러 때문에 종료해야 한다면 처리하지 않은 에러를 던져 종료되게 두는 편이 `exit`보다 안전하다고 공식 문서가 설명합니다.
+
+### 종료 코드
+
+종료 코드(exit code)는 프로세스가 끝날 때 운영체제에 돌려주는 정수입니다. 셸과 CI는 이 값으로 성공과 실패를 판단합니다. `0`이 성공이고 0이 아닌 값은 실패입니다.
+
+```bash
+node -e 'process.exit(42)'; echo $?
+# 42
+```
+
+Node.js가 쓰는 대표적인 코드입니다.
+
+| 코드 | 의미 |
+|------|------|
+| 0 | 성공. 처리할 비동기 작업이 남지 않고 끝남 |
+| 1 | 처리되지 않은 예외로 종료 |
+| 9 | 잘못된 인수. 알 수 없는 옵션이거나 값이 빠진 옵션 |
+| 13 | 끝나지 않는 최상위 await(해결되지 않은 Promise) |
+| 128 + N | 시그널 N을 받고 종료. 예: SIGABRT(6)는 134 |
+
+- `2`는 Bash가 내장 명령 오용에 쓰려고 예약한 값이라서 Node.js는 쓰지 않습니다.
+- 자신의 프로그램에서 쓰는 종료 코드는 0 이외의 값 중에서 규약을 정해 씁니다(자세히는 28편).
+
+### process.exitCode
+
+`process.exitCode`는 프로세스가 정상적으로 끝나거나, 코드 없이 `process.exit()`가 호출될 때 쓸 종료 코드입니다. 기본값은 `undefined`입니다.
+
+```bash
+node -e 'process.exitCode = 9'; echo $?
+# 9
+node -e 'process.exitCode = 9; process.exit(42)'; echo $?
+# 42
+```
+
+- 대입해 두면 프로세스는 하던 일을 마친 뒤 그 코드로 끝납니다. 출력이 잘리지 않아서 `exit()`보다 권장됩니다.
+- `exit(42)`처럼 `exit`에 직접 넘긴 값이 `exitCode`보다 우선합니다.
+- 숫자 또는 정수 문자열만 받습니다(v20.0.0부터). 정수가 아니거나 범위를 벗어난 값은 `ERR_INVALID_ARG_TYPE`·`ERR_OUT_OF_RANGE`로 던집니다.
+- Node.js가 암묵적으로 정하는 코드(예: 해결되지 않은 최상위 await의 13)보다 직접 대입한 값이 우선합니다.
+
+```bash
+node --input-type=module -e 'await new Promise(() => {})'
+echo $?   # 13
+node --input-type=module \
+  -e 'process.exitCode = 9; await new Promise(() => {})'
+echo $?   # 9
+```
+
+## 종료 이벤트
+
+종료 즈음에 `process`는 두 이벤트를 냅니다. 종료 경로에 따라 둘 중 하나만 오기도 합니다.
+
+| 항목 | `'beforeExit'` | `'exit'` |
+|------|----------------|----------|
+| 시점 | 이벤트 루프가 비어 종료하기 직전 | 프로세스가 끝나기 직전 |
+| `process.exit()` 호출 시 | 발생하지 않음 | 발생 |
+| 처리되지 않은 예외 시 | 발생하지 않음 | 발생 |
+| 비동기 작업 | 가능. 일을 예약하면 프로세스가 계속됨 | 불가. 동기 코드만 가능 |
+| 종료를 막을 수 있는가 | 일을 예약하면 연장됨 | 막을 수 없음 |
+
+### beforeExit
+
+`'beforeExit'`은 이벤트 루프가 비어서 더 할 일이 없을 때 발생합니다. 리스너가 비동기 작업을 예약하면 프로세스는 계속 실행됩니다. 리스너는 `process.exitCode` 값을 인수로 받습니다.
+
+```js
+process.on('beforeExit', (code) => {
+  console.log('beforeExit', code)
+})
+console.log('main')
+// main
+// beforeExit 0
+```
+
+- 새 작업을 예약하면 그 작업이 끝난 뒤 이벤트 루프가 다시 비면서 `'beforeExit'`가 또 발생합니다. 같은 조건으로 계속 예약하면 끝나지 않습니다.
+- `process.exit()`나 처리되지 않은 예외로 끝나는 경우에는 발생하지 않습니다.
+- 정리 작업을 하려는 용도로 `'exit'` 대신 쓰지 않습니다. 추가 작업을 예약하려는 목적일 때만 씁니다.
+
+### exit
+
+`'exit'`는 프로세스가 끝나기 직전에 발생하고 종료 코드를 인수로 받습니다. `process.exit()`로 끝나든 이벤트 루프가 비어서 끝나든 발생합니다.
+
+```js
+process.on('exit', (code) => {
+  console.log(`exit ${code}`)
+  setTimeout(() => console.log('never'), 0)
+})
+process.exitCode = 3
+// exit 3  ('never'는 출력되지 않음)
+```
+
+- 리스너는 동기 코드만 실행할 수 있습니다. 리스너가 끝나면 프로세스는 즉시 끝나고 이벤트 루프에 남은 작업은 버려집니다.
+- 종료를 취소할 수 없습니다. 파일 닫기 같은 동기 정리만 합니다.
+
+실행 순서는 다음과 같습니다.
+
+```js
+process.on('beforeExit', () => console.log('beforeExit'))
+process.on('exit', () => console.log('exit'))
+console.log('main')
+// main → beforeExit → exit
+// process.exit()를 쓰면: main → exit
+```
+
+## 프로세스 식별: pid, ppid, title
+
+### process.pid
+
+`process.pid`는 현재 프로세스의 ID(process identifier)입니다. 운영체제가 실행 중인 프로세스마다 붙이는 정수이고, 같은 시점에 겹치지 않습니다. 다시 실행하면 값이 달라집니다.
+
+```js
+console.log(process.pid) // 18432
+```
+
+- 로그에 남기거나 PID 파일을 만들 때, `process.kill(pid, signal)`로 신호를 보낼 때 씁니다.
+
+### process.ppid
+
+`process.ppid`는 부모 프로세스의 ID입니다. 이 프로세스를 실행한 쪽(셸, 다른 node 프로세스 등)의 PID입니다.
+
+```js
+console.log(process.ppid) // 9120
+```
+
+- 부모 프로세스가 무엇이냐에 따라 값이 달라집니다. 셸에서 실행하면 셸의 PID입니다.
+
+### process.title
+
+`process.title`은 프로세스 목록(`ps` 등)에 표시되는 제목입니다. 읽을 수도 있고 대입해서 바꿀 수도 있습니다.
+
+```js
+process.title = 'my-worker'
+// ps에서 이 프로세스가 'my-worker'로 보임
+```
+
+- 길이 제한은 플랫폼마다 다릅니다. Linux와 macOS에서는 실행 파일 이름과 명령행 인수를 합친 길이까지로 제한됩니다.
+- 활동 모니터(macOS)나 서비스 관리자(Windows) 같은 도구에는 정확히 반영되지 않을 수 있습니다.
+
+## 핵심 정리
+
+- `process.argv`는 `[node 경로, 진입 파일, ...사용자 인수]`이고 모두 문자열입니다. node 옵션은 `execArgv`에 따로 있습니다.
+- `process.env`의 값은 항상 문자열이라서 `'false'`가 truthy이고, 숫자와 불리언은 직접 변환합니다. 제거는 `delete`입니다.
+- `cwd()`는 스크립트 위치가 아니라 node를 실행한 위치이며, 상대 경로의 기준입니다.
+- 종료 코드 0은 성공이고 그 밖은 실패입니다. 비동기 출력이 있으면 `exit()` 대신 `exitCode`를 대입해 자연 종료시킵니다.
+- `'beforeExit'`는 루프가 빌 때 발생해 일을 더 예약할 수 있고 `exit()`로 끝나면 발생하지 않습니다. `'exit'`는 항상 발생하지만 동기 코드만 가능합니다.
+- `pid`와 `ppid`는 프로세스 ID이고 `title`은 프로세스 목록에 보이는 이름입니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="node app.mjs 8080 --verbose 로 실행했을 때 process.argv.slice(2)의 값은?"
+  options={['문자열 8080과 문자열 --verbose가 담긴 배열', '숫자 8080과 불리언 true가 담긴 배열', '진입 파일 이름, 8080, --verbose가 담긴 배열', 'node 경로와 진입 파일 경로가 담긴 배열']}
+  correctAnswer={1}
+  explanation="argv의 0번은 node 실행 파일 경로, 1번은 진입 파일의 절대 경로이므로 slice(2)는 사용자가 넘긴 인수만 남깁니다. 모든 요소는 문자열이라서 숫자나 불리언으로 바뀌지 않고, --verbose도 해석되지 않고 문자열 그대로 담깁니다."
+  optionExplanations={['정답. 사용자 인수는 2번부터이며 문자열이다', '인수는 자동으로 숫자나 불리언으로 변환되지 않는다', '진입 파일 경로는 argv의 1번이라서 slice(2)에는 포함되지 않는다', 'node 경로와 진입 파일은 앞의 두 요소이고 slice(2)가 제외한다']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="DEBUG=false node app.mjs 로 실행했을 때 if (process.env.DEBUG) 조건의 결과는?"
+  options={['거짓이다. false 문자열은 거짓으로 변환된다', '참이다. 값이 문자열 false라서 비어 있지 않다', 'TypeError가 발생한다', 'undefined라서 거짓이다']}
+  correctAnswer={2}
+  explanation="process.env의 값은 항상 문자열이고 빈 문자열이 아닌 문자열은 truthy입니다. 문자열 false도 참으로 평가되므로 === 비교로 문자열을 확인하거나 직접 변환해야 합니다."
+  optionExplanations={['문자열은 내용과 상관없이 비어 있지 않으면 참이다', '정답. 비어 있지 않은 문자열은 truthy이다', '환경변수를 읽는 것은 에러를 일으키지 않는다', '변수가 설정되어 있으므로 undefined가 아니라 문자열 false이다']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="exit 이벤트와 beforeExit 이벤트의 설명으로 맞는 것은?"
+  options={['process.exit()를 호출하면 beforeExit가 먼저 발생한다', 'exit 리스너 안에서 setTimeout으로 예약한 작업은 실행된다', 'beforeExit 리스너가 비동기 작업을 예약하면 프로세스가 계속 실행된다', 'exit는 이벤트 루프가 비어서 끝날 때는 발생하지 않는다']}
+  correctAnswer={3}
+  explanation="beforeExit는 이벤트 루프가 비었을 때 발생하며 리스너가 비동기 작업을 예약하면 프로세스가 이어집니다. process.exit()로 끝나면 beforeExit는 발생하지 않고 exit만 발생하며, exit 리스너가 끝나면 프로세스가 즉시 끝나서 예약한 타이머는 실행되지 않습니다."
+  optionExplanations={['process.exit()로 끝나면 beforeExit는 발생하지 않는다', 'exit 리스너 뒤에는 이벤트 루프를 돌리지 않으므로 타이머가 실행되지 않는다', '정답. beforeExit에서 예약한 비동기 작업이 끝나야 프로세스가 끝난다', 'exit는 exit()로 끝나는 경우와 루프가 비어 끝나는 경우 모두 발생한다']}
+/>
+
+## 참고 자료
+
+- [Node.js — process](https://nodejs.org/api/process.html)
+- [Node.js — process: process.exit()와 process.exitCode](https://nodejs.org/api/process.html#processexitcode_1)
+- [Node.js — process: Exit codes](https://nodejs.org/api/process.html#exit-codes)
+- [Node.js — process: A note on process I/O](https://nodejs.org/api/process.html#a-note-on-process-io)
+- [Node.js — Globals: process](https://nodejs.org/api/globals.html#process)

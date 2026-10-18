@@ -1,0 +1,445 @@
+---
+title: '09. ES Modules'
+description: 'import·export 문법과 default·named 내보내기, 동적 import와 top-level await, 파일 형식 판별 규칙, CommonJS와 서로 부르는 방법, 라이브 바인딩을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** ES Modules의 문법과 동작 규칙을 설명하고, Node.js가 파일을 CommonJS와 ESM 중 무엇으로 읽는지 판별하며, 두 시스템이 서로를 부르는 방법을 구분할 수 있습니다.
+</Callout>
+
+## ES Modules
+
+ES Modules(ESM)는 JavaScript 언어 표준의 모듈 시스템입니다. `import`와 `export` 문법으로 파일 사이의 의존 관계를 선언합니다. 브라우저와 Node.js가 같은 문법을 씁니다. Node.js 문서의 안정성 지수는 Stable(2.0)이고 v15.3.0부터 안정 상태입니다.
+
+CommonJS(08편)와 가장 큰 차이는 구조를 코드 실행 전에 분석한다는 점입니다.
+
+| 항목 | CommonJS | ES Modules |
+|------|----------|------------|
+| 문법 | `require()`, `module.exports` | `import`, `export` |
+| 의존 관계 파악 | 실행 중에 호출될 때 | 실행 전에 정적으로 분석 |
+| 로딩 | 동기 | 비동기 |
+| 내보낸 값 | 값의 복사본 | 원본에 연결된 읽기 전용 바인딩 |
+| 파일 확장자 | 생략 가능 | 상대 경로는 생략 불가 |
+| 최상위 `this` | `module.exports` | `undefined` |
+| 엄격 모드 | 선택 | 항상 켜짐 |
+
+ESM에는 CommonJS의 래퍼 함수 변수가 없습니다. `require`, `module`, `exports`, `__filename`, `__dirname`은 ESM에서 `ReferenceError`입니다. 대응하는 기능은 다음과 같습니다(자세히는 07편).
+
+| CommonJS | ES Modules |
+|----------|------------|
+| `__filename` | `import.meta.filename` |
+| `__dirname` | `import.meta.dirname` |
+| `require.main === module` | `import.meta.main` |
+| `require.resolve()` | `import.meta.resolve()` |
+| 파일의 URL | `import.meta.url` |
+
+`import.meta.filename`과 `import.meta.dirname`은 v24.0.0과 v22.16.0에서 Stable이 되었고 `file:` 모듈에서만 쓸 수 있습니다. `import.meta.main`은 v24.2.0과 v22.18.0에 추가되었고 안정성 지수는 1.0(Early development)입니다.
+
+## import
+
+`import` 선언은 다른 모듈의 내보낸 값을 가져옵니다. 파일 맨 위가 아니어도 되지만, 모듈 최상위에서만 쓸 수 있고 실행 전에 끌어올려져(호이스팅) 평가됩니다.
+
+```js
+import { readFile } from 'node:fs/promises'
+import path from 'node:path'
+import * as os from 'node:os'
+import './setup.js'          // 값 없이 실행만
+import { a as b } from './x.js' // 이름 바꾸기
+```
+
+| 형태 | 가져오는 것 |
+|------|-------------|
+| `import x from 'm'` | default export |
+| `import { a } from 'm'` | named export `a` |
+| `import { a as b } from 'm'` | named export `a`를 `b`로 |
+| `import * as ns from 'm'` | 모든 export를 담은 네임스페이스 객체 |
+| `import 'm'` | 부수 효과만(값 없음) |
+
+- 상대 경로 지정자는 확장자를 반드시 씁니다. 폴더 지정자도 `./dir/index.js`처럼 파일까지 씁니다. 생략하면 `ERR_MODULE_NOT_FOUND`입니다.
+- 패키지 이름 같은 bare specifier는 확장자가 필요 없습니다(자세히는 10편).
+- 가져온 이름에는 재할당할 수 없습니다. `count = 5`는 `TypeError: Assignment to constant variable.`입니다.
+- 모듈이 없는 export를 요청하면 실행 전에 `SyntaxError: ... does not provide an export named 'zzz'`가 납니다.
+- 같은 모듈을 여러 번 import해도 한 번만 실행하고 결과를 캐시합니다.
+
+```js
+console.log('A')
+import './side.js' // side.js가 'B'를 출력
+console.log('C')
+// B, A, C (import가 먼저 평가됨)
+```
+
+**흔한 실수:** `import`를 `if` 안이나 함수 안에 쓰는 것입니다. 조건부로 불러오려면 동적 `import()`를 씁니다.
+
+## export
+
+`export`는 모듈의 값을 밖으로 내보냅니다. 내보내지 않은 값은 모듈 안에서만 보입니다. 내보내는 방식은 두 가지입니다.
+
+```js
+export const PI = 3.14        // 선언과 함께
+export function area(r) {}    // 함수 선언과 함께
+const secret = 1
+export { secret as key }      // 목록으로, 이름 바꾸기
+export * from './other.js'    // 다른 모듈의 named를 다시 내보냄
+export { x } from './other.js' // 일부만 다시 내보냄
+```
+
+- `export` 뒤에는 선언(`const`, `let`, `function`, `class`)이나 `{ ... }` 목록이 옵니다. `export 5`는 문법 오류입니다.
+- `export * from`은 default를 다시 내보내지 않습니다. default는 `export { default } from './x.js'`로 따로 씁니다.
+- 내보내기는 선언한 이름에 연결되며 값을 복사하지 않습니다(아래 "라이브 바인딩").
+- 모듈 최상위가 아닌 곳에서 `export`를 쓸 수 없습니다.
+
+## default export
+
+default export는 모듈의 대표 값 하나를 내보내는 방식입니다. 모듈당 하나만 쓸 수 있습니다.
+
+```js
+// greet.js
+export default function greet() { return 'hi' }
+
+// main.js
+import greet from './greet.js'
+import hello from './greet.js' // 이름은 가져오는 쪽이 정함
+```
+
+- 가져오는 쪽이 이름을 자유롭게 정합니다. 팀 안에서 이름이 제각각이 될 수 있습니다.
+- `export default`는 이름 없는 함수·클래스·표현식을 받을 수 있습니다. `export default 42`, `export default () => {}`도 유효합니다.
+- default는 이름이 `default`인 named export의 문법 설탕입니다. `import { default as x } from 'm'`과 `import x from 'm'`은 같습니다.
+- 두 번째 `export default`는 SyntaxError입니다.
+
+## named export
+
+named export는 이름을 붙여 여러 값을 내보내는 방식입니다. 가져오는 쪽은 같은 이름을 중괄호로 지정합니다.
+
+```js
+// math.js
+export const PI = 3.14
+export function add(a, b) { return a + b }
+
+// main.js
+import { PI, add } from './math.js'
+import { add as plus } from './math.js'
+```
+
+| 항목 | default | named |
+|------|---------|-------|
+| 개수 | 모듈당 1개 | 제한 없음 |
+| import 문법 | 이름 지정 자유, 중괄호 없음 | 내보낸 이름과 일치, 중괄호 |
+| 이름 오타 | 검출 불가 | 실행 전 SyntaxError |
+| 일괄 가져오기 | `import * as ns`의 `ns.default` | `import * as ns`의 `ns.이름` |
+
+두 방식을 함께 쓸 수 있습니다.
+
+```js
+export default function main() {}
+export const version = '1.0'
+// import main, { version } from './app.js'
+```
+
+**흔한 실수:** default를 중괄호로 가져오는 것입니다. `import { greet } from './greet.js'`는 default를 가져오지 못하고 SyntaxError입니다. 반대로 named를 중괄호 없이 가져오면 default를 찾습니다.
+
+## 라이브 바인딩
+
+ESM의 import는 값의 복사가 아니라 내보내는 쪽 변수에 연결된 읽기 전용 바인딩(live binding)입니다. 내보내는 모듈이 값을 바꾸면 가져온 쪽에서도 바뀐 값이 보입니다.
+
+```js
+// counter.mjs
+export let count = 0
+export function inc() { count++ }
+
+// main.mjs
+import { count, inc } from './counter.mjs'
+console.log(count) // 0
+inc()
+console.log(count) // 1
+count = 5          // TypeError (가져온 쪽은 수정 불가)
+```
+
+- 값을 바꿀 수 있는 쪽은 변수를 선언한 모듈뿐입니다.
+- CommonJS는 `module.exports`에 넣은 시점의 값을 복사하므로 위 예가 `0`, `0`입니다.
+- 순환 참조에서도 이 연결 덕분에, 아직 초기화되지 않은 변수는 `ReferenceError`가 나고 초기화되면 값이 보입니다.
+- ESM이 CommonJS를 가져올 때는 라이브 바인딩이 지원되지 않습니다. 가져오는 시점의 값입니다.
+- 네임스페이스 객체(`import * as ns`)는 읽기 전용이라 프로퍼티를 추가하거나 바꿀 수 없습니다.
+
+## 동적 import
+
+`import()`는 모듈을 실행 중에 불러오는 표현식이며 Promise를 반환합니다. CommonJS와 ESM 모두에서 쓸 수 있고, 두 종류의 모듈을 모두 불러옵니다.
+
+```js
+const mod = await import('./math.js')
+mod.add(1, 2)       // named export는 프로퍼티
+mod.default         // default export
+
+const { add } = await import('./math.js') // 구조 분해
+```
+
+- 지정자를 변수나 계산식으로 만들 수 있습니다. 정적 `import`는 문자열 리터럴만 받습니다.
+- 반환값은 모듈 네임스페이스 객체입니다. default는 `default` 프로퍼티에 있습니다.
+- 모듈 최상위가 아니어도 되므로 조건부·지연 로딩에 씁니다.
+- 실패하면 Promise가 거부됩니다. `ERR_MODULE_NOT_FOUND`를 `catch`로 처리할 수 있습니다.
+- 두 번째 인수로 import attributes를 전달합니다(아래 "import attributes").
+
+```js
+const name = process.argv[2]
+const plugin = await import(`./plugins/${name}.js`)
+```
+
+**흔한 실수:** 사용자 입력으로 지정자를 만들어 불러오는 것입니다. 임의 파일이 실행될 수 있으므로 허용 목록으로 제한합니다.
+
+## top-level await
+
+top-level await는 모듈 최상위에서 함수 밖에 `await`를 쓰는 기능입니다. ESM에서만 가능하며 Node.js에서는 v14.8.0부터 플래그 없이 씁니다.
+
+```js
+// config.mjs
+const res = await fetch('https://example.com/cfg.json')
+export const config = await res.json()
+
+// main.mjs
+import { config } from './config.mjs'
+// config가 준비된 뒤에 이 모듈이 실행됨
+```
+
+- `await`가 있는 모듈을 import하는 모듈은 그 Promise가 끝날 때까지 평가를 기다립니다. 의존 관계가 길면 시작이 느려집니다.
+- 끝나지 않는 Promise를 기다리면 프로세스가 종료 코드 13으로 끝납니다. 이벤트 루프가 비었는데 최상위 `await`가 아직 풀리지 않은 경우입니다.
+- CommonJS 파일에서는 쓸 수 없습니다. `require()`로 top-level await를 가진 ESM을 불러오면 `ERR_REQUIRE_ASYNC_MODULE`입니다(아래 "CJS에서 ESM 부르기").
+
+```js
+// 순차: 합이 약 2초
+const a = await load('a')
+const b = await load('b')
+// 병렬: 약 1초
+const [c, d] = await Promise.all([load('c'), load('d')])
+```
+
+## package.json의 type 필드
+
+`package.json`의 `type` 필드는 그 패키지 안의 `.js` 파일을 어떤 모듈 시스템으로 읽을지 정합니다. v12.0.0에 추가되었습니다.
+
+```json
+{
+  "name": "my-app",
+  "type": "module"
+}
+```
+
+| type 값 | `.js` 파일 |
+|---------|------------|
+| `"module"` | ES Modules |
+| `"commonjs"` | CommonJS |
+| 없음 | CommonJS가 기본. 문법 감지가 적용될 수 있음(아래 `.js`절) |
+
+- 파일에서 가장 가까운 상위 `package.json`을 위로 찾아 올라가며 읽습니다. `node_modules` 경계나 볼륨 루트에서 멈춥니다.
+- `type`은 `.js` 파일에만 작용합니다. `.mjs`와 `.cjs`는 이 값을 무시합니다.
+- `.json`과 `.node`에는 영향이 없습니다.
+- 하위 폴더에 `{"type":"commonjs"}`만 담은 `package.json`을 두면 그 폴더만 CommonJS로 바꿀 수 있습니다.
+
+## .mjs와 .cjs
+
+확장자가 모듈 시스템을 직접 정합니다. `package.json`의 `type`보다 우선합니다.
+
+| 확장자 | 모듈 시스템 |
+|--------|-------------|
+| `.mjs` | 항상 ES Modules |
+| `.cjs` | 항상 CommonJS |
+| `.js` | `type` 필드 또는 문법 감지로 결정 |
+
+- `.mjs`: `type`이 `commonjs`이거나 없는 프로젝트에서도 한 파일만 ESM으로 쓸 수 있습니다.
+- `.cjs`: `type: "module"` 프로젝트에서 `require`나 `__dirname`이 필요한 설정 파일, 레거시 코드를 두는 용도입니다.
+- 확장자는 `import` 지정자에도 그대로 써야 합니다. `import './a.mjs'`처럼 파일 이름 전체를 씁니다.
+- TypeScript의 대응 확장자는 `.mts`와 `.cts`입니다(자세히는 27편).
+
+## .js 파일이 CJS인지 ESM인지
+
+`.js` 파일의 판별 순서는 다음과 같습니다.
+
+1. 가장 가까운 `package.json`의 `type`이 `"module"`이면 ESM
+2. `type`이 `"commonjs"`이면 CommonJS
+3. `type`이 없으면 문법 감지(syntax detection)가 판단
+
+문법 감지는 `type`이 없는 `.js`에서 ESM 문법이 있는지 파일을 검사합니다. v21.1.0과 v20.10.0에 추가되었고 안정성 지수는 1.2(Release candidate)입니다. v22.7.0과 v20.19.0부터 기본으로 켜져 있습니다.
+
+```js
+// type 필드 없는 package.json 아래의 a.js
+import fs from 'node:fs'
+console.log(typeof fs.readFileSync) // function (ESM으로 실행)
+```
+
+ESM으로 판단하는 단서는 다음과 같습니다.
+
+- `import`나 `export` 문
+- `import.meta`
+- 최상위 `await`
+- 래퍼 변수(`require`, `module` 등)의 최상위 재선언
+
+감지된 단서가 없으면 CommonJS로 실행합니다. 감지에 의존하지 않고 `type`을 명시하는 편이 확실합니다.
+
+`--eval`과 표준 입력은 파일이 아니라서 `--input-type=module` 옵션으로 지정합니다.
+
+```bash
+node --input-type=module -e "import os from 'node:os'"
+```
+
+**흔한 실수:** 두 가지입니다.
+
+- `type: "module"`을 넣고 `require`나 `__dirname`을 쓰는 것입니다. `ReferenceError`가 납니다. 그 파일은 `.cjs`로 바꿉니다.
+- `type`을 넣지 않은 프로젝트에 ESM 문법만 쓰고 동작하는 것을 확인한 뒤 배포하는 것입니다. 문법 감지가 꺼진 구버전이나 도구에서는 `SyntaxError: Cannot use import statement outside a module`입니다.
+
+## CJS에서 ESM 부르기
+
+CommonJS에서 ESM을 불러오는 방법은 두 가지입니다. 동적 `import()`와 `require()`입니다.
+
+```js
+// app.cjs
+async function main() {
+  const { add } = await import('./math.mjs')
+  console.log(add(1, 2)) // 3
+}
+main()
+```
+
+`import()`는 어느 버전에서나 되지만 Promise를 반환해서 CommonJS의 동기 코드 흐름에 쓰기 불편합니다. CommonJS 파일에는 top-level await가 없으므로 함수 안에서 `await`합니다.
+
+### require(esm)
+
+`require()`로 ESM을 동기적으로 불러오는 기능입니다.
+
+| 버전 | 상태 |
+|------|------|
+| v22.0.0, v20.17.0 | 추가(`--experimental-require-module` 플래그 필요) |
+| v22.12.0, v20.19.0 | 플래그 없이 동작 |
+| v22.13.0, v20.19.0 | 실험 경고를 기본으로 출력하지 않음 |
+| v25.4.0 | 실험 단계 해제 |
+
+Node.js 24는 이 기능이 기본으로 켜져 있습니다. `process.features.require_module`로 확인하고, `--no-require-module`로 끌 수 있습니다.
+
+- 대상 모듈이 top-level await를 가지지 않는 완전한 동기 모듈이어야 합니다. 의존하는 모듈 중에 하나라도 있으면 `ERR_REQUIRE_ASYNC_MODULE`입니다.
+- 대상은 `.mjs`, `type: "module"` 아래의 `.js`, 또는 `type`이 `"commonjs"`가 아니면서 ESM 문법이 있는 `.js`입니다.
+- 반환값은 `import()`처럼 모듈 네임스페이스 객체입니다. default export는 `.default`에 있고 `__esModule: true`가 붙습니다.
+
+```js
+// point.mjs: export default class Point {}
+const mod = require('./point.mjs')
+mod.default       // [class Point]
+```
+
+ESM이 내보내기 이름을 문자열 `'module.exports'`로 지정하면 `require()`가 그 값을 그대로 돌려줍니다. v23.0.0과 v22.12.0에 추가되었습니다.
+
+```js
+// point.mjs
+export default class Point {}
+export { Point as 'module.exports' }
+// const Point = require('./point.mjs')  // [class Point]
+```
+
+이 경우 CommonJS는 named export를 잃으므로 필요하면 default의 정적 프로퍼티로 붙입니다.
+
+**흔한 실수:** top-level await가 있는 ESM을 `require()`하는 것입니다. 동적 `import()`로 바꿉니다.
+
+## ESM에서 CJS 부르기
+
+ESM에서는 `import`로 CommonJS 모듈을 가져옵니다. `module.exports` 전체가 default export가 됩니다.
+
+```js
+// lib.cjs
+exports.a = 1
+exports.b = 2
+
+// main.mjs
+import lib from './lib.cjs'     // { a: 1, b: 2 }
+import { a } from './lib.cjs'   // 1 (named 감지)
+import * as ns from './lib.cjs'
+// Object.keys(ns): a, b, default, module.exports
+```
+
+- default import는 항상 `module.exports` 전체입니다. `module.exports = function () {}`처럼 함수를 내보낸 모듈은 `import f from './fn.cjs'`로 가져옵니다.
+- named import는 Node.js가 CommonJS 코드를 정적으로 분석해 `exports.x = ...` 같은 흔한 패턴에서 이름을 찾는 방식(v14.13.0)입니다. 동적으로 만든 이름은 못 찾을 수 있습니다.
+- 안전한 방법은 default로 가져온 뒤 구조 분해하는 것입니다.
+- CommonJS의 named export는 가져오는 시점의 값입니다. 라이브 바인딩이 없습니다.
+- 네임스페이스 객체에는 `default`와 `'module.exports'` 키가 추가로 들어 있습니다.
+
+```js
+import pkg from 'some-cjs-lib'
+const { helper } = pkg // named 감지가 실패해도 안전
+```
+
+## module.createRequire
+
+`module.createRequire()`는 ESM 안에서 `require` 함수를 만들어 줍니다. 인수는 기준 경로로 쓸 파일 URL 또는 경로이고, 보통 `import.meta.url`입니다.
+
+```js
+import { createRequire } from 'node:module'
+
+const require = createRequire(import.meta.url)
+const lib = require('./lib.cjs')
+const pkg = require('./package.json')
+console.log(pkg.version)
+```
+
+- 반환된 `require`는 CommonJS의 `require`와 같습니다. 상대 경로는 인수로 준 파일 기준이고, `.json`은 JSON으로, `.node` 네이티브 애드온도 불러옵니다.
+- `import`로 불러올 수 없는 대상을 읽을 때 씁니다. 네이티브 애드온(`.node`)이 대표적입니다.
+- `require.resolve`, `require.cache`도 쓸 수 있습니다.
+- ESM에서 JSON은 `createRequire` 대신 import attributes로 읽는 것이 표준 방식입니다.
+
+## import attributes
+
+Import attributes는 모듈 지정자 뒤에 `with { ... }`로 불러오는 모듈의 종류를 알려 주는 문법입니다. Node.js에서 JSON을 `import`하려면 반드시 `type: 'json'`을 붙여야 합니다. 없으면 `ERR_IMPORT_ATTRIBUTE_MISSING`입니다.
+
+```js
+import data from './data.json' with { type: 'json' }
+console.log(data) // { x: 1 }
+
+const cfg = await import('./data.json', {
+  with: { type: 'json' },
+})
+cfg.default       // { x: 1 }
+```
+
+- JSON 모듈은 default export만 있고 named export는 없습니다.
+- 한 번 불러온 JSON은 캐시됩니다. 같은 객체를 모든 곳에서 공유합니다.
+- 이 문법은 v23.1.0, v22.12.0, v20.18.3, v18.20.5부터 실험 단계가 아닙니다.
+- `type: 'text'`는 `--experimental-import-text` 플래그가 필요한 실험 기능이라 이 문서에서는 쓰지 않습니다.
+- 파일 경로로 읽는 JSON(`readFile` + `JSON.parse`)은 항상 최신 내용을 읽습니다. 캐시를 피하려면 그 방법을 씁니다(자세히는 16편).
+
+## 핵심 정리
+
+- ESM은 `import`·`export`를 정적으로 분석하는 표준 모듈 시스템이며 Node.js에서는 Stable입니다. 상대 경로는 확장자를 써야 합니다.
+- `.mjs`는 항상 ESM, `.cjs`는 항상 CommonJS이고, `.js`는 가까운 `package.json`의 `type`으로 정하며 `type`이 없으면 문법 감지가 판단합니다.
+- default는 모듈당 하나이고 가져오는 쪽이 이름을 정하며, named는 중괄호로 같은 이름을 가져옵니다.
+- import는 값의 복사가 아니라 읽기 전용 라이브 바인딩이고, top-level await는 ESM에서만 쓸 수 있습니다.
+- CommonJS는 `import()`로 ESM을 부르고, v22.12.0·v20.19.0부터 top-level await가 없는 ESM은 `require()`로도 부릅니다.
+- ESM은 `import`로 CommonJS를 부르며 `module.exports`가 default이고, `require`가 필요하면 `createRequire`를 씁니다. JSON은 `with { type: 'json' }`가 필요합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="CommonJS 파일에서 top-level await를 포함한 ESM 파일을 require()로 불러오면 어떻게 되는가?"
+  options={['정상적으로 불러와지고 await가 동기로 처리된다', 'ERR_REQUIRE_ASYNC_MODULE 에러가 발생한다', 'undefined가 반환된다', 'Promise가 반환된다']}
+  correctAnswer={2}
+  explanation="require(esm)은 완전한 동기 모듈만 불러올 수 있습니다. 대상 모듈이나 그 의존 모듈에 top-level await가 있으면 ERR_REQUIRE_ASYNC_MODULE이 발생하고, 이 경우에는 동적 import()를 써야 합니다."
+  optionExplanations={['require는 동기 호출이라 비동기 평가를 기다릴 수 없습니다.', '정답입니다. top-level await가 있는 모듈은 require로 불러올 수 없습니다.', '에러 없이 undefined를 돌려주지 않습니다.', 'require는 Promise를 반환하지 않습니다. Promise를 반환하는 것은 import()입니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="counter.mjs가 export let count = 0 과 export function inc() { count++ } 를 내보낸다. main.mjs에서 import { count, inc } from './counter.mjs' 후 inc()를 호출하고 count를 출력하면?"
+  options={['0', '1', 'undefined', 'ReferenceError']}
+  correctAnswer={2}
+  explanation="ESM의 import는 값의 복사가 아니라 내보내는 모듈의 변수에 연결된 읽기 전용 라이브 바인딩입니다. inc()가 count를 바꾸면 가져온 쪽에서도 1이 보입니다. 단, 가져온 쪽에서 count에 직접 대입하면 TypeError입니다."
+  optionExplanations={['값이 복사되는 CommonJS의 동작입니다. ESM은 바인딩이 연결되어 있습니다.', '정답입니다. 라이브 바인딩이라 변경된 값이 보입니다.', 'count는 정상적으로 내보내졌으므로 undefined가 아닙니다.', '변수가 이미 초기화되어 있어 ReferenceError는 발생하지 않습니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="package.json에 type 필드가 module로 설정된 프로젝트에서 app.js 안에 const dir = __dirname 을 썼다. 가장 알맞은 해결책은?"
+  options={['require를 먼저 호출한다', 'import.meta.dirname을 쓴다', 'type 필드를 지운다', 'process.cwd를 __dirname 대신 항상 쓴다']}
+  correctAnswer={2}
+  explanation="type이 module이면 .js 파일은 ESM이라 __dirname이 정의되어 있지 않아 ReferenceError가 납니다. ESM의 대응 기능은 import.meta.dirname(v24.0.0, v22.16.0에서 Stable)입니다. CommonJS가 꼭 필요한 파일은 .cjs로 바꿀 수도 있습니다."
+  optionExplanations={['require를 호출해도 ESM에는 __dirname이 생기지 않습니다.', '정답입니다. ESM에서 현재 파일의 디렉터리를 얻는 방법입니다.', '프로젝트 전체를 CommonJS로 되돌리는 것이라 과합니다. 필요한 파일만 고치면 됩니다.', 'process.cwd는 실행 위치이고 파일 위치가 아니라서 경로가 달라질 수 있습니다.']}
+/>
+
+## 참고 자료
+
+- [Node.js — ECMAScript modules](https://nodejs.org/api/esm.html)
+- [Node.js — Modules: CommonJS modules (Loading ECMAScript modules using require)](https://nodejs.org/api/modules.html)
+- [Node.js — Modules: Packages](https://nodejs.org/api/packages.html)

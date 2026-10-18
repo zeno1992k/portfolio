@@ -1,0 +1,387 @@
+---
+title: '05. Props'
+description: 'Props로 부모가 자식에게 값을 넘기는 방법, 구조 분해와 기본값, children·함수·객체·배열·Boolean Props, 읽기 전용 규칙, Props Drilling, key와 ref의 특수 취급, props 변경과 재렌더링의 관계를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 부모가 자식에게 값을 넘기는 모든 형태를 구분해 쓰고, props가 읽기 전용이며 렌더링마다 새로 전달된다는 규칙을 설명할 수 있습니다.
+</Callout>
+
+## Props 기본
+
+Props는 부모 컴포넌트가 JSX 태그의 속성으로 자식 컴포넌트에 넘기는 값입니다. HTML 속성과 모양이 같지만 문자열뿐 아니라 객체, 배열, 함수 등 모든 JavaScript 값을 넘길 수 있습니다.
+
+```jsx
+function Avatar({ name, size }) {
+  return <img alt={name} width={size} />
+}
+
+<Avatar name="Lin" size={100} />
+```
+
+- 문자열은 따옴표로, 그 밖의 값은 중괄호로 넘깁니다. `size="100"`은 문자열이고 `size={100}`은 숫자입니다.
+- 컴포넌트 함수가 받는 인수는 props 객체 하나뿐입니다. 부모가 쓴 속성이 그 객체의 프로퍼티가 됩니다.
+- 부모와 자식은 props라는 약속으로만 연결됩니다. 자식은 부모가 어떻게 값을 만들었는지 모르고, 부모는 자식이 값을 어디에 쓰는지 모릅니다.
+
+## 구조 분해
+
+함수 매개변수 자리에서 props 객체를 바로 구조 분해해 필요한 값만 변수로 받는 것이 관례입니다.
+
+```jsx
+function Avatar({ name, size }) {} // 구조 분해
+
+function Avatar(props) {           // 같은 의미
+  const name = props.name
+  const size = props.size
+}
+```
+
+- 매개변수의 중괄호 `{ }`를 빼먹으면 `name`이 아니라 props 객체 전체가 첫 매개변수에 담깁니다.
+- 일부만 꺼내고 나머지를 모으려면 Rest 문법을 씁니다(구조 분해와 Rest는 JavaScript 37편).
+
+```jsx
+function Button({ label, ...rest }) {
+  // rest는 label을 뺀 나머지 props 객체
+}
+```
+
+## children
+
+JSX 태그 사이에 넣은 내용은 `children`이라는 이름의 prop으로 전달됩니다. 문자열, 엘리먼트, 표현식, 배열이 모두 올 수 있습니다.
+
+```jsx
+function Card({ children }) {
+  return <div className="card">{children}</div>
+}
+
+<Card>
+  <Avatar name="Lin" size={50} />
+</Card>
+```
+
+- 패널, 그리드, 레이아웃처럼 안쪽 내용을 모르는 감싸는 컴포넌트에 씁니다. 감싸는 쪽이 안쪽 내용을 알 필요가 없습니다.
+- `children`은 일반 prop이라서 `<Card children={x} />`로도 쓸 수 있지만 태그 사이에 쓰는 형태가 표준입니다.
+- 태그 사이에 아무것도 없으면 `children`은 `undefined`입니다.
+- 렌더 결과가 없는 값(`false`, `null`, `undefined`, `true`)은 children으로 넘겨도 아무것도 그려지지 않습니다. `0`은 그려집니다(자세히는 06편).
+
+함수를 children으로 넘기는 형태도 가능합니다. 받는 쪽이 그 함수를 호출해 렌더 결과를 만듭니다.
+
+```jsx
+function List({ items, children }) {
+  return <ul>{items.map(children)}</ul>
+}
+
+<List items={['a', 'b']}>{(item) => <li>{item}</li>}</List>
+```
+
+## 기본값
+
+구조 분해의 기본값 문법으로 prop이 없을 때 쓸 값을 정합니다.
+
+```jsx
+function Avatar({ name, size = 100 }) {
+  // <Avatar name="Lin" />        size는 100
+  // <Avatar name="Lin" size={undefined} />  size는 100
+  // <Avatar name="Lin" size={null} />       size는 null
+  // <Avatar name="Lin" size={0} />          size는 0
+}
+```
+
+- 기본값은 prop이 없거나 `undefined`일 때만 적용됩니다. `null`, `0`, `''`, `false`에는 적용되지 않습니다.
+- React 19에서는 함수 컴포넌트의 `defaultProps`가 제거되었습니다. ES6 기본 매개변수로 바꿔야 합니다. 클래스 컴포넌트는 계속 지원합니다.
+- 같은 이유로 `propTypes` 검사도 React 19부터 무시됩니다. 타입 검사는 TypeScript가 맡습니다(TypeScript 사용법은 별도 과목).
+- 기본값 식은 렌더링마다 평가됩니다. 기본값으로 `[]`나 `{}`를 쓰면 렌더링마다 새 객체가 만들어집니다(아래 "props 변경과 재렌더링").
+
+## 함수 Props
+
+함수도 값이므로 prop으로 넘길 수 있습니다. 자식이 부모에게 "무슨 일이 일어났다"를 알리는 통로로 가장 많이 쓰입니다.
+
+```jsx
+function Button({ onClick, children }) {
+  return <button onClick={onClick}>{children}</button>
+}
+
+function PlayButton({ movie }) {
+  function handlePlay() {
+    alert(`Playing ${movie}`)
+  }
+  return <Button onClick={handlePlay}>Play</Button>
+}
+```
+
+- 이름 규칙은 두 가지입니다. 이벤트를 받는 prop은 `on` + 대문자 이벤트 이름(`onClick`, `onSmash`)이고, 부모가 만든 핸들러 함수는 `handle` + 이벤트 이름(`handlePlay`)입니다(자세히는 08편).
+- 함수를 넘길 때는 함수 자체를 넘깁니다. `onClick={handlePlay()}`처럼 호출하면 렌더링 중에 실행되고 그 반환값이 넘어갑니다.
+- 부모의 값을 바꾸는 방법은 이 함수를 자식이 호출하는 것뿐입니다. 자식이 props 자체를 바꾸지는 못합니다.
+
+```jsx
+<Button onClick={handlePlay()}>  // ❌ 렌더 중 즉시 실행
+<Button onClick={handlePlay}>    // ✅ 클릭할 때 실행
+<Button onClick={() => handlePlay(id)}> // ✅ 인수가 필요할 때
+```
+
+## 객체 Props
+
+객체를 통째로 넘기면 prop 개수가 줄고, 관련된 값이 하나로 묶입니다.
+
+```jsx
+function Profile({ person }) {
+  return <p>{person.name}, {person.age}</p>
+}
+
+<Profile person={{ name: 'Lin', age: 20 }} />
+```
+
+- 이중 중괄호는 특별한 문법이 아닙니다. 바깥은 JSX의 표현식 중괄호, 안쪽은 객체 리터럴입니다.
+- 객체를 통째로 넘기면 자식이 그 객체 모양을 알아야 하므로 결합이 강해집니다. 자식이 쓰는 값이 한두 개라면 그 값만 넘기는 편이 단순합니다.
+- JSX 안에 객체 리터럴을 쓰면 렌더링마다 새 객체가 만들어집니다(아래 "props 변경과 재렌더링").
+- 객체의 프로퍼티를 자식에서 고치면 안 됩니다(아래 "읽기 전용 Props").
+
+## 배열 Props
+
+배열도 그대로 넘기고, 자식에서 `map`으로 JSX를 만듭니다.
+
+```jsx
+function TagList({ tags }) {
+  return (
+    <ul>
+      {tags.map((tag) => <li key={tag}>{tag}</li>)}
+    </ul>
+  )
+}
+
+<TagList tags={['react', 'jsx']} />
+```
+
+- 배열로 요소를 그릴 때는 각 요소에 `key`가 필요합니다(자세히는 07편).
+- 값이 없을 수 있는 배열에는 기본값 `[]`를 줄 수 있습니다. 기본값 `tags = []`는 `undefined`일 때만 적용되므로 `null`이 오면 `tags.map`에서 TypeError가 납니다.
+- 자식에서 `tags.push(...)`, `tags.sort()`처럼 원본을 바꾸는 메서드를 호출하면 부모의 데이터를 바꾸는 것입니다. 정렬은 `toSorted()`나 복사본으로 합니다(자세히는 11편).
+
+## Boolean Props
+
+값 없이 속성 이름만 쓰면 그 prop의 값은 `true`입니다.
+
+```jsx
+<Button disabled />          // disabled={true}와 같음
+<Button disabled={false} />  // 명시적으로 false
+<Button />                   // disabled는 undefined
+```
+
+- 값을 쓰지 않은 것과 `false`를 쓴 것은 다릅니다. 값을 쓰지 않으면 `undefined`이고, 자식 입장에서 둘 다 거짓으로 취급되는 경우가 많지만 `=== false` 비교에서는 다릅니다.
+- 변수에 담긴 불리언은 중괄호로 넘깁니다. `disabled={isLoading}`처럼 씁니다. 문자열 `"false"`는 비어 있지 않은 문자열이라 참으로 취급됩니다.
+- 이름은 `isOpen`, `hasError`, `disabled`처럼 참/거짓이 드러나게 짓습니다.
+- 공식 문서(구 문서)는 값 없는 속성 형태가 ES6의 프로퍼티 축약 표기와 헷갈릴 수 있다고 적고 있습니다. 팀 규칙에 따라 `disabled={true}`로 쓰기도 합니다.
+
+## Props Spread
+
+JSX 속성 자리의 `{...obj}`는 객체의 프로퍼티를 props로 풀어 넘깁니다. 받은 props를 그대로 자식에 전달할 때 씁니다.
+
+```jsx
+function Profile(props) {
+  return (
+    <div className="card">
+      <Avatar {...props} />
+    </div>
+  )
+}
+```
+
+- `<Avatar {...props} />`는 `<Avatar name={props.name} size={props.size} />`와 같습니다. 문법은 JavaScript의 객체 스프레드와 같은 모양입니다(자세히는 JavaScript 36편).
+- 같은 이름이 여러 번 나오면 뒤에 쓴 것이 이깁니다. `{...props} size={50}`은 size가 50이고, `size={50} {...props}`는 props의 size가 이깁니다.
+- 일부는 직접 쓰고 나머지만 넘길 때는 Rest와 함께 씁니다.
+
+```jsx
+function Button({ variant, ...rest }) {
+  return <button className={variant} {...rest} />
+}
+```
+
+- 공식 문서는 spread를 절제해서 쓰라고 안내합니다. 모든 props를 넘기면 자식이 쓰지 않는 값까지 내려가고, 어떤 값이 흐르는지 읽기 어려워집니다. 모든 곳에서 spread로 넘기고 있다면 컴포넌트를 나누고 JSX를 children으로 넘기는 편이 낫다는 신호일 수 있습니다.
+
+## 읽기 전용 Props
+
+props는 읽기 전용입니다. 렌더링마다 그 시점의 값을 담은 새 props가 만들어져 전달되고, 컴포넌트는 그것을 바꾸지 않습니다.
+
+```jsx
+function Item({ count, user }) {
+  count = count + 1    // ❌ 값을 바꿔 쓰지 않는다
+  user.name = 'Kim'    // ❌ 부모 객체를 변경
+  const next = count + 1             // ✅ 새 변수에 계산
+  const copy = { ...user, name: 'Kim' } // ✅ 복사해서 변경
+}
+```
+
+- 공식 문서의 규칙은 렌더링 중에 props, state, context를 변경하지 말라는 것입니다. 이 값들은 읽기 전용 입력입니다.
+- 렌더링 중에 새로 만든 지역 변수나 객체를 바꾸는 것은 괜찮습니다. 그 값은 이 컴포넌트만 알고 있기 때문입니다.
+- 값을 바꾸고 싶다면 바꿀 책임이 있는 쪽에서 바꿔야 합니다. 부모가 state를 바꾸어 다른 props를 내려보내거나, 자식이 함수 props를 호출해 부모에게 변경을 요청합니다. 사용자 입력에 반응해 값을 바꾸려면 state를 씁니다(자세히는 09편).
+- 이전 props는 새 props로 교체될 때 버려집니다. 변경 가능한 객체를 prop으로 받아 안에서 고치면, 그 객체를 가진 다른 곳에서도 값이 바뀌어 화면이 어긋납니다.
+
+## Props Drilling
+
+Props Drilling은 필요한 컴포넌트까지 값을 전달하기 위해, 그 값을 쓰지 않는 중간 컴포넌트들이 props를 그대로 받아 내려보내는 상태입니다.
+
+```jsx
+function Page({ user }) {
+  return <Layout user={user} />
+}
+function Layout({ user }) {
+  return <Header user={user} /> // Layout은 user를 쓰지 않음
+}
+function Header({ user }) {
+  return <p>{user.name}</p>
+}
+```
+
+- 공식 문서는 props를 깊게 넘기거나 많은 컴포넌트가 같은 값을 필요로 할 때 코드가 장황해진다고 설명합니다.
+- 해결 순서는 세 단계입니다.
+  1. 먼저 props로 그대로 전달합니다. 열두 개의 컴포넌트를 거쳐 열두 개의 prop을 내려보내는 일도 드물지 않고, 번거롭지만 어떤 컴포넌트가 어떤 데이터를 쓰는지 분명해집니다.
+  2. 중간 컴포넌트가 값을 쓰지 않고 넘기기만 한다면 컴포넌트 추출을 빠뜨린 것일 수 있습니다. 내려보내던 쪽에서 JSX를 만들어 `children`으로 넘깁니다.
+  3. 그래도 맞지 않으면 Context를 씁니다(자세히는 24편).
+
+```jsx
+// Before
+<Layout user={user} />
+
+// After: Layout은 user를 모른다
+<Layout>
+  <Header user={user} />
+</Layout>
+```
+
+- 첫 단계에서 곧바로 Context로 가지 않습니다. Context는 데이터 흐름을 숨기기 때문입니다.
+- state를 어디에 둘지의 문제는 14편에서 다룹니다.
+
+## Props API 설계
+
+컴포넌트의 props 목록은 그 컴포넌트의 공개 인터페이스입니다. 아래 기준은 위에서 다룬 공식 규칙에서 나오는 설계 원칙입니다.
+
+| 기준 | 내용 |
+|------|------|
+| 필요한 값만 | 자식이 쓰는 값만 받는다. 객체 전체보다 쓰는 값만 넘기면 자식이 부모의 데이터 모양에 덜 묶인다 |
+| 이름 | 이벤트는 `on` + 이름, Boolean은 `is`·`has` 같은 접두사, 나머지는 의미가 드러나는 명사 |
+| 기본값 | 선택 prop은 매개변수 기본값으로 정한다. `undefined`일 때만 적용됨을 기억한다 |
+| 합성 | 안쪽 내용을 마음대로 바꿔야 하면 prop을 늘리지 말고 `children`이나 JSX prop으로 받는다 |
+| 흐름 | 데이터는 위에서 아래로, 알림은 함수 prop으로 아래에서 위로 |
+| spread | 감싸는 컴포넌트가 나머지를 그대로 넘길 때만 쓴다 |
+
+JSX도 prop으로 넘길 수 있어서, 자리가 여러 곳이면 이름 있는 prop을 씁니다.
+
+```jsx
+function Page({ header, sidebar, children }) {
+  return (
+    <div>
+      <header>{header}</header>
+      <aside>{sidebar}</aside>
+      <main>{children}</main>
+    </div>
+  )
+}
+
+<Page header={<Logo />} sidebar={<Menu />}>본문</Page>
+```
+
+**흔한 실수:**
+
+- 비슷한 prop이 계속 늘어나는 것입니다. `isPrimary`, `isDanger`, `isGhost`가 함께 켜질 수 있는 구조라면 서로 모순되는 조합이 생깁니다. 하나의 값으로 고르는 형태로 바꿉니다. `variant="primary"`처럼 문자열 하나로 받으면 한 번에 하나만 선택됩니다.
+- state에서 계산할 수 있는 값을 또 하나의 prop으로 내려보내는 것입니다. 파생 값은 자식이나 부모 한쪽에서 계산합니다(자세히는 12편).
+
+## key와 ref의 특수 취급
+
+`key`와 `ref`는 JSX에서 prop처럼 쓰지만 다르게 취급됩니다.
+
+**key**
+
+- `key`는 React가 엘리먼트를 구분하는 데만 쓰는 값이라서 컴포넌트는 `key`를 prop으로 받지 못합니다. 같은 값이 필요하면 다른 이름의 prop으로 하나 더 넘깁니다(자세히는 07편).
+
+```jsx
+<Profile key={id} userId={id} />
+// Profile은 props.userId를 읽는다. props.key는 없다
+```
+
+**ref**
+
+- React 19부터 함수 컴포넌트는 `ref`를 일반 prop으로 받습니다. 받은 `ref`를 DOM 엘리먼트에 그대로 전달하면 부모가 그 DOM을 참조할 수 있습니다.
+
+```jsx
+function MyInput({ placeholder, ref }) {
+  return <input placeholder={placeholder} ref={ref} />
+}
+
+<MyInput ref={inputRef} />
+```
+
+- React 18 이하에서는 `forwardRef`로 감싸야 했습니다. React 19에서는 새 함수 컴포넌트에 `forwardRef`가 필요 없고, `forwardRef`는 앞으로 deprecated 되어 제거될 예정입니다.
+- 클래스 컴포넌트는 `ref`가 컴포넌트 인스턴스를 가리키므로 prop으로 전달되지 않습니다.
+- `element.ref`로 접근하는 방식은 더 이상 지원되지 않고 `element.props.ref`를 씁니다.
+- `ref`의 사용법과 DOM 접근은 19편에서 다룹니다.
+
+## props 변경과 재렌더링의 관계
+
+props가 바뀌었다는 것은 부모가 다시 렌더링되어 이 컴포넌트에 다른 값을 넘겼다는 뜻입니다. 자식은 props를 직접 감지하지 않고, 부모의 렌더링에 딸려서 다시 실행됩니다.
+
+- 부모가 다시 렌더링되면 자식도 props가 같든 다르든 다시 렌더링됩니다. `memo`로 감싼 컴포넌트만 props가 같을 때 건너뛰는 경우가 많고, 이것도 보장은 아닙니다(공식 문서는 성능 최적화일 뿐 보장이 아니라고 설명합니다).
+- `memo`의 비교는 `Object.is`로 prop 하나씩 하는 얕은 비교입니다. 객체, 배열, 함수는 내용이 아니라 참조로 비교됩니다.
+- 렌더링 중에 만든 객체, 배열, 함수는 렌더링마다 새 참조입니다. `memo` 컴포넌트에 이런 값을 넘기면 내용이 같아도 매번 달라진 것으로 판단됩니다.
+
+```jsx
+function Page({ name, age }) {
+  const person = { name, age } // 렌더링마다 새 객체
+  return <Profile person={person} />
+}
+// 해결: 원시 값으로 넘긴다
+// <Profile name={name} age={age} />
+```
+
+- `memo`, `useMemo`, `useCallback`으로 이 비용을 다루는 방법은 성능 최적화 영역이라 중급 과목에서 다룹니다.
+- 렌더링이 일어나는 순서, 부모와 자식의 렌더링 관계는 17편에서 자세히 다룹니다.
+- 자식이 props로 받은 값을 `useState`의 초기값으로 복사하면, 이후 props가 바뀌어도 state는 따라가지 않습니다. 초기값은 처음 한 번만 쓰이기 때문입니다(자세히는 22편).
+
+## 핵심 정리
+
+- Props는 부모가 JSX 속성으로 넘기는 값이고, 컴포넌트 함수는 props 객체 하나를 받아 보통 구조 분해로 꺼냅니다.
+- 태그 사이의 내용은 `children`으로, 값 없는 속성은 `true`로, 함수·객체·배열은 중괄호로 넘깁니다.
+- 기본값은 prop이 없거나 `undefined`일 때만 적용되며, React 19에서 함수 컴포넌트의 `defaultProps`와 `propTypes`는 쓰이지 않습니다.
+- props는 읽기 전용입니다. 바꿔야 한다면 부모가 다른 값을 내려보내거나 함수 prop으로 부모에게 변경을 요청합니다.
+- 중간 컴포넌트가 값을 넘기기만 하는 Props Drilling은 props 전달, `children` 합성, Context 순서로 해결합니다.
+- `key`는 prop으로 전달되지 않고, `ref`는 React 19부터 함수 컴포넌트의 일반 prop입니다. 부모가 다시 렌더링되면 자식도 다시 렌더링됩니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="function Avatar({ name, size = 100 }) {} 에서 size가 100이 되는 경우는?"
+  options={['size={null}을 넘길 때', 'size={0}을 넘길 때', 'size 없이 호출하거나 size={undefined}를 넘길 때', 'size에 빈 문자열을 넘길 때']}
+  correctAnswer={3}
+  explanation="기본값은 prop이 없거나 undefined일 때만 적용됩니다. null, 0, 빈 문자열은 값이 있는 것으로 취급되어 기본값이 쓰이지 않습니다."
+  optionExplanations={['null은 undefined가 아니므로 size는 null이 됩니다.', '0은 undefined가 아니므로 size는 0이 됩니다.', '정답입니다. 없거나 undefined일 때만 기본값이 적용됩니다.', '빈 문자열은 undefined가 아니므로 그대로 빈 문자열이 됩니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="자식 컴포넌트가 받은 props를 다루는 방법으로 올바른 것은?"
+  options={['props.count = props.count + 1 로 직접 바꾼다', '받은 객체의 프로퍼티를 고쳐 부모 데이터를 갱신한다', '새 변수에 계산하거나 복사본을 만들고, 부모의 값을 바꿔야 하면 함수 prop을 호출한다', 'props가 바뀌었는지 직접 감지해 자식이 부모 state를 대신 변경한다']}
+  correctAnswer={3}
+  explanation="props는 읽기 전용입니다. 렌더링 중에 props를 바꾸면 안 되고, 값을 바꿔야 하면 부모가 다른 props를 내려보내거나 자식이 부모가 준 함수 prop을 호출해 변경을 요청합니다."
+  optionExplanations={['props 값을 직접 바꾸는 것은 금지된 변경입니다.', '객체 prop의 프로퍼티를 고치면 부모와 공유하는 데이터가 바뀌어 화면이 어긋납니다.', '정답입니다. 계산은 새 변수로 하고 변경 요청은 함수 prop으로 합니다.', '자식은 부모의 state를 직접 바꿀 수 없고 props를 감지하는 방식도 없습니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="Props Drilling에 대한 설명으로 옳은 것은?"
+  options={['값을 쓰지 않는 중간 컴포넌트가 props를 받아 그대로 내려보내는 상태이며, props 전달과 children 합성을 먼저 검토하고 그래도 안 되면 Context를 쓴다', 'React가 props를 자동으로 깊은 곳까지 전달해 주는 기능이다', '항상 Context로 바꿔야 하는 안티패턴이다', 'key를 prop으로 내려보낼 때만 발생한다']}
+  correctAnswer={1}
+  explanation="Props Drilling은 중간 컴포넌트가 쓰지도 않는 값을 전달만 하는 상태입니다. 공식 문서는 먼저 props로 명시적으로 전달하고, 컴포넌트를 추출해 JSX를 children으로 넘기는 방법을 시도한 뒤, 그래도 맞지 않을 때 Context를 고려하라고 안내합니다."
+  optionExplanations={['정답입니다. 해결은 props 전달, children 합성, Context 순서입니다.', '자동 전달 기능이 아니라 사람이 직접 props를 이어 주는 상태를 말합니다.', '무조건 Context로 바꾸라는 규칙은 없습니다. 명시적인 props가 데이터 흐름을 분명하게 해 줍니다.', 'key와는 관계가 없습니다. key는 prop으로 전달되지 않습니다.']}
+/>
+
+## 참고 자료
+
+- [React — Passing Props to a Component](https://react.dev/learn/passing-props-to-a-component)
+- [React — Keeping Components Pure](https://react.dev/learn/keeping-components-pure)
+- [React — Passing Data Deeply with Context](https://react.dev/learn/passing-data-deeply-with-context)
+- [React — React 19 Upgrade Guide](https://react.dev/blog/2024/04/25/react-19-upgrade-guide)
+- [React — React v19 (ref as a prop)](https://react.dev/blog/2024/12/05/react-19)
+- [React — memo](https://react.dev/reference/react/memo)
+- [React — createElement](https://react.dev/reference/react/createElement)
+- [React — Rendering Lists](https://react.dev/learn/rendering-lists)
+- [React — Responding to Events](https://react.dev/learn/responding-to-events)
+- [React 구 문서 — JSX In Depth](https://legacy.reactjs.org/docs/jsx-in-depth.html)

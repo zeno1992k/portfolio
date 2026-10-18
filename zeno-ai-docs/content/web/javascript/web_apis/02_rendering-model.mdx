@@ -1,0 +1,308 @@
+---
+title: '02. 브라우저 렌더링 모델'
+description: 'HTML 파싱부터 DOM·CSSOM·렌더 트리, 스타일·레이아웃·페인트·합성, 리플로우와 레이아웃 스래싱, 프레임 예산과 컴포넌트 렌더링 비용을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** HTML·CSS가 화면 픽셀이 되는 단계와 각 단계를 다시 일으키는 변경을 구분하고, 레이아웃 스래싱과 프레임 예산을 근거로 렌더링 비용을 판단합니다.
+</Callout>
+
+## HTML 파싱과 DOM 생성
+
+HTML 파서는 바이트를 문자로, 문자를 토큰으로, 토큰을 노드로 바꿔 DOM 트리를 만듭니다. HTML 표준은 이 과정을 토큰화 단계(tokenization)와 트리 구성 단계(tree construction)로 나눕니다. 결과물은 `Document` 객체입니다(자세히는 03편).
+
+- 파싱은 점진적입니다. 네트워크에서 도착하는 만큼 읽어 DOM에 노드를 붙이므로 문서가 다 오기 전에도 DOM이 자랍니다.
+- HTML 파서는 오류에 관대합니다. 문법이 틀려도 에러를 던지지 않고 표준이 정한 규칙대로 복구합니다. 예전 SGML 기반이 아니라 브라우저가 실제로 구현해 온 방식을 규격으로 삼았습니다.
+
+```html
+<p>one<p>two
+<table><div>x</div></table>
+```
+
+위 마크업은 `p` 두 개로 나뉘고(`p`는 다음 `p`가 시작되면 닫힘), `table` 안의 `div`는 표 바깥 앞쪽으로 옮겨집니다(표 안에 잘못 놓인 콘텐츠를 위한 foster parenting 규칙).
+
+### 스크립트와 파서 차단
+
+`async`·`defer` 없는 `script`는 파서를 멈춥니다. 파서는 스크립트를 내려받고 실행이 끝날 때까지 토큰화를 막고, 스크립트가 아직 로드 중인 스타일시트에 막혀 있으면 그것이 끝날 때까지 기다립니다.
+
+- 이 때문에 `head`의 동기 스크립트는 그 뒤의 DOM 생성을 늦춥니다. `async`, `defer`, `type="module"`은 파서를 막지 않습니다(자세히는 14편).
+- `document.write()`는 실행 중인 스크립트가 파서의 입력을 끼워 넣는 수단입니다. 파서가 되돌아 들어오는 구조(reentrant)라서 파싱을 꼬이게 하므로 쓰지 않습니다(자세히는 05편).
+
+### 프리로드 스캐너
+
+파서가 스크립트에서 멈춰 있는 동안에도 브라우저는 뒤쪽 마크업을 훑어 CSS, JavaScript, 웹 폰트, 이미지 같은 리소스를 미리 요청합니다. 이를 프리로드 스캐너라 부르며 HTML 표준에서는 투기적(speculative) HTML 파서에 해당합니다. 스크립트가 파서를 막아도 다운로드는 먼저 시작되므로 대기 시간이 줄어듭니다.
+
+- 스캐너는 마크업에 적힌 URL만 찾습니다. 스크립트가 나중에 만드는 `img`나 `import()`로 요청하는 모듈은 찾지 못합니다.
+- 중요한 리소스는 HTML에 직접 쓰거나 `preload`로 알려야 일찍 요청됩니다(자세히는 15편).
+
+## CSSOM 생성
+
+브라우저는 스타일시트를 파싱해 CSSOM(CSS Object Model) 트리를 만듭니다. 브라우저 기본 스타일시트와 작성자 스타일, 인라인 스타일이 함께 들어가며 각 노드의 최종 스타일(계산값)이 정해집니다.
+
+- DOM과 달리 점진적으로 쓰지 못합니다. 뒤에 나오는 규칙이 앞의 규칙을 덮을 수 있어서 스타일시트를 끝까지 읽어야 값이 확정됩니다.
+- CSS는 HTML 파싱을 막지 않지만 렌더링을 막고, 스크립트 실행도 막습니다. 스크립트가 `getComputedStyle()`로 스타일을 읽을 수 있어서 앞의 스타일시트가 끝나야 실행합니다.
+- JavaScript에서 쓰는 CSSOM API는 06편에서 다룹니다.
+
+## Render Tree
+
+렌더 트리는 DOM과 CSSOM을 합쳐 실제로 그려질 노드만 담은 트리입니다. 각 노드에 계산된 스타일이 붙습니다.
+
+| 노드 | 렌더 트리 |
+|------|-----------|
+| `head`, `script`, `meta` 등 | 포함되지 않음 |
+| `display: none` | 포함되지 않음(자손도 제외) |
+| `visibility: hidden` | 포함됨. 자리는 차지하고 그려지지 않음 |
+| `opacity: 0` | 포함됨. 그려지고 입력도 받음 |
+
+- 보이지 않게 숨기는 방법에 따라 비용이 다릅니다. `display: none`은 레이아웃에서도 빠지고, `visibility: hidden`은 레이아웃에 참여합니다.
+- 렌더 트리에 없는 요소는 `getBoundingClientRect()`의 크기가 0입니다(자세히는 06편).
+
+## Style / Layout / Paint / Composite
+
+렌더 트리가 만들어진 뒤 화면까지 네 단계를 거칩니다.
+
+| 단계 | 하는 일 | 바뀌면 다시 일어나는 일 |
+|------|---------|------------------------|
+| Style | 어떤 규칙이 어느 요소에 적용되는지 계산 | 이후 단계 전체 |
+| Layout | 요소의 크기와 위치 계산(box model) | Paint, Composite |
+| Paint | 텍스트·색·테두리·그림자·이미지를 픽셀로 그림 | Composite |
+| Composite | 레이어를 올바른 순서로 합쳐 화면에 표시 | 없음 |
+
+첫 레이아웃은 layout, 이후 다시 계산하는 것은 reflow라고 부릅니다.
+
+### 레이어와 GPU 합성
+
+페인트 결과는 레이어 단위로 나뉘어 GPU에서 합성됩니다. 요소가 자기 레이어를 가지면 그 요소만 움직여도 다른 레이어를 다시 그릴 필요가 없습니다.
+
+- 자기 레이어로 승격되는 요소: `video`, `canvas`, `opacity`·3D `transform`·`will-change`를 쓰는 요소.
+- 레이어는 메모리를 쓰고 텍스처 업로드에 대역폭이 듭니다. 필요 이상으로 승격하면 오히려 느려지며 메모리가 적은 모바일 기기에서 특히 그렇습니다.
+- 합성기(compositor)만으로 처리되는 속성은 `transform`과 `opacity` 둘입니다(web.dev 기준). 이 둘만 바꾸면 레이아웃과 페인트를 건너뜁니다.
+
+### will-change
+
+`will-change`는 어떤 속성이 곧 바뀔지 미리 알리는 힌트입니다. 브라우저가 레이어 준비 같은 최적화를 앞서 해 둡니다(Baseline 2020).
+
+```css
+.card { will-change: transform; }
+```
+
+- 값은 `auto`, `scroll-position`, `contents`, 또는 속성 이름입니다.
+- 남용하지 않습니다. 많은 요소에 쓰면 자원을 낭비하고 오히려 느려집니다. 이미 문제가 있을 때 마지막 수단으로 씁니다.
+- 스타일시트에 계속 두면 최적화가 메모리에 계속 남습니다. 변화 직전에 스크립트로 켜고 끝나면 `auto`로 되돌리는 방식이 권장됩니다.
+- `opacity`처럼 스태킹 컨텍스트를 만드는 속성을 지정하면 그 컨텍스트가 미리 생겨서 겹침 순서가 달라질 수 있습니다.
+
+## Critical Rendering Path
+
+Critical Rendering Path(CRP)는 HTML·CSS·JavaScript를 받아 화면의 첫 픽셀을 그리기까지의 단계 순서입니다. DOM → CSSOM → 렌더 트리 → 레이아웃 → 페인트입니다. 초기 렌더링을 빠르게 하려면 이 경로를 짧게 합니다.
+
+### 렌더 차단 리소스
+
+렌더링 또는 파싱을 멈추게 하는 리소스입니다.
+
+| 리소스 | 막는 것 | 해소 방법 |
+|--------|---------|-----------|
+| CSS(`link rel="stylesheet"`) | 렌더링, 뒤의 스크립트 실행 | 필수 스타일만 인라인, 나머지는 미디어 쿼리로 분리 |
+| 동기 `script` | HTML 파싱 | `defer`, `async`, `type="module"` |
+| `blocking="render"` 요소 | 렌더링 | 필요할 때만 사용(자세히는 15편) |
+
+- 렌더 차단 리소스가 끝나기 전에는 첫 페인트가 나오지 않습니다. 스크립트가 CSS 뒤에 있으면 그 스크립트는 CSS를 기다리고, 파서는 그 스크립트를 기다립니다.
+- 최적화 방향: 필수 리소스 수를 줄이고, 크기를 줄이고, 로드 순서를 앞당깁니다. 첫 응답 약 14KB 안에 첫 렌더에 필요한 HTML과 CSS를 담는 것이 MDN이 소개하는 관례입니다.
+- `viewport` 메타 태그가 없으면 모바일에서 레이아웃 폭이 달라집니다.
+
+## Reflow와 Repaint
+
+Reflow는 레이아웃을 다시 계산하는 것이고, repaint는 다시 그리는 것입니다. 무엇이 바뀌느냐에 따라 어느 단계부터 다시 하는지가 정해집니다.
+
+| 바뀌는 것(예) | 다시 하는 단계 |
+|---------------|----------------|
+| 크기·위치(`width`, `height`, `top`, `margin`, `font-size`), DOM 추가·삭제 | Style, Layout, Paint, Composite |
+| 모양만(`color`, `background-color`, `box-shadow`) | Style, Paint, Composite |
+| `transform`, `opacity`(자기 레이어일 때) | Composite만 |
+
+- reflow가 일어나는 원인은 이미지 크기 도착, DOM 변경, 창 크기 변경 등입니다.
+- reflow는 그 요소의 자손과 뒤에 오는 형제, 조상까지 영향을 줄 수 있어서 DOM 노드가 많을수록 비싸고 페인트보다 부담이 큽니다.
+- reflow가 일어나면 페인트와 합성도 따라옵니다. 반대로 repaint는 reflow 없이 일어날 수 있습니다.
+- 애니메이션은 `transform`과 `opacity`로 구현하고 `top`·`left`·`width` 같은 박스 모델 속성은 움직이지 않습니다(자세히는 46편).
+
+## Layout Thrashing
+
+레이아웃 스래싱은 DOM 쓰기와 레이아웃 값 읽기를 번갈아 하면서 같은 프레임 안에 레이아웃이 반복 강제되는 현상입니다. 브라우저는 보통 변경을 모아 두었다가 프레임에 한 번 레이아웃하지만, 스타일이 바뀐 직후 크기 같은 값을 읽으면 정확한 값을 위해 즉시 레이아웃을 계산합니다. 이것이 강제 동기 레이아웃(forced synchronous layout)입니다.
+
+```js
+// ❌ 쓰기 뒤에 읽기가 반복되어 매번 레이아웃 계산
+for (const el of items) {
+  el.style.width = el.offsetWidth / 2 + 'px'
+}
+```
+
+```js
+// ✅ 읽기를 모은 뒤 쓰기를 모음
+const widths = items.map((el) => el.offsetWidth)
+items.forEach((el, i) => {
+  el.style.width = widths[i] / 2 + 'px'
+})
+```
+
+- 규칙은 한 프레임 안에서 읽기를 먼저 모으고 쓰기를 나중에 모으는 것입니다.
+- 쓰기를 프레임 시점으로 모으려면 `requestAnimationFrame` 안에서 합니다(자세히는 08편).
+- 값을 읽는 대신 계산해 둔 값을 변수에 저장해 재사용하면 강제 레이아웃이 줄어듭니다.
+
+### 강제 동기 레이아웃을 일으키는 읽기
+
+Chromium 기준으로 정리된 목록입니다. 엔진별로 조금 다를 수 있습니다.
+
+| 대상 | 읽으면 레이아웃이 강제되는 것 |
+|------|-------------------------------|
+| Element | `offsetLeft`·`offsetTop`·`offsetWidth`·`offsetHeight`·`offsetParent` |
+| Element | `clientLeft`·`clientTop`·`clientWidth`·`clientHeight` |
+| Element | `scrollWidth`·`scrollHeight`·`scrollTop`·`scrollLeft` |
+| Element | `getBoundingClientRect()`, `getClientRects()`, `innerText` |
+| Element | `scrollIntoView()`, `scrollTo()`, `scrollBy()`, `focus()` |
+| Window | `scrollX`, `scrollY`, `innerWidth`, `innerHeight`, `visualViewport` 크기 |
+| Document | `elementFromPoint()` |
+| 입력 요소 | `select()` |
+| MouseEvent | `layerX`, `layerY`, `offsetX`, `offsetY` |
+| Range | `getClientRects()`, `getBoundingClientRect()` |
+| SVG | `getBBox()`, `computeCTM()` |
+| 계산된 스타일 | `getComputedStyle()`로 크기·위치·`transform` 등을 읽을 때(섀도 트리 안의 요소, 뷰포트 미디어 쿼리가 있을 때도) |
+
+**흔한 실수:**
+
+- 루프 안에서 `offsetHeight`나 `getBoundingClientRect()`를 읽으면서 같은 루프에서 스타일을 쓰는 것입니다.
+- 스크롤·리사이즈 핸들러에서 매번 크기를 읽고 곧바로 스타일을 바꾸는 것입니다.
+- 위 읽기가 `connectedCallback`에서 일어나면 컴포넌트가 늘수록 레이아웃이 반복됩니다(자세히는 18편).
+
+## 렌더링 프레임과 사용자 입력
+
+화면은 프레임 단위로 갱신됩니다. 브라우저는 디스플레이 주사율과 성능, 문서의 가시성을 고려해 렌더링 기회(rendering opportunity)를 얻고, 그때 렌더링 업데이트를 실행합니다.
+
+HTML 표준의 렌더링 업데이트 단계는 다음 순서입니다(일부 생략).
+
+1. 렌더링할 필요가 없는 문서 제외(숨겨진 문서, 그릴 변화가 없고 `requestAnimationFrame` 콜백도 없는 문서)
+2. `resize`·`scroll` 이벤트 처리, 미디어 쿼리 평가
+3. 애니메이션 갱신
+4. `requestAnimationFrame` 콜백 실행
+5. 스타일 재계산과 레이아웃
+6. ResizeObserver 알림(알림으로 크기가 바뀌면 5·6 반복)
+7. IntersectionObserver 관찰 갱신
+8. 페인트 시점 기록과 화면 갱신
+
+- 렌더링 기회는 하드웨어 주사율 등으로 정해집니다. 표준은 방식을 정하지 않지만 60Hz면 약 16.7ms마다 가능합니다.
+- 프레임을 유지하지 못하면 브라우저는 프레임을 불규칙하게 버리기보다 초당 30회 같은 더 지속 가능한 속도로 내릴 수 있습니다. 보이지 않는 페이지는 훨씬 낮은 속도로 내릴 수 있습니다.
+- 위 순서의 하나하나는 모두 같은 메인 스레드에서 이뤄집니다. 메인 스레드가 점유되면 입력 처리와 렌더링 업데이트가 모두 밀립니다.
+
+사용자 입력도 같은 스레드의 태스크로 처리됩니다. 클릭 핸들러가 길면 그 동안 다음 입력도 프레임 갱신도 대기합니다. 입력 후 반응까지의 지연을 재는 지표가 INP입니다(자세히는 65편). 이벤트 루프와 태스크는 08편에서 다룹니다.
+
+### 프레임 예산
+
+| 주사율 | 프레임당 시간 |
+|--------|---------------|
+| 60Hz | 약 16.7ms(1000을 60으로 나눔) |
+| 120Hz | 약 8.3ms |
+
+- 스크립트, 스타일, 레이아웃, 페인트, 합성이 이 시간 안에 끝나야 프레임을 놓치지 않습니다. 브라우저 자체 작업 시간이 있으므로 스크립트에 쓸 수 있는 시간은 더 적습니다.
+- 고주사율 화면에서는 예산이 짧아지므로 60Hz에서만 맞춘 코드는 120Hz에서 프레임을 버릴 수 있습니다.
+- 타이밍은 고정된 간격이 아니라 `requestAnimationFrame`이 전달하는 타임스탬프로 계산합니다(자세히는 08편).
+
+## 컴포넌트 렌더링 비용 이해
+
+컴포넌트의 렌더링 비용은 만드는 노드 수, 적용되는 스타일 규칙 수, 레이아웃을 건드리는 횟수로 정해집니다. 앞에서 본 단계가 컴포넌트 설계의 판단 기준이 됩니다.
+
+- 노드 수: 목록의 각 항목을 컴포넌트 여러 개와 래퍼로 감싸면 노드가 곱해집니다. 필요한 구조만 만듭니다.
+- 삽입 횟수: 노드를 하나씩 붙이면 변경이 여러 번 일어납니다. 한 번에 삽입합니다(자세히는 04편).
+- 레이아웃 읽기: 생명주기 콜백이나 렌더 함수에서 크기를 읽고 곧바로 쓰면 강제 레이아웃입니다. 읽기는 한 번에 모읍니다.
+- 애니메이션: `transform`·`opacity`로 구현합니다.
+- 갱신 범위: 컴포넌트가 바뀔 때 영향이 바깥으로 퍼지지 않게 격리합니다(아래 `contain`).
+
+### CSS containment
+
+`contain` 속성은 요소와 그 내용을 문서의 나머지에서 격리해 브라우저가 계산 범위를 좁히게 합니다(Baseline 2022).
+
+| 값 | 의미 |
+|----|------|
+| `layout` | 내부 레이아웃이 바깥에 영향을 주지 않고 바깥도 내부에 영향 주지 않음 |
+| `paint` | 자손이 요소 영역 밖에 그려지지 않음(잘림) |
+| `size` | 요소 크기를 자식과 무관하게 계산 |
+| `style` | 카운터와 인용 부호를 요소 안에 한정 |
+| `content` | `layout paint style`의 단축 |
+| `strict` | `size layout paint style`의 단축 |
+
+- `layout`, `paint`, `content`, `strict`는 새 containing block, 스태킹 컨텍스트, 블록 서식 맥락을 만듭니다. 위치 지정과 겹침 순서가 달라질 수 있습니다.
+- `strict`는 크기를 내용에서 계산하지 않으므로 크기를 직접 지정해야 합니다.
+- 독립된 위젯인 카드나 목록 항목, 컴포넌트 호스트에 `contain: content`를 거는 것이 전형적인 용도입니다.
+
+```css
+:host { contain: content; }
+```
+
+### content-visibility
+
+`content-visibility`는 요소의 렌더링 작업을 건너뛸 수 있게 합니다(Baseline 2025, `auto`가 Safari 26에서 지원되며 완성).
+
+| 값 | 동작 |
+|----|------|
+| `visible` | 기본값. 효과 없음 |
+| `auto` | 레이아웃·스타일·페인트 containment를 걸고 화면 밖이면 내용 렌더링을 건너뜀. 건너뛴 내용도 DOM과 접근성 트리에 남고 찾기·포커스에 반응 |
+| `hidden` | 내용을 항상 건너뜀. 찾기·탭 이동 같은 기능에도 보이지 않음(`display: none`과 비슷) |
+
+```css
+.section {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 500px;
+}
+```
+
+- 긴 페이지의 화면 밖 구역이 대상이며 초기 렌더링 비용을 줄입니다.
+- 건너뛴 요소는 크기가 0으로 접히므로 `contain-intrinsic-size`로 대략의 크기를 지정해 스크롤 바 요동과 레이아웃 이동을 줄입니다. `auto` 키워드를 쓰면 한 번 렌더링된 뒤의 크기를 기억합니다.
+- 건너뜀 상태가 바뀌면 `contentvisibilityautostatechange` 이벤트가 발생합니다(자세히는 43편).
+
+## 핵심 정리
+
+- 렌더링 경로는 DOM(파싱) → CSSOM → 렌더 트리 → Style·Layout → Paint → Composite이며, 동기 스크립트는 파서를, CSS는 렌더링과 뒤따르는 스크립트를 막습니다.
+- HTML 파서는 오류를 던지지 않고 표준 규칙으로 복구하며, 프리로드 스캐너는 마크업에 적힌 리소스를 앞서 요청합니다.
+- 바뀐 속성에 따라 다시 하는 단계가 달라지고, 레이아웃을 건드리지 않는 `transform`·`opacity`가 애니메이션에 유리합니다.
+- 쓰기 직후 크기 같은 값을 읽으면 강제 동기 레이아웃이 일어나므로 읽기를 모은 뒤 쓰기를 모읍니다.
+- 한 프레임은 60Hz에서 약 16.7ms이며 입력·스크립트·렌더링이 같은 메인 스레드를 나눠 씁니다.
+- `contain`과 `content-visibility`로 컴포넌트와 화면 밖 구역의 렌더링 범위를 줄이고, `will-change`는 마지막 수단으로 씁니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="다음 중 레이아웃과 페인트를 건너뛰고 합성 단계만 다시 일어나게 할 수 있는 변경은?"
+  options={['width 변경', 'color 변경', 'transform 변경(자기 레이어일 때)', 'margin 변경']}
+  correctAnswer={3}
+  explanation="합성기만으로 처리되는 속성은 transform과 opacity입니다. width와 margin은 레이아웃부터, color는 페인트부터 다시 일어납니다."
+  optionExplanations={['크기 변경은 레이아웃을 다시 계산하고 페인트와 합성이 뒤따릅니다.', 'color는 레이아웃은 건너뛰지만 페인트가 다시 일어납니다.', '정답입니다. 자기 레이어에서 transform만 바뀌면 합성 단계만 다시 일어납니다.', '여백 변경은 주변 요소의 위치에 영향을 줘서 레이아웃부터 다시 일어납니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="for 루프 안에서 el.style.width를 쓴 직후 같은 루프에서 el.offsetWidth를 읽을 때 일어나는 현상과 해결책으로 알맞은 것은?"
+  options={['레이아웃 스래싱이 일어나므로 읽기를 먼저 모으고 쓰기를 나중에 모은다', '페인트가 두 번 일어나므로 will-change를 지정한다', '프리로드 스캐너가 멈추므로 script에 defer를 단다', 'CSSOM이 다시 만들어지므로 스타일시트를 인라인한다']}
+  correctAnswer={1}
+  explanation="스타일을 바꾼 직후 크기를 읽으면 브라우저가 정확한 값을 위해 즉시 레이아웃을 계산하는 강제 동기 레이아웃이 일어나고, 루프에서 반복되면 레이아웃 스래싱입니다. 읽기를 모은 뒤 쓰기를 모으면 레이아웃은 한 번이면 됩니다."
+  optionExplanations={['정답입니다. 읽기와 쓰기를 번갈아 하지 않는 것이 핵심입니다.', 'will-change는 레이어 힌트이며 강제 레이아웃의 원인을 없애지 못합니다.', '프리로드 스캐너와 스크립트 로딩은 이 현상과 관계가 없습니다.', 'CSSOM 생성 문제가 아니라 레이아웃 계산이 반복되는 문제입니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="긴 페이지에서 화면 밖 구역의 렌더링을 건너뛰면서도 내용을 DOM과 접근성 트리에 남기고 찾기·포커스에도 반응하게 하려는 경우에 알맞은 설정은?"
+  options={['content-visibility: hidden', 'display: none', 'content-visibility: auto', 'visibility: hidden']}
+  correctAnswer={3}
+  explanation="content-visibility: auto는 화면 밖일 때 렌더링을 건너뛰지만 내용은 DOM과 접근성 트리에 남고 찾기·포커스에 반응합니다. hidden은 항상 건너뛰며 그 기능들에도 보이지 않습니다."
+  optionExplanations={['hidden은 내용을 항상 건너뛰고 찾기·탭 이동에도 보이지 않습니다.', 'display: none은 렌더 트리에서 제외되어 요소가 렌더링되지 않고 접근성 트리에서도 빠집니다.', '정답입니다. 화면 근처에 오면 렌더링을 시작합니다.', 'visibility: hidden은 렌더 트리에 남아 레이아웃을 차지하므로 렌더링 비용을 줄이지 못합니다.']}
+/>
+
+## 참고 자료
+
+- [HTML Standard — 파싱 모델과 오류 처리](https://html.spec.whatwg.org/multipage/parsing.html)
+- [HTML Standard — 이벤트 루프 처리 모델(렌더링 업데이트)](https://html.spec.whatwg.org/multipage/webappapis.html)
+- [MDN — How browsers work](https://developer.mozilla.org/en-US/docs/Web/Performance/Guides/How_browsers_work)
+- [MDN — Critical rendering path](https://developer.mozilla.org/en-US/docs/Web/Performance/Guides/Critical_rendering_path)
+- [web.dev — Stick to compositor-only properties and manage layer count](https://web.dev/articles/stick-to-compositor-only-properties-and-manage-layer-count)
+- [Paul Irish — What forces layout/reflow](https://gist.github.com/paulirish/5d52fb081b3570c81e3a)
+- [MDN — will-change](https://developer.mozilla.org/en-US/docs/Web/CSS/will-change)
+- [MDN — contain](https://developer.mozilla.org/en-US/docs/Web/CSS/contain)
+- [MDN — content-visibility](https://developer.mozilla.org/en-US/docs/Web/CSS/content-visibility)
+- [web-features 데이터 패키지](https://cdn.jsdelivr.net/npm/web-features/data.json)

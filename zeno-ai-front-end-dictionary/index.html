@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+    <meta id="zeno-theme-color" name="theme-color" content="#ffffff" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="application-name" content="zeno-ai-front-dictionary" />
+    <meta name="description" content="출퇴근하는 짧은 시간, 프론트엔드 용어를 카드로 익히세요. Zeno에서 학습 기록을 남기고 복습할 개념을 다시 만나세요." />
+    <meta property="og:type" content="website" />
+    <meta property="og:locale" content="ko_KR" />
+    <meta property="og:site_name" content="zeno-ai-front-dictionary" />
+    <meta property="og:title" content="zeno-ai-front-dictionary" />
+    <meta property="og:description" content="출퇴근하는 짧은 시간, 프론트엔드 용어를 카드로 익히세요." />
+    <meta property="og:image" content="./brand/zeno-blue/og-image.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="zeno의 파란색 로고" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="zeno-ai-front-dictionary" />
+    <meta name="twitter:description" content="출퇴근하는 짧은 시간, 프론트엔드 용어를 카드로 익히세요." />
+    <meta name="twitter:image" content="./brand/zeno-blue/og-image.png" />
+    <meta name="twitter:image:alt" content="zeno의 파란색 로고" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="zeno" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" type="image/x-icon" href="./brand/zeno-blue/favicon.ico" />
+    <link id="zeno-favicon" rel="icon" type="image/png" sizes="32x32" href="./brand/zeno-blue/favicon.png" />
+    <link id="zeno-favicon-light" rel="icon" type="image/png" sizes="32x32" href="./brand/zeno-blue/favicon.png" media="(prefers-color-scheme: light)" />
+    <link id="zeno-favicon-dark" rel="icon" type="image/png" sizes="32x32" href="./brand/zeno-blue/favicon-dark.png" media="(prefers-color-scheme: dark)" />
+    <link id="zeno-apple-touch-icon" rel="apple-touch-icon" sizes="180x180" href="./brand/zeno-blue/apple-icon.png" />
+    <style>
+      html { background: #ffffff; color-scheme: light; }
+      html[data-theme="dark"] { background: #1b1c1e; color-scheme: dark; }
+      body { margin: 0; background: inherit; }
+      @media (prefers-color-scheme: dark) {
+        html:not([data-theme]) { background: #1b1c1e; color-scheme: dark; }
+      }
+    </style>
+    <script>
+      (() => {
+        let preference = 'system';
+        try {
+          const stored = localStorage.getItem('zeno-theme-preference-v1');
+          if (stored === 'light' || stored === 'dark' || stored === 'system') preference = stored;
+        } catch { /* A blocked device still follows its system appearance. */ }
+        const dark = preference === 'dark' || (preference === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        const theme = dark ? 'dark' : 'light';
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
+        document.querySelector('meta[name="theme-color"]').content = dark ? '#1b1c1e' : '#ffffff';
+        document.getElementById('zeno-favicon').href = dark ? './brand/zeno-blue/favicon-dark.png' : './brand/zeno-blue/favicon.png';
+        document.getElementById('zeno-favicon-light').media = dark ? 'not all' : 'all';
+        document.getElementById('zeno-favicon-dark').media = dark ? 'all' : 'not all';
+        document.getElementById('zeno-apple-touch-icon').href = dark ? './brand/zeno-blue/apple-icon-dark.png' : './brand/zeno-blue/apple-icon.png';
+      })();
+    </script>
+    <title>zeno-ai-front-dictionary</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

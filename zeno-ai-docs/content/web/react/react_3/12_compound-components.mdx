@@ -1,0 +1,325 @@
+---
+title: '12. Compound Component'
+description: 'Root와 Item 구조, Tabs형과 Accordion형 API, Context 공유와 암묵 상태, Controlled Root, 자식 등록, 접근성 연결, 커스텀 합성까지 Compound Component의 설계와 구현을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** Compound Component를 Context 기반으로 직접 설계하고, 상태 소유 방식과 자식 등록, 접근성 속성 연결을 구현 수준에서 설명할 수 있습니다.
+</Callout>
+
+> 구현 예시는 Radix Primitives 문서와 소스(`main` 브랜치)에서 확인한 구조를 단순화한 것입니다. 이름과 세부 동작은 라이브러리 버전에 따라 다를 수 있습니다.
+
+## Root / Item
+
+Compound Component는 상태를 소유하는 Root와, 그 상태를 읽는 여러 부품(Item, Trigger, Content 등)으로 나뉩니다. 호출자는 부품을 JSX로 직접 조립하고, 부품끼리의 연결은 Root가 책임집니다(패턴 비교는 11편).
+
+| 부품 | 역할 |
+|------|------|
+| Root | 상태 소유, Context 제공, 렌더링 요소는 최소(또는 없음) |
+| List, Header 같은 묶음 | 부품을 그룹으로 묶고 키보드 이동 범위를 정함 |
+| Item | 목록의 한 항목. 식별자(`value`)를 가짐 |
+| Trigger | 상태를 바꾸는 부품(버튼) |
+| Content | 상태에 따라 보이거나 숨는 부품(패널) |
+
+- 부품은 같은 `value` 문자열로 짝을 맺습니다. 탭 트리거 `value="a"`는 `value="a"`인 콘텐츠와 연결됩니다.
+- 이름은 두 가지 방식으로 노출합니다. 하나는 `Tabs.List`처럼 점 표기로 붙이는 방식이고, 다른 하나는 `Tabs`, `TabsList`처럼 따로 내보내는 방식입니다. Radix는 `import * as Tabs`로 `Tabs.Root`, `Tabs.List`를 씁니다.
+- Root는 보통 화면에 의미 있는 요소를 만들지 않거나 단순한 컨테이너만 만듭니다. 구조는 호출자에게 맡깁니다.
+
+## Tabs형 API
+
+Tabs형은 Root 하나에 선택값이 하나이고, Trigger와 Content가 `value`로 짝을 이루는 구조입니다.
+
+```tsx
+<Tabs.Root defaultValue="info">
+  <Tabs.List aria-label="계정 설정">
+    <Tabs.Trigger value="info">정보</Tabs.Trigger>
+    <Tabs.Trigger value="pw">비밀번호</Tabs.Trigger>
+  </Tabs.List>
+  <Tabs.Content value="info">...</Tabs.Content>
+  <Tabs.Content value="pw">...</Tabs.Content>
+</Tabs.Root>
+```
+
+Radix Tabs 문서가 정의한 구성은 다음과 같습니다.
+
+| 부품 | 주요 props |
+|------|------------|
+| `Root` | `defaultValue`, `value`, `onValueChange`, `orientation`(기본 horizontal), `activationMode`(기본 automatic) |
+| `List` | 트리거를 정렬하는 컨테이너 |
+| `Trigger` | `value`(필수 문자열) |
+| `Content` | `value`(필수 문자열) |
+
+- 선택 상태는 `data-state`(`active`, `inactive`) 속성으로 노출해 스타일을 호출자가 정하게 합니다.
+- `activationMode`는 포커스가 이동하면 바로 활성화(automatic)할지, Space·Enter를 눌러야 활성화(manual)할지 정합니다. WAI-ARIA의 두 방식과 같습니다.
+
+## Accordion형 API
+
+Accordion형은 Item이 각각 열림·닫힘을 가지고, 같은 Root 안에서 동시에 열 수 있는 개수를 Root가 정하는 구조입니다.
+
+```tsx
+<Accordion.Root type="single" collapsible>
+  <Accordion.Item value="a">
+    <Accordion.Header>
+      <Accordion.Trigger>배송</Accordion.Trigger>
+    </Accordion.Header>
+    <Accordion.Content>...</Accordion.Content>
+  </Accordion.Item>
+</Accordion.Root>
+```
+
+- Radix Accordion의 구성은 `Root`, `Item`, `Header`, `Trigger`, `Content`입니다. Item의 `value`는 필수입니다.
+- Root의 `type`이 `single`이면 한 번에 하나만 열리고 값은 문자열, `multiple`이면 여럿이 열리고 값은 문자열 배열입니다. 소스는 이를 판별 유니언으로 구분합니다.
+- `collapsible`은 `single`에서 열린 항목을 다시 눌러 모두 닫을 수 있게 합니다. 기본값에서는 열린 항목을 닫을 수 없고 트리거가 `aria-disabled`를 가집니다.
+
+```tsx
+type Single = {
+  type: 'single'
+  value?: string
+  defaultValue?: string
+  onValueChange?: (value: string) => void
+  collapsible?: boolean
+}
+type Multiple = {
+  type: 'multiple'
+  value?: string[]
+  defaultValue?: string[]
+  onValueChange?: (value: string[]) => void
+}
+```
+
+- Tabs형과의 차이는 값의 모양(단일 값과 배열)과 닫기 허용 여부입니다. 같은 Compound 구조에서 Root의 상태 모델만 다릅니다.
+- Header는 Trigger를 제목 요소로 감싸서 문서 구조에 헤딩으로 드러나게 합니다. Radix 소스에서는 `h3`로 렌더링합니다.
+
+## Context 공유
+
+Compound Component는 Root가 만든 상태를 Context로 부품에 전달합니다. 부품이 Root의 직계 자식이 아니어도 읽을 수 있다는 점이 핵심입니다.
+
+```tsx
+type TabsCtx = {
+  baseId: string
+  value: string
+  select: (value: string) => void
+}
+const Ctx = createContext<TabsCtx | null>(null)
+
+function useTabs() {
+  const ctx = useContext(Ctx)
+  if (!ctx) throw new Error('Tabs 안에서만 사용합니다')
+  return ctx
+}
+```
+
+- 대안인 `Children.map`과 `cloneElement`로 props를 주입하는 방식은 직계 자식만 닿습니다. 부품을 다른 컴포넌트로 감싸거나 Fragment 안에 넣으면 주입이 끊깁니다. react.dev가 `Children`이 컴포넌트의 렌더링 결과를 볼 수 없다고 경고하는 이유입니다(자세히는 10편).
+- Radix는 Root가 `createTabsContext`로 만든 Context에 `baseId`, `value`, `onValueChange`, `orientation`, `dir`, `activationMode`를 담아 제공합니다.
+- 계층이 둘이면 Context도 둘로 나눕니다. Accordion은 Root의 Context(열린 값 목록)와, 각 `Item`이 만드는 Context(자기 `open`, `disabled`, `triggerId`)를 따로 둡니다. Trigger와 Content는 가장 가까운 Item Context를 읽으므로 Item마다 `value`를 다시 넘기지 않아도 됩니다.
+- 읽는 Hook은 Provider 밖에서 쓰면 에러를 던지게 해서 잘못된 조립을 개발 중에 드러냅니다.
+- Context 값이 바뀌면 읽는 부품이 모두 다시 렌더링됩니다(자세히는 11편). 값을 `useMemo`로 안정화하고 큰 목록에서는 상태를 쪼개는 것을 고려합니다.
+
+## Implicit State
+
+Implicit State는 호출자가 상태를 연결하지 않아도 Root 안에서 상태가 자동으로 관리되는 성질입니다. 호출자는 `defaultValue`만 주고 `useState`를 쓰지 않습니다.
+
+```tsx
+function Tabs({ defaultValue = '', children }: Props) {
+  const baseId = useId()
+  const [value, setValue] = useState(defaultValue)
+  const ctx = { baseId, value, select: setValue }
+  return <Ctx value={ctx}>{children}</Ctx>
+}
+```
+
+```tsx
+function Trigger({ value, children }: TriggerProps) {
+  const { value: cur, select } = useTabs()
+  const onClick = () => select(value)
+  return (
+    <button aria-selected={cur === value} onClick={onClick}>
+      {children}
+    </button>
+  )
+}
+```
+
+- Trigger와 Content는 상태를 props로 받지 않고 Context에서 읽습니다. 호출자의 JSX에는 상태가 보이지 않으므로 사용법이 짧아집니다.
+- 상태가 Root 안에 숨어 있으므로 "내부 상태를 바깥에서 알거나 바꿀 수 없다"는 한계가 생깁니다. 이를 푸는 것이 다음 절의 Controlled Root입니다.
+- 다른 상태(열림 여부, 포커스 위치)도 같은 방식으로 Root나 Item 안에 숨깁니다.
+
+## Controlled Root
+
+Controlled Root는 Root가 `value`와 `onValueChange`를 받아 상태 소유권을 호출자에게 넘길 수 있는 형태입니다. Compound Component에서도 Controlled와 Uncontrolled를 함께 지원하는 것이 기본입니다(원리는 10편).
+
+```tsx
+function Tabs(props: Props) {
+  const { value, defaultValue = '', onValueChange } = props
+  const [cur, setCur] = useControllable(
+    value, defaultValue, onValueChange,
+  )
+  const baseId = useId()
+  const ctx = { baseId, value: cur, select: setCur }
+  return <Ctx value={ctx}>{props.children}</Ctx>
+}
+```
+
+- Radix의 Tabs Root도 `useControllableState`에 `prop: value`, `defaultProp: defaultValue`, `onChange: onValueChange`를 넘기고, 얻은 값을 Context로 내려보냅니다.
+- 자식 부품은 Controlled인지 Uncontrolled인지 알 필요가 없습니다. 항상 Context의 `value`와 `select`만 씁니다. 분기는 Root 한 곳에 있습니다.
+- 쓰는 곳은 선택값을 URL 쿼리나 폼 상태와 동기화하거나, 이동 전에 변경을 검증·거절하거나, 외부 버튼으로 탭을 바꾸는 경우입니다.
+
+```tsx
+const [tab, setTab] = useState('info')
+<Tabs.Root value={tab} onValueChange={setTab}>
+  ...
+</Tabs.Root>
+```
+
+- Accordion의 `type="multiple"`은 값이 배열이므로 `onValueChange`가 항상 새 배열을 반환하게 하고, 호출자는 그 값을 그대로 저장합니다.
+- 중간에 Controlled와 Uncontrolled를 오가면 경고 대상입니다. `value`를 `undefined`에서 문자열로 바꾸지 않도록 호출자가 초기값을 정합니다.
+
+## Child Registration
+
+Child Registration은 부품이 Root에게 자기 존재를 알리는 방식입니다. 키보드 이동처럼 "몇 번째 항목인가", "다음 항목은 무엇인가"를 알아야 할 때 필요합니다.
+
+- 선택 상태는 `value` 문자열로 맺으면 되므로 등록이 필요 없습니다. 등록이 필요한 것은 순서와 목록입니다(화살표 키로 다음 트리거로 이동, 비활성 항목 건너뛰기, `Home`·`End`).
+- `Children.map`의 인덱스로 순서를 알아내는 방식은 부품이 감싸지는 순간 깨집니다. 대신 각 부품이 마운트될 때 Context로 자기 DOM 요소를 등록하고, 언마운트될 때 해제합니다.
+
+```tsx
+function Trigger({ value, disabled, children }: Props) {
+  const { register } = useTabs()
+  const ref = useRef<HTMLButtonElement>(null)
+  useEffect(() => {
+    const item = { value, disabled, el: ref.current! }
+    return register(item) // 해제 함수를 반환
+  }, [value, disabled, register])
+  return <button ref={ref}>{children}</button>
+}
+```
+
+- 등록 순서는 마운트 순서와 DOM 순서가 다를 수 있습니다(조건부 렌더링, 중간 삽입). 그래서 등록할 때마다 `compareDocumentPosition`으로 DOM 순서를 기준으로 정렬합니다.
+- Radix의 collection 유틸이 이 방식입니다. `CollectionItemSlot`이 마운트될 때 요소를 맵에 넣고 문서 위치로 정렬하며, 언마운트되면 맵에서 지웁니다. 아이템 요소에는 `data-radix-collection-item` 속성이 붙고, 소비자는 `useCollection`으로 정렬된 목록을 받습니다.
+- Accordion은 이 collection으로 비활성이 아닌 트리거 목록을 만들어 `Home`, `End`, 방향 키로 포커스를 옮깁니다.
+- 등록은 마운트 뒤에 일어나므로 첫 렌더링 중에는 목록이 비어 있습니다. 렌더링 중에 목록이 필요한 값(총 개수 표시 등)은 따로 설계합니다.
+- 등록 정보를 상태에 두면 변경마다 Root와 Context 소비자가 다시 렌더링됩니다. 키보드 처리에만 필요하면 ref에 보관해서 렌더링을 유발하지 않게 하는 방법도 있습니다.
+
+## 접근성
+
+Compound Component는 부품 사이의 접근성 연결을 컴포넌트가 책임지도록 설계합니다. 호출자가 `id`와 `aria-*`를 짝 맞추게 두지 않는 것이 목적입니다.
+
+Tabs의 WAI-ARIA 구성과 Radix 소스의 대응은 다음과 같습니다.
+
+| 부품 | 속성 | 값 |
+|------|------|----|
+| List | `role` | `tablist` |
+| Trigger | `role`, `aria-selected`, `aria-controls` | `tab`, 활성이면 `true`, 짝 패널 `id` |
+| Content | `role`, `aria-labelledby` | `tabpanel`, 짝 탭 `id` |
+
+Accordion의 WAI-ARIA 구성은 다음과 같습니다.
+
+| 부품 | 속성 | 값 |
+|------|------|----|
+| Header | `role`, `aria-level` | `heading`과 단계 번호(Radix는 `h3` 요소로 렌더링) |
+| Trigger | `role`, `aria-expanded`, `aria-controls` | 버튼, 열림 여부, 패널 `id` |
+| Content | `role`, `aria-labelledby` | `region`, 트리거 `id` |
+| 닫을 수 없는 열린 Trigger | `aria-disabled` | `true` |
+
+- 짝 맞추는 `id`는 Root에서 `useId`로 만든 `baseId`에 `value`를 붙여 만듭니다. Radix는 `${baseId}-trigger-${value}`와 `${baseId}-content-${value}` 형식입니다. `useId`는 서버와 클라이언트에서 같은 값을 보장하므로 하이드레이션 불일치가 없고, 같은 위젯을 여러 개 놓아도 충돌하지 않습니다.
+- `useId` 문서에 따라 목록의 `key`에는 쓰지 않습니다. 데이터에서 키를 만듭니다.
+- 키보드는 WAI-ARIA 패턴을 따릅니다.
+
+| 패턴 | 키 | 동작 |
+|------|----|------|
+| Tabs | `Tab` | 탭 목록에서는 활성 탭으로 포커스가 들어감 |
+| Tabs | 좌우(세로 배치는 상하) 화살표 | 이전·다음 탭으로 이동하고 automatic이면 활성화 |
+| Tabs | `Home`, `End` | 첫·마지막 탭 |
+| Tabs | `Space`, `Enter` | manual 모드에서 활성화 |
+| Accordion | `Enter`, `Space` | 헤더의 패널 펼침·접힘 |
+| Accordion | `Tab` | 문서의 일반 탭 순서 |
+| Accordion | 방향 키, `Home`, `End` | 트리거 사이 이동(선택 기능) |
+
+- 탭 목록은 활성 탭 하나만 `Tab` 순서에 들어가고 나머지는 화살표로 이동합니다(roving focus). Radix는 `List`를 `RovingFocusGroup.Root`로, 각 Trigger를 `RovingFocusGroup.Item`으로 감쌉니다.
+- 비활성 Content는 `hidden` 속성으로 숨깁니다(Radix 소스는 `hidden={!present}`). 보이지 않는 패널을 DOM에 남길지 제거할지는 구현이 정합니다.
+- 호출자 책임으로 남는 것: 탭 목록의 이름(`aria-label`이나 `aria-labelledby`), 패널 안의 콘텐츠 접근성입니다. 접근성 테스트 방법은 20편에서 다룹니다.
+
+## Custom Composition
+
+Custom Composition은 라이브러리나 Compound Component를 가져다 앱의 도메인 컴포넌트로 다시 조립하는 일입니다. Context 기반 설계라서 부품을 자유롭게 감싸고 교체할 수 있습니다.
+
+```tsx
+function SettingsTab({ value, label }: Props) {
+  return (
+    <Tabs.Trigger value={value} className="settings-tab">
+      <Icon name={value} /> {label}
+    </Tabs.Trigger>
+  )
+}
+// <Tabs.List>
+//   <SettingsTab value="info" label="정보" />
+// </Tabs.List>
+```
+
+- 부품을 감싼 래퍼도 Root의 Context를 그대로 읽으므로 동작합니다. 직계 자식을 가정한 `cloneElement` 방식이라면 깨질 구조입니다.
+- 요소 자체를 바꾸고 싶으면 `asChild`를 씁니다. 라우터의 `Link`를 탭 트리거로 쓰거나, 아코디언 Trigger를 직접 만든 버튼 컴포넌트로 바꿀 수 있습니다. 자식은 props를 DOM에 펼치고 ref를 전달해야 합니다(자세히는 10편).
+- 부품 하나를 기능 있는 컴포넌트로 확장할 때는 Compound 라이브러리가 노출하는 Hook이나 Context(`useTabsContext` 같은 것)에 의존하지 않고 공개된 props와 `data-state`로 해결하는 것이 안전합니다. 내부 Context는 공개 API가 아닐 수 있습니다.
+- 앱의 디자인 시스템에서는 Compound 부품에 스타일만 입힌 얇은 래퍼를 만들어 한 번에 내보냅니다(자세히는 13편, 22편).
+- 규칙: 부품 이름은 구조가 드러나게 짓고(`Tabs.Trigger`), 잘못된 위치에 두면 에러를 던지며, 각 부품은 나머지 props와 `ref`를 루트 요소에 전달합니다.
+
+**흔한 실수:**
+
+- Trigger와 Content의 `value`를 서로 다르게 쓰는 것입니다. 연결이 끊겨 패널이 보이지 않습니다.
+- `Tabs.List` 없이 Trigger를 직접 두는 것입니다. 키보드 이동 범위와 `tablist` 역할이 사라집니다.
+- 선택 상태를 호출자의 `useState`와 Root 내부 상태에 이중으로 두는 것입니다. 한쪽만 소유하게 합니다.
+
+## 핵심 정리
+
+- Compound Component는 상태를 소유하는 Root와, `value`로 짝을 맺는 부품들(List, Trigger, Content, Item)로 구성하며 호출자가 JSX로 조립합니다.
+- Tabs형은 선택값이 하나이고 Accordion형은 `type`에 따라 단일 값 또는 배열을 가지며, Root의 상태 모델만 다르고 구조는 같습니다.
+- 상태는 Context로 공유해야 부품을 감싸거나 깊이 중첩해도 동작하고, 상태는 Root 안에 숨겨 호출자가 연결하지 않게 합니다(Implicit State).
+- Controlled Root는 `value`와 `onValueChange`로 소유권을 호출자에게 넘기며, Controlled 여부 분기는 Root 한 곳에 두고 부품은 Context의 `value`와 `select`만 씁니다.
+- 순서와 목록이 필요하면 부품이 마운트 때 Context로 요소를 등록하고 DOM 순서로 정렬합니다. Radix의 collection이 이 방식입니다.
+- `useId`로 만든 `baseId`와 `value`로 `aria-controls`, `aria-labelledby`, `id`를 컴포넌트가 직접 짝 맞추고, 키보드는 WAI-ARIA 패턴(roving focus)을 따릅니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="Compound Component에서 Children.map과 cloneElement로 자식에게 상태를 주입하는 방식 대신 Context를 쓰는 가장 큰 이유는?"
+  options={['Context가 항상 렌더링 횟수를 줄여 주기 때문이다', '부품을 다른 컴포넌트로 감싸거나 깊이 중첩해도 Root의 상태를 읽을 수 있기 때문이다', 'cloneElement는 React 19에서 제거되었기 때문이다', 'Context를 쓰면 접근성 속성이 자동으로 생기기 때문이다']}
+  correctAnswer={2}
+  explanation="Children.map과 cloneElement는 children에 직접 전달된 요소에만 닿고, 컴포넌트가 렌더링한 결과는 볼 수 없어서 부품을 감싸면 주입이 끊깁니다. Context는 트리 위의 가장 가까운 Provider에서 값을 읽으므로 중간에 다른 컴포넌트가 있어도 동작합니다."
+  optionExplanations={['Context 값이 바뀌면 읽는 부품이 모두 다시 렌더링되므로 렌더링 횟수 감소가 주된 이유가 아닙니다.', '직계 자식 가정이 필요 없고 감싸기와 중첩에 견디는 것이 핵심 이유입니다.', 'cloneElement는 제거되지 않았고 react.dev가 드물게 쓰며 깨지기 쉽다고 경고하는 API입니다.', '접근성 속성은 컴포넌트가 직접 구현해야 하며 Context가 자동으로 만들어 주지 않습니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="Tabs의 Trigger가 짝이 되는 Content와 접근성 속성으로 올바르게 연결되려면 어떻게 해야 하는가?"
+  options={['호출자가 각 Trigger와 Content에 직접 같은 id 문자열을 적게 한다', 'Root에서 useId로 baseId를 만들고 value를 붙인 id로 aria-controls와 aria-labelledby를 컴포넌트가 설정한다', 'Content의 aria-labelledby만 설정하고 Trigger에는 아무것도 설정하지 않는다', 'Math.random으로 렌더링마다 새 id를 만든다']}
+  correctAnswer={2}
+  explanation="Radix 구현처럼 Root가 useId로 baseId를 만들고 baseId와 value로 트리거 id와 콘텐츠 id를 정하면, Trigger는 aria-controls로 패널을, Content는 aria-labelledby로 탭을 가리키게 됩니다. useId는 서버와 클라이언트가 같은 값을 보장해 하이드레이션 불일치도 막습니다."
+  optionExplanations={['호출자가 짝을 맞추게 하면 실수가 잦고 같은 위젯을 여러 개 둘 때 충돌합니다.', 'useId 기반의 baseId와 value 조합을 컴포넌트가 설정하는 것이 올바른 방식입니다.', 'Trigger의 aria-controls와 aria-selected도 필요하며 한쪽만 연결하면 불완전합니다.', '렌더링마다 바뀌는 id는 연결을 끊고 서버와 클라이언트 값도 달라 하이드레이션 불일치를 만듭니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="Accordion Root의 type이 single이고 collapsible이 설정되지 않았을 때 동작으로 옳은 것은?"
+  options={['여러 항목을 동시에 열 수 있다', '이미 열린 항목을 다시 눌러도 닫히지 않고 그 트리거는 aria-disabled를 가진다', '모든 항목이 항상 닫혀 있다', '값이 문자열 배열로 전달된다']}
+  correctAnswer={2}
+  explanation="single은 한 번에 하나만 열리고 값이 문자열입니다. collapsible이 없으면 열린 항목을 닫을 수 없으며, Radix 구현은 열린 상태이면서 collapsible이 아닐 때 트리거에 aria-disabled를 설정합니다. 여러 개를 열려면 multiple이고 이때 값이 배열입니다."
+  optionExplanations={['동시에 여러 개를 여는 것은 type이 multiple일 때입니다.', 'single이면서 collapsible이 없으면 열린 항목은 닫히지 않고 트리거가 aria-disabled입니다.', '항상 닫힌 상태가 되는 설정은 없습니다. 열린 항목이 있으면 유지됩니다.', '배열 값은 multiple에서 쓰이며 single은 문자열입니다.']}
+/>
+
+## 참고 자료
+
+- [Radix Primitives — Tabs](https://www.radix-ui.com/primitives/docs/components/tabs)
+- [Radix Primitives — Accordion](https://www.radix-ui.com/primitives/docs/components/accordion)
+- [Radix Primitives — Introduction](https://www.radix-ui.com/primitives/docs/overview/introduction)
+- [Radix Primitives — Composition (asChild)](https://www.radix-ui.com/primitives/docs/guides/composition)
+- [Radix 저장소 — tabs.tsx](https://github.com/radix-ui/primitives/blob/main/packages/react/tabs/src/tabs.tsx)
+- [Radix 저장소 — accordion.tsx](https://github.com/radix-ui/primitives/blob/main/packages/react/accordion/src/accordion.tsx)
+- [Radix 저장소 — collection.tsx](https://github.com/radix-ui/primitives/blob/main/packages/react/collection/src/collection.tsx)
+- [Radix 저장소 — use-controllable-state.tsx](https://github.com/radix-ui/primitives/blob/main/packages/react/use-controllable-state/src/use-controllable-state.tsx)
+- [WAI-ARIA Authoring Practices — Tabs Pattern](https://www.w3.org/WAI/ARIA/apg/patterns/tabs/)
+- [WAI-ARIA Authoring Practices — Accordion Pattern](https://www.w3.org/WAI/ARIA/apg/patterns/accordion/)
+- [react.dev — useId](https://react.dev/reference/react/useId)
+- [react.dev — createContext](https://react.dev/reference/react/createContext)
+- [react.dev — useContext](https://react.dev/reference/react/useContext)
+- [react.dev — Children](https://react.dev/reference/react/Children)
+- [react.dev — cloneElement](https://react.dev/reference/react/cloneElement)
+- [react.dev — Sharing State Between Components](https://react.dev/learn/sharing-state-between-components)

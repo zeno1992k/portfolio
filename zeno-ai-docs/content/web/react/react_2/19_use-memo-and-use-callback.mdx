@@ -1,0 +1,408 @@
+---
+title: '19. useMemo와 useCallback'
+description: 'useMemo와 useCallback이 값과 함수의 참조를 캐시하는 방식, 비싼 계산·memo 자식·Effect 의존성에서의 쓰임, updater로 의존성 줄이기, 메모이제이션이 깨지는 경우와 Compiler 시대의 판단 기준을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** `useMemo`와 `useCallback`이 무엇을 캐시하는지 설명하고, 쓸 만한 경우와 의미 없는 경우를 구분하며, 메모이제이션이 깨지는 원인을 찾아 고칠 수 있습니다.
+</Callout>
+
+## useMemo
+
+`useMemo`는 계산 결과를 렌더링 사이에 캐시하는 Hook입니다. 의존성이 바뀌지 않으면 이전 결과를 그대로 돌려줍니다.
+
+```jsx
+const cached = useMemo(calculateValue, dependencies)
+```
+
+| 인수 | 설명 |
+|------|------|
+| `calculateValue` | 인수가 없고 값을 반환하는 순수 함수. 첫 렌더링과 의존성이 바뀐 렌더링에서만 호출 |
+| `dependencies` | `calculateValue`가 읽는 반응형 값(props, state, 컴포넌트 본문의 변수·함수)의 배열 |
+
+- 반환값은 첫 렌더링에서는 `calculateValue()`의 결과이고, 이후에는 캐시된 값 또는 새로 계산한 값입니다.
+- 의존성 배열의 길이는 고정이고 `[a, b, c]`처럼 인라인으로 씁니다.
+- 컴포넌트 최상위에서만 호출합니다. 반복문·조건문 안에서는 호출할 수 없습니다.
+- 개발 모드(Strict Mode)에서는 순수한지 확인하려고 `calculateValue`를 두 번 호출합니다. 한쪽 결과는 버리고, 프로덕션에서는 한 번만 호출합니다.
+- 반복문 안에서 항목마다 필요하면 항목 컴포넌트를 따로 만들어 그 안에서 `useMemo`를 호출합니다.
+
+```jsx
+// ❌ 반복문 안에서 호출
+items.map((item) => {
+  const data = useMemo(() => report(item), [item])
+  return <Chart data={data} />
+})
+// ✅ 컴포넌트로 분리
+items.map((item) => <Report key={item.id} item={item} />)
+// Report 안에서 useMemo(() => report(item), [item])
+```
+
+## 비싼 계산
+
+`useMemo`의 첫 번째 용도는 렌더링 중의 느린 계산을 반복하지 않는 것입니다.
+
+```jsx
+const visible = useMemo(
+  () => filterTodos(todos, tab),
+  [todos, tab],
+)
+```
+
+- 부모가 다른 이유(예: 입력창의 state)로 재렌더링돼도 `todos`와 `tab`이 같으면 `filterTodos`를 다시 호출하지 않습니다.
+- 계산이 비싼지는 시간을 재서 판단합니다. 공식 문서의 기준은 1ms 이상입니다.
+
+```jsx
+console.time('filter')
+const visible = filterTodos(todos, tab)
+console.timeEnd('filter')
+// filter: 0.15ms → 메모이제이션 불필요
+```
+
+- 개발 모드가 아니라 프로덕션 빌드로 측정합니다. 사용자의 기기는 개발 환경보다 느리므로 Chrome DevTools의 CPU 스로틀링으로 느린 기기를 흉내 냅니다.
+- 1ms 미만의 계산은 대부분 메모이제이션의 이득이 없습니다.
+- 계산 함수는 순수해야 합니다. 받은 props나 state를 고치면 안 됩니다.
+
+```jsx
+// ❌ 받은 todos를 직접 변경
+useMemo(() => {
+  todos.push(x)
+  return filter(todos)
+}, [todos])
+// ✅ 새로 만든 배열만 변경
+useMemo(() => {
+  const r = filter(todos)
+  r.push(x)
+  return r
+}, [todos])
+```
+
+- 화살표 함수에서 객체를 바로 반환하려면 `() => ({ ... })`로 씁니다. `() => { a: 1 }`은 블록이어서 `undefined`를 반환합니다.
+
+## Dependency
+
+의존성 배열은 `calculateValue`가 읽는 모든 반응형 값을 나열한 것입니다. React는 각 값을 이전 렌더링의 값과 `Object.is`로 비교합니다.
+
+- 하나라도 다르면 다시 계산하고, 모두 같으면 캐시를 씁니다.
+- 원시 값은 값이 같으면 같고, 객체·배열·함수는 같은 참조일 때만 같습니다.
+- 배열을 아예 생략하면 매 렌더링마다 다시 계산합니다.
+
+```jsx
+// ❌ 배열 없음: 매번 재계산
+useMemo(() => filterTodos(todos, tab))
+// ✅ 배열 있음
+useMemo(() => filterTodos(todos, tab), [todos, tab])
+```
+
+- 의존성 누락은 `eslint-plugin-react-hooks`의 `exhaustive-deps` 규칙이 검사합니다. 린트를 끄고 값을 일부러 빼면 React에 거짓 의존성을 알리는 셈이라 버그 위험이 매우 큽니다.
+- 매번 다시 계산되는 이유를 찾을 때는 의존성을 `console.log([todos, tab])`로 찍어 두 렌더링 사이에서 어떤 값이 다른 참조인지 비교합니다.
+
+## 참조 안정성
+
+참조 안정성(referential stability)은 값이 렌더링이 지나도 같은 참조를 유지하는 성질입니다. `useMemo`는 계산 비용을 아끼는 것 말고도 참조를 유지하는 데 씁니다.
+
+```jsx
+function Parent({ name, age }) {
+  const a = { name, age } // 렌더링마다 새 참조
+  const b = useMemo(
+    () => ({ name, age }),
+    [name, age],
+  ) // 같은 참조 유지
+}
+```
+
+- 참조가 안정돼야 하는 곳은 세 군데입니다. `memo` 자식의 prop(자세히는 18편), 다른 Hook의 의존성, Context의 `value`(자세히는 1편)입니다.
+- 참조가 필요 없는 곳에서는 유지할 이유가 없습니다. 이 객체를 `div`의 `style`에 넘기는 정도라면 새로 만들어도 됩니다.
+
+## Object Memoization
+
+객체·배열을 만들어 넘기거나 다른 Hook의 의존성으로 쓸 때 `useMemo`로 참조를 고정합니다.
+
+```jsx
+const options = useMemo(() => {
+  return { matchMode: 'whole-word', text }
+}, [text])
+
+useEffect(() => {
+  connect(options)
+}, [options])
+```
+
+- `text`가 같으면 `options`도 같은 참조라서 Effect가 다시 실행되지 않습니다.
+- 객체가 Effect 안에서만 쓰이면 `useMemo`보다 객체를 Effect 안으로 옮기는 편이 낫습니다. 의존성 자체가 사라집니다.
+
+```jsx
+useEffect(() => {
+  const options = { matchMode: 'whole-word', text }
+  connect(options)
+}, [text])
+```
+
+- 객체를 파생 값으로 만들지 않고 필요한 원시 값만 의존성에 쓰는 방법도 있습니다. `[options]` 대신 `[text]`입니다.
+
+## Filtered List
+
+필터링한 목록이 대표적인 `useMemo` 사례입니다. 계산도 비싸고, 결과 배열을 `memo` 자식에게 넘기기 때문입니다.
+
+```jsx
+function Page({ todos, theme }) {
+  const visible = useMemo(
+    () => filterTodos(todos, tab),
+    [todos, tab],
+  )
+  return <List items={visible} />
+}
+const List = memo(function List({ items }) { /* ... */ })
+```
+
+- `theme` 같은 다른 prop이 바뀌어 `Page`가 재렌더링돼도 `visible`은 같은 참조이므로 `List`의 재렌더링도 건너뜁니다.
+- 계산을 메모이제이션하지 않으면 `List`가 `memo`여도 소용이 없습니다. 렌더링마다 새 배열이 만들어져 비교에 실패하기 때문입니다.
+- 둘 중 하나만 있으면 효과가 없고, 둘이 함께 있어야 합니다. 목록이 아주 길 때는 렌더링 자체를 줄이는 방법을 씁니다(자세히는 21편).
+
+## 의미 없는 경우
+
+`useMemo`가 이득이 없는 경우는 다음과 같습니다.
+
+- 계산이 1ms 미만으로 가볍다.
+- 결과를 받는 쪽이 `memo`가 아니고 Hook 의존성에도 쓰이지 않는다. 참조가 같든 다르든 받는 쪽의 동작이 같다.
+- 입력이 렌더링마다 바뀐다. 캐시가 매번 무효가 된다.
+- 결과가 원시 값이어서 참조 비교가 필요 없고 계산도 싸다.
+
+```jsx
+// 의미 없음: 곱셈 한 번, 결과는 숫자
+const total = useMemo(() => price * qty, [price, qty])
+// 그냥 계산
+const total = price * qty
+```
+
+- 의존성 배열 비교와 클로저 생성도 비용입니다. 가벼운 계산을 감싸면 오히려 느릴 수 있습니다.
+- `useMemo`는 성능 최적화로만 의존해야 합니다. 이 Hook 없이는 동작이 틀어진다면 근본 원인을 먼저 고칩니다.
+- 공식 문서는 대부분의 앱에서 메모이제이션이 필요 없다고 안내합니다. 그림 편집기처럼 세밀한 상호작용이 많은 화면이 예외입니다.
+- 느린 이유를 먼저 찾습니다. state를 필요한 곳 가까이로 내리거나 `children`으로 JSX를 넘기면 재렌더링 자체가 줄어듭니다(자세히는 18편).
+
+## Compiler와 useMemo
+
+React Compiler를 쓰면 값과 함수의 메모이제이션을 컴파일러가 자동으로 합니다. 수동 `useMemo` 호출이 줄어듭니다.
+
+- 새 코드는 컴파일러에 맡기고, `useMemo`는 정밀한 제어가 필요할 때의 탈출구로만 씁니다.
+- 기존 코드의 `useMemo`는 지우지 않고 둡니다. 지우면 컴파일 결과가 달라질 수 있어서 지울 때는 꼼꼼히 테스트하라는 것이 공식 안내입니다.
+- 컴파일러가 대신해 주지 못하는 대표적인 경우가 Effect 의존성입니다. 메모이제이션한 값을 Effect의 의존성으로 써서, 의존성이 실질적으로 바뀌지 않을 때 Effect가 반복 실행되지 않게 하는 용도입니다.
+- 컴파일러는 React 규칙을 지키는 코드를 전제로 합니다.
+
+## useCallback
+
+`useCallback`은 함수 자체를 렌더링 사이에 캐시하는 Hook입니다. 의존성이 같으면 같은 함수 참조를 돌려줍니다.
+
+```jsx
+const cachedFn = useCallback(fn, dependencies)
+```
+
+- `useCallback(fn, deps)`는 `useMemo(() => fn, deps)`와 같은 효과입니다. 함수를 반환하는 래퍼를 쓰지 않아도 됩니다.
+- `fn`을 호출하지 않고 함수 그 자체를 저장합니다. 호출은 나중에 사용하는 쪽이 합니다.
+- `useMemo`와 같이 컴포넌트 최상위에서만 호출하고, 반복문·조건문 안에서는 부를 수 없습니다. 항목마다 필요하면 항목 컴포넌트로 나눕니다.
+- 의존성 배열을 빼면 매번 새 함수가 돌려집니다.
+
+```jsx
+const handle = useCallback((order) => {
+  post('/buy/' + productId, { referrer, order })
+}, [productId, referrer])
+```
+
+## 함수 참조
+
+JavaScript의 함수는 객체라서 렌더링마다 본문에서 만든 함수는 서로 다른 참조입니다.
+
+```jsx
+function Parent() {
+  const a = () => {}
+  const b = () => {}
+  // a와 b는 같은 코드여도 Object.is(a, b)는 false
+}
+```
+
+- 함수 참조가 중요해지는 곳은 `memo` 자식의 prop, Effect·Hook의 의존성, 구독·해제를 짝으로 맞춰야 하는 곳(예: `removeEventListener`에 같은 함수 필요)입니다.
+- 함수 참조가 달라져도 문제가 없는 곳이 대부분입니다. `button`의 `onClick`에 새 함수를 넘기는 것은 비용이 거의 없습니다.
+- 함수를 컴포넌트 밖으로 꺼낼 수 있으면 `useCallback`이 필요 없습니다. 부모의 props·state를 쓰지 않는 함수가 그렇습니다.
+
+## Memoized Child
+
+`useCallback`의 대표적인 용도는 `memo` 자식에게 함수를 넘기는 것입니다.
+
+```jsx
+function ProductPage({ productId, referrer, theme }) {
+  const handleSubmit = useCallback((order) => {
+    post('/buy/' + productId, { referrer, order })
+  }, [productId, referrer])
+
+  return <ShippingForm onSubmit={handleSubmit} />
+}
+
+const ShippingForm = memo(function Form({ onSubmit }) {
+  // ...
+})
+```
+
+- `theme`이 바뀌어 `ProductPage`가 재렌더링돼도 `productId`와 `referrer`가 같으면 `handleSubmit`은 같은 참조입니다. `ShippingForm`은 건너뜁니다.
+- 자식이 `memo`가 아니면 함수 참조가 같아도 어차피 재렌더링되므로 `useCallback`은 쓸모가 없습니다.
+- 자식에게 넘기는 prop이 여럿이면 전부 안정돼야 효과가 있습니다. 하나만 새 참조여도 자식은 재렌더링됩니다.
+- 항목마다 다른 인수가 필요한 목록 핸들러는 항목 컴포넌트로 분리해 그 안에서 `useCallback`을 호출합니다.
+
+## Effect Dependency
+
+함수가 Effect의 의존성이면 그 함수가 바뀔 때마다 Effect가 다시 실행됩니다. `useCallback`으로 참조를 고정하면 실행을 줄일 수 있지만, 공식 문서는 함수를 Effect 안으로 옮기는 방법을 먼저 권합니다.
+
+```jsx
+// ✅ 함수를 Effect 안으로: 의존성은 roomId 하나
+useEffect(() => {
+  function createOptions() {
+    return { serverUrl: 'https://localhost:1234', roomId }
+  }
+  const connection = createConnection(createOptions())
+  connection.connect()
+  return () => connection.disconnect()
+}, [roomId])
+```
+
+- 함수가 Effect 밖의 컴포넌트 본문에 있으면 의존성에 넣어야 하고, 그 함수는 렌더링마다 새로 만들어집니다. 이때 Effect가 매번 실행됩니다.
+- Effect 안으로 옮기면 함수가 반응형 값을 직접 읽고, 의존성에는 그 값만 남습니다. `useCallback`이 필요 없습니다.
+- 함수를 Effect 밖에서 써야 하면(이벤트 핸들러와 공유하는 경우) `useCallback`으로 감싸고 그 의존성을 정확히 적습니다.
+- 매번 실행되는 Effect를 막으려고 의존성 배열에서 함수를 일부러 빼면 안 됩니다. 오래된 값을 읽는 버그의 원인입니다. 최신 값을 읽되 반응하지 않아야 하면 `useEffectEvent`를 씁니다(자세히는 4편).
+
+## Callback Dependency
+
+`useCallback`으로 감싼 함수의 의존성이 바뀌면 그 함수도 새 참조가 됩니다. 그러면 그 함수를 받는 `memo` 자식과 Effect도 영향을 받습니다. 의존성이 연쇄적으로 전파됩니다.
+
+```jsx
+const handleAdd = useCallback((text) => {
+  setTodos([...todos, { text }])
+}, [todos])
+// todos가 바뀔 때마다 handleAdd도 새 함수
+```
+
+- `handleAdd`를 `memo` 자식에게 넘기고 있다면 todos가 바뀔 때마다 그 자식이 재렌더링됩니다. 이 `useCallback`은 의미가 없습니다.
+- 커스텀 Hook이 함수를 반환할 때는 그 함수를 `useCallback`으로 감싸서 반환합니다. Hook을 쓰는 쪽이 그 함수를 `memo` 자식이나 Effect 의존성에 쓸 수 있어서입니다.
+
+```jsx
+function useRouter() {
+  const { dispatch } = useContext(RouterStateContext)
+  const navigate = useCallback((url) => {
+    dispatch({ type: 'navigate', url })
+  }, [dispatch])
+  return { navigate }
+}
+```
+
+## Updater로 의존성 줄이기
+
+state를 바꾸는 콜백이 현재 state를 읽기 때문에 의존성이 생기는 경우가 많습니다. updater 함수를 쓰면 현재 state를 의존성에서 뺄 수 있습니다.
+
+```jsx
+// ❌ todos가 의존성 → todos가 바뀔 때마다 새 함수
+const add = useCallback((text) => {
+  setTodos([...todos, { text }])
+}, [todos])
+
+// ✅ updater: React가 최신 todos를 넘겨줌
+const add = useCallback((text) => {
+  setTodos((prev) => [...prev, { text }])
+}, [])
+```
+
+- `setTodos(prev => ...)`의 `prev`는 대기 중인 업데이트까지 반영된 최신 값입니다. 클로저가 붙잡고 있는 오래된 `todos`를 읽을 필요가 없습니다.
+- 의존성이 `[]`이므로 함수는 한 번만 만들어지고, `memo` 자식은 건너뜁니다.
+- `set` 함수는 정체성이 안정적이므로 의존성에 넣지 않아도 됩니다.
+- 상태 전이가 복잡하면 `useReducer`의 dispatch만 넘기는 방법도 있습니다(자세히는 2편).
+
+## 남용
+
+`useCallback`·`useMemo`를 모든 함수와 값에 습관처럼 붙이면 오히려 손해입니다.
+
+- 의존성 배열 관리, 비교, 클로저 보관이 비용입니다.
+- 코드가 읽기 어려워집니다. 의존성이 바뀔 때마다 함께 고쳐야 합니다.
+- 받는 쪽이 `memo`도 아니고 Hook 의존성도 아니면 효과가 없습니다.
+- 인라인 객체·함수처럼 매번 새 참조가 되는 곳이 하나라도 남아 있으면 앞의 메모이제이션이 전부 헛됩니다.
+
+판단 기준은 순서대로 따릅니다.
+
+1. 느린가? 측정한다(자세히는 20편).
+2. 느리다면 렌더링 구조(state 위치, `children`)로 해결되는가?
+3. 아니라면 어디서 재렌더링이 불필요하게 일어나는지 찾는다.
+4. 그 지점에서 `memo`와 안정된 props(`useMemo`·`useCallback`)를 한 쌍으로 적용한다.
+5. 다시 측정해 이득이 있는지 확인한다.
+
+**흔한 실수:** `useCallback`만 쓰고 자식에 `memo`를 안 씌우는 것입니다. 또는 `memo`만 쓰고 인라인 함수를 그대로 두는 것입니다. 둘 다 효과가 없습니다.
+
+## Compiler와 useCallback
+
+`useCallback`도 `useMemo`와 같은 지침입니다. React Compiler를 쓰면 함수를 자동으로 메모이제이션합니다.
+
+- 새 코드에서는 `useCallback`을 습관적으로 쓰지 않습니다. 컴파일러가 인라인 화살표 함수처럼 `memo`를 깨던 코드도 처리합니다.
+- 기존 `useCallback`은 그대로 둡니다.
+- Compiler 자체의 동작 원리와 설정은 이 과목의 범위 밖입니다.
+
+## 메모이제이션이 깨지는 4가지 경우
+
+메모이제이션을 해 두었는데 효과가 없을 때 아래 네 가지를 차례로 점검합니다.
+
+| 번호 | 깨지는 경우 | 증상 | 해결 |
+|------|-------------|------|------|
+| 1 | 의존성 배열 누락 | `useMemo`·`useCallback`이 매 렌더링 새 값 반환 | 두 번째 인수에 배열 전달 |
+| 2 | 의존성이 매번 새 참조 | 배열은 있지만 값이 매번 다른 객체·함수 | 의존성 자체를 `useMemo`·`useCallback`으로 고정하거나 원시 값으로 교체 |
+| 3 | 받는 쪽이 `memo`가 아님 | 참조는 같은데 자식이 재렌더링 | 자식을 `memo`로 감쌈 |
+| 4 | 다른 prop이 불안정 | 감싼 prop 외에 인라인 객체·함수·JSX가 하나 있음 | 모든 prop을 안정화 |
+
+```jsx
+const onSave = useCallback(() => save(id), [id])
+// ❌ 4번: style 인라인 객체 때문에 memo 자식이 매번 재렌더링
+return <Form onSave={onSave} style={{ color: 'red' }} />
+```
+
+- 의존성 중 어느 값이 달라지는지 찾으려면 `console.log([a, b])`로 두 렌더링의 값을 비교합니다.
+- `memo`가 막지 못하는 경우도 있습니다. 컴포넌트 자신의 state가 바뀌거나 읽고 있는 Context 값이 바뀌면 재렌더링됩니다(자세히는 18편).
+- 캐시는 보장이 아닙니다. 개발 중 컴포넌트 파일을 수정하면 캐시가 사라지고, 첫 마운트 중에 Suspense로 중단되어도 캐시가 버려집니다(Suspense는 11편). 그래서 로직이 캐시에 의존해서는 안 되고 최적화로만 써야 합니다.
+- 캐시를 반드시 유지해야 하는 값은 `useMemo`가 아니라 state나 ref에 둡니다.
+
+## 핵심 정리
+
+- `useMemo`는 계산 결과를, `useCallback`은 함수를 의존성이 같은 동안 같은 참조로 캐시하며, 비교는 `Object.is`입니다.
+- `useMemo`는 1ms 이상 걸리는 계산을 프로덕션 빌드로 재서 판단하고, 결과가 `memo` 자식 prop이나 Hook 의존성일 때 참조 안정화에도 씁니다.
+- 함수는 Effect 안으로 옮기면 `useCallback` 없이 의존성이 사라지고, state 변경 콜백은 updater 함수로 의존성을 줄입니다.
+- 메모이제이션은 받는 쪽이 `memo`이고 모든 prop이 안정적일 때만 효과가 있으며, 의존성 누락·새 참조 의존성·비 `memo` 자식·불안정한 다른 prop이 흔히 깨뜨립니다.
+- 캐시는 보장이 아니므로 최적화로만 의존합니다.
+- Compiler를 쓰면 새 코드는 맡기고, 기존 `useMemo`·`useCallback`은 두며, 가장 남는 용도는 Effect 의존성 안정화입니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="Compiler 없이 memo 자식에게 함수 prop을 넘기려고 한다. 부모가 theme state로 재렌더링돼도 자식이 건너뛰게 하려면?"
+  options={['함수를 useCallback으로 감싸고, 자식도 memo로 감싼다', '자식에는 아무것도 하지 않고 함수만 useCallback으로 감싼다', '함수에 useMemo를 쓰고 의존성 배열을 생략한다', '함수를 렌더링마다 새로 만든다']}
+  correctAnswer={1}
+  explanation="참조를 고정하는 것(useCallback)과 그 참조 변화를 확인해 건너뛰는 것(memo)이 한 쌍으로 있어야 합니다. 자식이 memo가 아니면 함수 참조가 같아도 재렌더링하고, 의존성 배열을 생략하면 매번 새 값을 반환합니다."
+  optionExplanations={['정답입니다. 안정된 참조와 memo가 함께 있어야 건너뜁니다.', '자식이 memo가 아니면 부모의 재렌더링을 따라 재렌더링합니다.', '의존성 배열을 생략하면 매 렌더링 새로 만들어져 캐시가 의미 없습니다.', '매번 새 참조이므로 memo 자식이 항상 재렌더링합니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="useCallback의 의존성에서 todos를 없애면서 항상 최신 todos를 기반으로 새 배열을 만들려면 어떻게 하는가?"
+  options={['의존성 배열에서 todos를 일부러 뺀다', 'setTodos에 이전 값을 받는 updater 함수를 넘긴다', 'todos를 컴포넌트 밖 변수로 옮긴다', 'useMemo로 todos를 감싼다']}
+  correctAnswer={2}
+  explanation="setTodos의 updater 함수는 대기 중인 업데이트까지 반영된 최신 state를 인수로 받습니다. 클로저가 붙잡은 todos를 읽지 않아도 되므로 의존성을 비울 수 있습니다. 값을 일부러 빼면 오래된 값을 읽는 버그가 생깁니다."
+  optionExplanations={['오래된 todos를 읽는 버그가 생깁니다.', '정답입니다. updater가 최신 값을 인수로 받아 의존성이 필요 없습니다.', 'state를 컴포넌트 밖 변수로 옮기면 렌더링과 연결되지 않습니다.', 'useMemo는 todos를 최신으로 만들어 주지 않습니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="메모이제이션이 깨지는 원인으로 보기 어려운 것은?"
+  options={['useMemo의 의존성 배열 인수를 생략했다', 'memo 자식에게 useCallback 함수와 인라인 객체를 함께 넘겼다', 'useCallback 함수를 받는 자식이 memo가 아니다', 'useMemo에 넘긴 계산 함수가 순수하다']}
+  correctAnswer={4}
+  explanation="계산 함수가 순수한 것은 요구 사항이지 문제가 아닙니다. 의존성 배열 생략은 매번 재계산을, 인라인 객체 같은 불안정한 다른 prop은 memo 비교 실패를, memo가 아닌 자식은 건너뛰기 실패를 일으킵니다."
+  optionExplanations={['배열을 생략하면 매 렌더링 새 값을 만들어 캐시가 깨집니다.', '인라인 객체는 매번 새 참조라서 memo 비교에 실패합니다.', 'memo가 아니면 참조가 같아도 재렌더링합니다.', '정답입니다. 순수해야 하는 것이 규칙이고 캐시를 깨는 원인이 아닙니다.']}
+/>
+
+## 참고 자료
+
+- [React — useMemo](https://react.dev/reference/react/useMemo)
+- [React — useCallback](https://react.dev/reference/react/useCallback)
+- [React — memo](https://react.dev/reference/react/memo)
+- [React Compiler — Introduction](https://react.dev/learn/react-compiler/introduction)
+- [React — Removing Effect Dependencies](https://react.dev/learn/removing-effect-dependencies)

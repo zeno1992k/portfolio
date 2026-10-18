@@ -1,0 +1,357 @@
+---
+title: '02. Reducer 설계'
+description: 'Action 이름과 단위를 정하는 기준, Reducer의 불변성·순수성, 복잡한 상태 전이와 가드, Reducer 분리와 Context 연결, 상태 기계 관점, 판별 유니온으로 불가능한 상태 제거, Undo/Redo, XState 소개를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** Action을 사용자 이벤트 단위로 설계하고, Reducer를 순수하게 유지하며, 상태를 판별 유니온과 상태 기계 관점으로 모델링해 불가능한 상태를 없앨 수 있습니다.
+</Callout>
+
+## Action Naming
+
+Action은 무슨 일이 일어났는지를 설명하는 객체입니다. 관례상 `type` 문자열과 필요한 값으로 구성합니다. `useReducer` 자체는 기초 25편에서 다룹니다.
+
+```js
+dispatch({ type: 'task_added', id: 7, text: 'Buy milk' })
+```
+
+React 공식 문서는 `type`이 컴포넌트에 구체적이고 사용자 의도를 설명해야 한다고 안내합니다. 이름 규칙 자체는 정해진 것이 없고 일관되면 됩니다.
+
+- 과거형 사건 이름이 흔합니다: `task_added`, `task_deleted`, `form_reset`. 이미 일어난 일을 Reducer가 상태에 반영한다는 뜻이 드러납니다.
+- 명령형도 쓰입니다: `ADD_TASK`. 상수로 모으면 오타를 막을 수 있습니다.
+- 한 프로젝트 안에서는 한 가지 형식만 씁니다.
+- `set_state`, `update`처럼 무엇을 하는지 모르는 이름은 피합니다.
+- 값은 `payload` 하나로 묶어도 되고 필드를 직접 펼쳐도 됩니다. 어느 쪽이든 Action 종류마다 일정하게 씁니다.
+
+Action 이름이 곧 디버깅 로그입니다. Action을 기록하면 어떤 상호작용이 어떤 순서로 일어났는지 재구성할 수 있습니다.
+
+**흔한 실수:** `type`이 어느 Action에도 맞지 않을 때 아무것도 하지 않고 `undefined`를 반환하는 것입니다. 상태 전체가 `undefined`가 됩니다. 공식 문서처럼 `default`에서 에러를 던집니다.
+
+```js
+default: {
+  throw Error('Unknown action: ' + action.type)
+}
+```
+
+## Event 중심 Action
+
+Action 하나는 데이터 변경 하나가 아니라 사용자 상호작용 하나를 나타냅니다. 공식 문서의 예를 보면, 5개 필드가 있는 폼에서 사용자가 초기화 버튼을 누르면 `set_field`를 5번 보내지 않고 `reset_form` 하나를 보냅니다.
+
+```js
+// ❌ 데이터 변경 단위 (Reducer 밖에 로직이 있다)
+dispatch({ type: 'set_field', field: 'name', value: '' })
+dispatch({ type: 'set_field', field: 'email', value: '' })
+
+// ✅ 이벤트 단위 (변경 방법은 Reducer가 안다)
+dispatch({ type: 'reset_form' })
+```
+
+- 이벤트 중심 Action은 컴포넌트가 "무슨 일이 일어났는가"만 말하게 합니다. 상태를 어떻게 바꿀지는 Reducer가 결정합니다.
+- 한 Action이 여러 필드를 한 번에 바꿀 수 있어서 중간 상태가 렌더링되지 않습니다.
+- 규칙이 바뀌어도 Reducer 한 곳만 고칩니다. 컴포넌트는 그대로입니다.
+- 필드 하나만 바꾸는 입력은 `field_changed`처럼 이벤트 이름에 필드를 값으로 실어도 됩니다.
+
+**흔한 실수:** Reducer를 `setState` 모양으로 만드는 것입니다. Action이 `{ type: 'set', value }`뿐이면 `useState`와 다를 바 없고, 상태 변경 규칙이 컴포넌트에 남습니다.
+
+## 불변성
+
+Reducer는 현재 `state`를 직접 바꾸지 않고 새 객체나 배열을 반환합니다. React는 이전 상태와 반환된 상태를 `Object.is`로 비교합니다. 같은 참조이면 렌더링을 건너뜁니다.
+
+```js
+case 'age_incremented': {
+  // ❌ 같은 참조를 돌려줌
+  state.age++
+  return state
+}
+case 'age_incremented': {
+  // ✅ 새 객체
+  return { ...state, age: state.age + 1 }
+}
+```
+
+- 변경한 뒤 같은 객체를 반환하면 화면이 갱신되지 않습니다. 가장 흔한 원인입니다.
+- 객체를 복사할 때 `...state`를 빼먹으면 나머지 필드가 사라져 일부 값이 `undefined`가 됩니다.
+- 배열은 변경 메서드 대신 새 배열을 만드는 메서드를 씁니다.
+
+| 작업 | 피한다(원본 변경) | 쓴다(새 배열) |
+|------|-------------------|---------------|
+| 추가 | `push`, `unshift` | `[...arr, x]`, `concat` |
+| 삭제 | `pop`, `shift`, `splice` | `filter`, `slice` |
+| 교체 | `splice`, `arr[i] = x` | `map` |
+| 정렬 | `sort`, `reverse` | 복사한 뒤 정렬 |
+
+- Reducer는 순수해야 합니다. 같은 입력이면 같은 결과를 내고, 요청·타이머·외부 변경 같은 부수 효과가 없어야 합니다.
+- StrictMode에서는 개발 중에 Reducer와 초기화 함수를 두 번 호출해 순수하지 않은 코드를 찾습니다. 한쪽 결과는 버려집니다. 순수하면 영향이 없습니다.
+- 중첩이 깊어 스프레드가 길어지면 Immer를 씁니다. `use-immer`의 `useImmerReducer`는 `draft`를 변경하는 문법으로 쓰고 불변 갱신 결과를 만들어 줍니다.
+
+```js
+function tasksReducer(draft, action) {
+  switch (action.type) {
+    case 'task_added': {
+      draft.push({ id: action.id, text: action.text })
+      break
+    }
+  }
+}
+```
+
+**흔한 실수:** Reducer 안에서 `fetch`를 호출하거나 `Date.now()`, `Math.random()`으로 값을 만드는 것입니다. 시각이나 ID는 Action에 실어서 보냅니다.
+
+## 복잡한 State 전이
+
+상태가 여러 단계를 오가는 경우, 지금 상태에서 이 Action이 유효한지를 Reducer가 판단합니다. 유효하지 않으면 현재 `state`를 그대로 반환합니다. 같은 참조이므로 렌더링이 일어나지 않습니다.
+
+```js
+function formReducer(state, action) {
+  switch (action.type) {
+    case 'submitted': {
+      // 중복 제출은 무시
+      if (state.status === 'sending') return state
+      return { ...state, status: 'sending' }
+    }
+    case 'succeeded': {
+      return { ...state, status: 'sent' }
+    }
+    default: throw Error('Unknown action: ' + action.type)
+  }
+}
+```
+
+- 어떤 상태에서 어떤 Action을 받을 때 어디로 가는지를 표로 먼저 정리하면 누락이 줄어듭니다.
+
+| 현재 상태 | `submitted` | `succeeded` | `failed` |
+|-----------|-------------|-------------|----------|
+| `typing` | `sending` | 무시 | 무시 |
+| `sending` | 무시 | `sent` | `typing` |
+| `sent` | 무시 | 무시 | 무시 |
+
+- 한 Action이 여러 필드를 동시에 바꾸는 전이는 그 Action 하나가 담당합니다. 예를 들어 `failed`가 `status`와 `error`를 함께 바꿉니다.
+- 파생 값은 상태에 넣지 않고 렌더링 중에 계산합니다. 전체 이름이나 선택된 항목 객체를 따로 저장하면 서로 어긋납니다. 선택된 항목은 ID만 저장합니다(자세히는 기초 12편).
+- `dispatch` 직후에 `state`를 읽으면 이전 값입니다. 상태는 다음 렌더링에서 바뀝니다. 다음 상태가 궁금하면 `reducer(state, action)`을 직접 호출해 봅니다.
+
+초기 상태를 계산하는 비용이 크면 세 번째 인자로 초기화 함수를 넘깁니다.
+
+```js
+// ❌ 렌더링마다 호출됨
+useReducer(reducer, createInitialState(username))
+// ✅ 최초 한 번만 호출됨
+useReducer(reducer, username, createInitialState)
+```
+
+## Reducer 분리
+
+Reducer가 길어지면 상태 조각마다 작은 Reducer로 나누고, 상위 Reducer가 합칩니다. 각 조각은 자기 부분만 알고, Action은 모두에게 전달됩니다.
+
+```js
+function appReducer(state, action) {
+  return {
+    tasks: tasksReducer(state.tasks, action),
+    filter: filterReducer(state.filter, action),
+  }
+}
+```
+
+- 각 하위 Reducer는 자기가 처리하지 않는 Action에는 받은 `state`를 그대로 돌려줍니다. 에러를 던지면 다른 조각의 Action을 처리할 수 없습니다. 분리한 구조에서는 `default`가 `return state`입니다.
+- 하위 Reducer는 자기 조각만 입력으로 받으므로 독립적으로 테스트할 수 있습니다.
+- 조각이 서로 영향을 주는 전이(예: 할 일을 지우면 필터도 초기화)는 상위 Reducer에서 처리합니다.
+- 파일은 기능 단위로 나눕니다. Reducer, Action 이름 상수, 초기 상태를 같은 폴더에 둡니다.
+- 나누는 기준은 업데이트 규칙의 독립성입니다. 서로 얽혀 있으면 하나로 두는 편이 낫습니다.
+
+Redux Toolkit의 `combineReducers`와 `createSlice`가 이 분리를 라이브러리 차원에서 제공합니다(자세히는 25편).
+
+## Context + Reducer
+
+Reducer를 Context로 내려보낼 때는 Reducer와 Provider를 같은 파일에 두고, State Context와 Dispatch Context를 나눠서 제공합니다(구성은 01편).
+
+- Reducer는 순수 함수라서 React 없이 테스트할 수 있습니다. 입력 상태와 Action을 주고 반환 상태를 비교합니다(자세히는 35편).
+- 컴포넌트는 `dispatch`만 호출합니다. 상태 갱신 규칙은 Reducer 파일 한 곳에 있습니다.
+- Context 값으로는 `state`와 `dispatch`를 별개로 내려서, `dispatch`만 쓰는 컴포넌트가 상태 변화에 다시 렌더링되지 않게 합니다.
+
+```jsx
+const [state, dispatch] = useReducer(formReducer, initial)
+return (
+  <FormContext value={state}>
+    <FormDispatchContext value={dispatch}>
+      {children}
+    </FormDispatchContext>
+  </FormContext>
+)
+```
+
+`dispatch`의 아이덴티티는 안정적이라서, Effect 의존성에 넣어도 Effect가 다시 실행되지 않습니다.
+
+## State Machine 관점
+
+상태 기계(state machine)는 시스템이 가질 수 있는 상태의 목록과, 이벤트를 받았을 때 어느 상태로 가는지를 정의한 모델입니다. 한 번에 정확히 하나의 상태에 있고, 이벤트가 전이를 일으킵니다.
+
+Reducer는 `(상태, 이벤트) → 다음 상태` 함수이므로 상태 기계와 같은 모양입니다. 상태 기계 관점으로 설계하면 다음을 먼저 정합니다.
+
+1. 유한한 상태 목록: `idle`, `loading`, `success`, `error`.
+2. 전이를 일으키는 이벤트: `fetch`, `resolve`, `reject`, `retry`.
+3. 전이 표: 상태와 이벤트의 조합마다 다음 상태, 또는 무시.
+4. 상태에 딸린 데이터: `success`일 때만 `data`가 있고, `error`일 때만 `message`가 있다.
+
+```js
+case 'fetch_started':
+  return state.status === 'loading'
+    ? state
+    : { status: 'loading' }
+```
+
+- 불리언 여러 개로 상태를 표현하면 서로 모순되는 조합이 생깁니다. 공식 문서도 `isSending`과 `isSent`를 하나의 `status`로 합치라고 안내합니다.
+- 전이 표를 먼저 그려 두면 "이 상태에서 이 이벤트가 오면?"을 빠뜨리지 않고 답할 수 있습니다.
+- 상태 기계를 코드로 강제하는 도구가 XState입니다(아래 "XState 소개").
+
+## 불가능한 상태 제거
+
+불가능한 상태는 앱 로직상 일어나면 안 되지만 타입이나 구조가 허용하는 조합입니다. `isLoading`과 `isError`가 동시에 `true`이거나, `error` 상태인데 `data`가 있는 경우입니다. 처음부터 그런 값을 표현할 수 없게 만듭니다.
+
+TypeScript에서는 판별 유니온(discriminated union)을 씁니다. 공통 프로퍼티(판별자)의 리터럴 값으로 상태를 구분하고, 상태마다 필요한 필드만 정의합니다(자세히는 33편).
+
+```ts
+type Fetch =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'success'; data: User[] }
+  | { status: 'error'; message: string }
+```
+
+- `status === 'success'`로 좁히면 `data`에 접근할 수 있고, `error`에서는 `data` 자체가 존재하지 않습니다.
+- Action도 같은 방식으로 판별 유니온으로 정의하면, `switch (action.type)`의 각 `case`에서 그 Action의 필드 타입이 정해집니다.
+- `default`에서 `never` 타입 변수에 값을 대입하면 처리하지 않은 Action이 추가됐을 때 컴파일 오류가 납니다. TypeScript 핸드북이 안내하는 완전성 검사입니다.
+
+```ts
+default: {
+  const unreachable: never = action
+  throw Error('Unknown action: ' + unreachable)
+}
+```
+
+JavaScript에서도 불리언 여러 개 대신 `status` 문자열 하나를 쓰면 같은 효과가 있습니다. 모순되는 조합은 원천적으로 표현할 수 없습니다.
+
+## Undo / Redo
+
+Reducer는 상태를 불변으로 다루고 변경을 Action으로 표현하므로, 이전 상태를 보관하기만 하면 되돌리기를 구현할 수 있습니다. 상태를 `past`, `present`, `future` 세 부분으로 나눕니다. Redux 공식 문서가 설명하는 구조입니다.
+
+```js
+const initial = { past: [], present: base, future: [] }
+```
+
+| Action | 처리 |
+|--------|------|
+| 일반 Action | `present`를 `past` 끝에 넣고, `present`는 새 상태, `future`는 비움 |
+| `undo` | `past` 마지막을 꺼내 `present`로, 기존 `present`는 `future` 앞에 넣음 |
+| `redo` | `future` 첫 번째를 꺼내 `present`로, 기존 `present`는 `past` 끝에 넣음 |
+
+```js
+function undoable(reducer) {
+  return (state, action) => {
+    const { past, present, future } = state
+    if (action.type === 'undo' && past.length) {
+      return {
+        past: past.slice(0, -1),
+        present: past[past.length - 1],
+        future: [present, ...future],
+      }
+    }
+    // 'redo'는 반대 방향으로 같은 방식 (생략)
+    return pushHistory(state, reducer(present, action))
+  }
+}
+```
+
+일반 Action 처리는 헬퍼로 뺍니다.
+
+```js
+function pushHistory({ past, present }, next) {
+  return {
+    past: [...past, present],
+    present: next,
+    future: [],
+  }
+}
+```
+
+- 기존 Reducer를 감싸는 고차 함수로 만들면, 원래 Reducer는 Undo를 몰라도 됩니다. Redux 문서가 Reducer 인핸서라고 부르는 패턴입니다.
+- 일반 Action 뒤에는 `future`를 비웁니다. 새 변경이 생기면 되돌렸던 미래가 의미를 잃기 때문입니다.
+- 매번 상태 전체를 `past`에 넣어도 불변 갱신이 바뀐 부분만 새로 만들기 때문에 나머지는 참조를 공유합니다. 이력이 길어지면 `past` 길이에 상한을 둡니다.
+- 입력 중 키 입력 하나하나가 이력이 되면 쓸모가 없습니다. 이력에 남길 Action과 남기지 않을 Action을 구분합니다.
+- 상태를 직접 변경하는 Reducer에서는 이 방식이 통하지 않습니다. 이전 상태가 이미 오염됩니다.
+
+## XState 소개
+
+XState는 상태 기계와 상태 차트(statechart)로 앱 로직을 모델링하는 JavaScript·TypeScript 라이브러리입니다. 현재 메이저 버전은 5입니다. 상태, 전이, 컨텍스트(데이터)를 `createMachine`으로 정의합니다.
+
+```js
+const machine = createMachine({
+  initial: 'idle',
+  states: {
+    idle: { on: { START: 'active' } },
+    active: { on: { STOP: 'idle' } },
+  },
+})
+```
+
+- `createActor`로 기계를 실행하는 액터를 만들고, `send`로 이벤트를 보냅니다.
+- React에서는 `@xstate/react` 패키지의 `useMachine`을 씁니다. `[snapshot, send]`를 반환하고, 현재 상태는 `snapshot.value`, 특정 상태 여부는 `snapshot.matches('idle')`로 확인합니다.
+
+```jsx
+const [snapshot, send] = useMachine(machine)
+// snapshot.value  → 'idle'
+send({ type: 'START' })  // snapshot.value → 'active'
+```
+
+- 정의에 없는 전이는 일어나지 않으므로, 불가능한 상태가 구조적으로 막힙니다.
+- 상태 차트이므로 중첩 상태와 병렬 상태를 표현할 수 있습니다. Reducer로 직접 만들기 번거로운 구조입니다.
+- Reducer와 선택 기준: 상태가 서너 개이고 전이가 단순하면 `status` 필드와 Reducer로 충분합니다. 중첩·병렬 상태가 필요할 만큼 흐름이 복잡하면 XState를 고려합니다.
+
+이 편의 판별 유니온과 전이 표는 XState를 쓰지 않을 때도 그대로 쓸 수 있는 설계 방법입니다.
+
+## 핵심 정리
+
+- Action은 사용자 이벤트 단위로 정하고 `type`은 일관된 이름 규칙을 씁니다. 처리할 수 없는 `type`은 `default`에서 에러를 던집니다.
+- Reducer는 순수해야 하고, 상태를 변경하지 않고 새 객체·배열을 반환합니다. 같은 참조를 반환하면 렌더링되지 않습니다.
+- 현재 상태에서 유효하지 않은 Action은 `state`를 그대로 반환해 무시합니다. 전이 표를 먼저 그리면 누락이 줄어듭니다.
+- 큰 Reducer는 조각별 Reducer로 나누어 합치고, 조각 Reducer는 모르는 Action에 `state`를 반환합니다.
+- 상태를 `status`나 판별 유니온으로 모델링하면 모순되는 조합이 표현 자체가 되지 않습니다.
+- Undo/Redo는 `past`, `present`, `future` 구조에서 Reducer를 감싸는 방식으로 구현합니다. 복잡한 흐름에는 XState 같은 상태 기계 도구를 고려합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="폼의 입력 필드 5개를 한 번에 비우는 버튼을 Reducer로 설계할 때 공식 문서가 권하는 방식은?"
+  options={['set_field Action을 5번 dispatch한다', 'reset_form Action 하나를 dispatch한다', 'Reducer에서 상태 객체를 직접 변경한 뒤 같은 객체를 반환한다', '입력 필드마다 별도의 useReducer를 만든다']}
+  correctAnswer={2}
+  explanation="공식 문서는 Action 하나가 사용자 상호작용 하나를 나타내야 한다고 안내하며, 초기화 버튼은 reset_form 하나가 적절하다고 설명합니다. 5번 dispatch하면 로그가 어지럽고 규칙이 컴포넌트로 새어 나옵니다. 상태를 직접 변경하고 같은 객체를 반환하면 화면이 갱신되지 않습니다."
+  optionExplanations={['변경 단위로 Action을 나누면 한 번의 상호작용이 여러 Action으로 쪼개져 이력이 불명확해집니다.', '정답입니다. 이벤트 단위 Action이고, 5개 필드를 바꾸는 방법은 Reducer가 압니다.', '상태를 직접 변경하면 Object.is 비교에서 같은 참조로 보여 렌더링이 일어나지 않습니다.', '필드마다 Reducer를 나누면 한 번에 비우는 전이를 표현하기 어렵고 이벤트 단위 설계에도 맞지 않습니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="Reducer를 조각별로 나눈 구조에서 하위 Reducer가 자기와 관계없는 Action을 받았을 때 가장 알맞은 처리는?"
+  options={['항상 에러를 던진다', 'undefined를 반환한다', '받은 state를 그대로 반환한다', '빈 객체를 반환한다']}
+  correctAnswer={3}
+  explanation="상위 Reducer가 모든 하위 Reducer에 같은 Action을 전달하므로, 하위 Reducer는 처리하지 않는 Action에 대해 현재 state를 그대로 반환해야 합니다. 에러를 던지면 다른 조각의 Action을 처리할 수 없고, undefined나 빈 객체를 반환하면 상태가 유실됩니다."
+  optionExplanations={['에러를 던지면 다른 조각이 처리할 Action도 실패합니다. 단일 Reducer에서만 알 수 없는 Action을 에러로 처리합니다.', 'undefined를 반환하면 그 조각의 상태가 사라집니다.', '정답입니다. 같은 참조를 반환하므로 그 조각은 변하지 않습니다.', '빈 객체를 반환하면 기존 상태가 사라지고 새 참조라서 불필요한 갱신도 일어납니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="불가능한 상태를 제거하는 방법으로 알맞은 것은?"
+  options={['isLoading, isError, isSuccess를 각각 불리언으로 두고 Effect에서 동기화한다', 'status를 판별자로 하는 판별 유니온으로 상태마다 필요한 필드만 정의한다', '모든 필드를 옵셔널로 두어 어떤 조합도 허용한다', 'Reducer 안에서 try와 catch로 모순 상태를 복구한다']}
+  correctAnswer={2}
+  explanation="판별 유니온은 status 값에 따라 가질 수 있는 필드가 정해져서, 예를 들어 error 상태에는 data가 없습니다. 모순되는 조합을 타입에서 표현할 수 없습니다. 불리언 여러 개와 옵셔널 필드는 오히려 모순 조합을 허용하고, 사후 복구는 근본 해결이 아닙니다."
+  optionExplanations={['불리언 세 개는 여러 개가 동시에 true가 되는 모순 조합을 허용합니다.', '정답입니다. 공식 문서의 status 하나로 합치기를 타입으로 강화한 방식입니다.', '옵셔널 필드는 error인데 data가 있는 조합도 허용하므로 불가능한 상태를 막지 못합니다.', '모순이 생긴 뒤에 복구하는 방식이라 설계로 제거하는 방법이 아닙니다.']}
+/>
+
+## 참고 자료
+
+- [React — Extracting State Logic into a Reducer](https://react.dev/learn/extracting-state-logic-into-a-reducer)
+- [React — useReducer](https://react.dev/reference/react/useReducer)
+- [React — Choosing the State Structure](https://react.dev/learn/choosing-the-state-structure)
+- [React — Updating Arrays in State](https://react.dev/learn/updating-arrays-in-state)
+- [TypeScript Handbook — Narrowing](https://www.typescriptlang.org/docs/handbook/2/narrowing.html)
+- [Redux — Implementing Undo History](https://redux.js.org/usage/implementing-undo-history)
+- [XState — Documentation](https://stately.ai/docs/xstate)
+- [XState — React 연동 (@xstate/react)](https://stately.ai/docs/xstate-react)

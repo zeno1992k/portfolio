@@ -1,0 +1,349 @@
+---
+title: '29. URL State'
+description: 'Search Params·Path Params·Hash로 필터, 정렬, 페이지, 탭을 URL에 두는 방법과 히스토리 동작, 공유 가능한 상태 기준, nuqs, 직렬화 규칙을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 어떤 상태를 URL에 둘지 가르고, Search Params·Path Params·Hash를 용도에 맞게 쓰며, 뒤로 가기 동작과 직렬화 규칙까지 고려해 URL 상태를 설계할 수 있습니다.
+</Callout>
+
+## Search Params
+
+URL 상태는 `useState` 대신 URL에 저장하는 상태입니다. 새로고침해도 남고, 링크로 공유할 수 있고, 뒤로 가기가 동작합니다(상태 위치 기준은 22편). 가장 흔한 저장 위치가 `?` 뒤의 쿼리 문자열, 곧 Search Params입니다.
+
+```jsx
+import { useSearchParams } from 'react-router'
+
+function Products() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const q = searchParams.get('q') ?? ''
+  // /products?q=shoe 이면 q는 'shoe'
+  // /products 이면 q는 ''
+}
+```
+
+`useSearchParams`는 현재 URL의 `URLSearchParams`와 갱신 함수를 튜플로 돌려줍니다. 갱신하면 내비게이션이 일어납니다(라우터 자체는 기초 29편).
+
+`setSearchParams`는 문자열, 객체, 튜플 배열, `URLSearchParams`, 함수를 받습니다. 두 번째 인수는 내비게이션 옵션입니다.
+
+```jsx
+setSearchParams({ tab: 'info' })
+setSearchParams((prev) => {
+  const next = new URLSearchParams(prev)
+  next.set('tab', 'info')
+  return next
+}, { replace: true })
+```
+
+- `searchParams`는 안정된 참조라서 Effect 의존성에 넣어도 됩니다. 대신 변경 가능한 객체이므로 `set`을 직접 호출하고 `setSearchParams`를 부르지 않으면 URL은 바뀌지 않습니다.
+- 함수형 갱신은 `setState`와 달리 큐잉되지 않습니다. 같은 틱에 여러 번 호출하면 앞 호출의 결과를 이어받지 않으므로, 여러 키는 한 번에 바꿉니다.
+- `useSearchParams`의 기본값 인수는 첫 렌더에서 URL을 바꾸지 않습니다. 기본값은 읽을 때 `??` 로 적용하는 쪽이 URL과 어긋나지 않습니다.
+- `get`은 값이 없으면 `null`, 있으면 항상 문자열을 돌려줍니다.
+
+**흔한 실수:** 쿼리 값을 읽어 `useState`에 복사하는 것입니다. 상태가 URL과 `useState` 두 곳에 생겨서 어긋납니다(자세히는 아래 "Router와 State").
+
+## Path Params
+
+Path Params는 경로 안의 동적 구간(`:id`)입니다. `useParams`로 읽습니다.
+
+```jsx
+// <Route path="/products/:id" element={<Product />} />
+// URL: /products/42
+function Product() {
+  const { id } = useParams()
+  // id는 '42' (문자열)
+}
+```
+
+- 값은 문자열이거나 `undefined`입니다. 숫자가 필요하면 직접 변환하고 검증합니다.
+- URL 디코딩된 값이 들어옵니다.
+- 자식 라우트는 부모 라우트의 파라미터를 함께 받습니다.
+- 나머지 경로를 받는 `*` 는 `params['*']` 로 읽습니다.
+
+Path와 Query의 구분 기준은 이렇습니다.
+
+| 구분 | 담는 것 | 예 |
+|------|---------|----|
+| Path Params | 리소스 식별. 없으면 화면이 성립하지 않는 값 | `/products/42` |
+| Search Params | 같은 화면의 보기 옵션. 없어도 기본값으로 동작 | `?sort=price&page=2` |
+
+**흔한 실수:** `useParams().id` 를 `number` 로 가정하고 `===` 로 비교하는 것입니다. `'42' === 42` 는 `false` 입니다.
+
+## Hash
+
+Hash는 `#` 뒤의 구간입니다. 서버로 전송되지 않는 클라이언트 전용 값이고, 문서 안의 위치나 보조 UI 상태를 가리킬 때 씁니다.
+
+```jsx
+const { hash } = useLocation()
+// /docs#install 이면 hash는 '#install'
+const target = hash.slice(1) // 'install'
+```
+
+- `location.hash` 는 앞의 `#` 을 포함합니다. 비어 있으면 빈 문자열입니다.
+- `URL.hash` 는 값을 설정할 때만 퍼센트 인코딩하고, 읽을 때는 디코딩하지 않습니다.
+- 서버가 알아야 하는 값(필터, 페이지)은 Hash가 아니라 Search Params에 둡니다. 서버 요청에 Hash가 실리지 않기 때문입니다.
+
+## Filter
+
+필터는 Search Params의 대표 용도입니다. 키 하나가 필터 하나입니다. 값이 비면 키를 지워서 URL을 짧게 유지합니다.
+
+```jsx
+function setFilter(key, value) {
+  setSearchParams((prev) => {
+    const next = new URLSearchParams(prev)
+    if (value) next.set(key, value)
+    else next.delete(key)
+    next.delete('page') // 조건이 바뀌면 1페이지로
+    return next
+  })
+}
+```
+
+- 읽을 때 값을 검증합니다. 허용 목록에 없는 값은 기본값으로 대체합니다.
+- 여러 값은 키를 반복하는 방식(`?tag=a&tag=b`)이 `getAll('tag')` 로 읽혀 직렬화가 단순합니다.
+- 필터가 바뀌면 `page` 를 지웁니다. 2페이지를 보다 조건을 바꾸면 결과가 3페이지 분량이 안 될 수 있습니다.
+- 이 값을 서버 데이터 키로 넘깁니다. TanStack Query라면 `queryKey` 에 필터를 넣어 조건마다 캐시가 나뉘게 합니다(27편).
+
+## Sort
+
+정렬은 키 하나와 방향으로 표현합니다. 기준 이름과 방향은 허용 목록으로 제한합니다.
+
+```jsx
+const SORTS = ['latest', 'price']
+const raw = searchParams.get('sort')
+const sort = SORTS.includes(raw) ? raw : 'latest'
+const d = searchParams.get('dir')
+const dir = d === 'desc' ? 'desc' : 'asc'
+// /products?sort=price&dir=desc
+```
+
+- 한 키에 합치는 방식(`sort=price:desc`, `sort=-price`)도 쓰지만 팀이 형식을 하나로 정해야 합니다.
+- 클라이언트에서 정렬해도 서버에 위임해도 URL 값은 같습니다. 서버 정렬이면 이 값이 요청 파라미터가 됩니다.
+- 정렬이 바뀌면 필터와 같은 이유로 `page` 를 지웁니다.
+
+**흔한 실수:** URL 값을 검증 없이 `obj[sort]` 같은 키 조회에 쓰는 것입니다. 사용자가 URL을 직접 고칠 수 있으므로 URL은 외부 입력입니다.
+
+## Pagination
+
+페이지 번호는 `page` 키에 둡니다. 문자열을 정수로 바꾸고, 잘못된 값은 1로 되돌립니다.
+
+```jsx
+function readPage(searchParams) {
+  const n = Number(searchParams.get('page'))
+  return Number.isInteger(n) && n >= 1 ? n : 1
+}
+// ?page=abc, ?page=0, ?page=2.5 모두 1
+// ?page= 은 Number('') 가 0이라 1
+```
+
+- 1페이지는 키를 생략하면 URL이 깔끔합니다.
+- 마지막 페이지를 넘는 값은 서버 응답으로 총 페이지 수를 안 뒤에 보정합니다.
+- 페이지가 바뀌는 동안 이전 목록을 유지하면 깜빡임이 없습니다(TanStack Query의 `placeholderData`, 28편).
+- 무한 스크롤은 URL에 담을 위치가 마땅치 않습니다. 목록 공유가 필요하면 번호 방식을 씁니다(대규모 리스트는 21편).
+- 커서 방식 API라면 커서 값을 `cursor` 키에 둘 수 있지만, 커서가 만료될 수 있어 공유 링크로는 약합니다.
+
+## Tab
+
+탭의 선택 상태는 `tab` 키에 둡니다. 선택된 탭이 새로고침과 공유에서 유지됩니다.
+
+```jsx
+const TABS = ['info', 'reviews', 'qna']
+const raw = searchParams.get('tab')
+const tab = TABS.includes(raw) ? raw : 'info'
+
+<button onClick={() => setSearchParams({ tab: 'reviews' })}>
+  리뷰
+</button>
+```
+
+- 기본 탭은 키를 생략해서 표현합니다.
+- 탭 전환은 내비게이션과 성격이 같아서 히스토리에 쌓는 편이 자연스럽습니다(아래 "Back / Forward").
+- 탭이 경로로 구분되는 화면이라면 Search Params 대신 중첩 라우트(`/products/42/reviews`)로 만들 수도 있습니다. 탭마다 주소가 고유하면 Path가 맞습니다.
+- 탭 전환을 Transition으로 감싸면 이전 화면이 유지됩니다(9편).
+
+## Shareable State
+
+공유 가능한 상태는 링크를 열었을 때 같은 화면이 복원되는 상태입니다. URL에 둘지는 이 질문으로 가립니다. 이 링크를 다른 사람이 열었을 때 같은 화면이어야 하는가.
+
+| URL에 둔다 | URL에 두지 않는다 |
+|------------|-------------------|
+| 필터, 정렬, 페이지, 탭 | 입력 중인 글(초안), hover, 포커스 |
+| 검색어(확정된 값) | 모달 열림처럼 일시적인 UI(공유 의도 없을 때) |
+| 선택된 항목 id, 지도 좌표, 보기 모드 | 인증 토큰, 개인정보, 비밀번호 |
+| | 서버에서 받은 데이터 자체 |
+
+- 첫 로드에서 URL만으로 화면이 복원돼야 합니다. 초기 상태를 `useState` 로 만들고 URL을 따로 맞추는 구조는 공유가 깨집니다.
+- URL은 누구나 읽고 고칠 수 있고, 서버 로그, 브라우저 히스토리, 리퍼러에 남을 수 있으므로 민감한 값은 넣지 않습니다.
+- 잘못되었거나 오래된 URL이 들어와도 화면이 깨지지 않게 기본값으로 대체합니다.
+
+## Back / Forward
+
+브라우저의 뒤로·앞으로 이동은 히스토리 스택을 따라갑니다. URL 상태를 바꾸는 방식이 스택에 쌓일지 정합니다.
+
+| 방식 | 히스토리 | 쓰는 곳 |
+|------|----------|---------|
+| push(기본) | 새 항목 추가. 뒤로 가기로 이전 상태 복원 | 탭, 페이지, 상세 진입처럼 화면 이동에 가까운 변경 |
+| replace | 현재 항목 교체 | 타이핑마다 바뀌는 검색어, 슬라이더 |
+
+```jsx
+setSearchParams({ q: text }, { replace: true })
+// 한 글자씩 쳐도 뒤로 가기 항목이 늘지 않는다
+```
+
+- `setSearchParams` 는 기본적으로 push입니다. 검색어를 글자마다 push하면 뒤로 가기를 수십 번 눌러야 이전 페이지로 나갑니다.
+- 뒤로·앞으로 이동은 `popstate` 이벤트를 일으키고, `pushState`·`replaceState` 호출 자체는 일으키지 않습니다. 라우터가 이 이벤트로 location을 갱신하므로, URL에서 읽는 상태는 별도 코드 없이 되돌아갑니다.
+- URL이 단일 출처이면 뒤로 가기로 상태가 복원되고, 상태를 `useState` 에 복사해 두면 URL만 바뀌고 화면은 그대로입니다.
+- 프로그램으로 이동할 때는 `navigate(-1)` 이 뒤로 가기이고, `navigate(url, { replace: true })` 가 교체입니다.
+
+## Router와 State
+
+URL 상태의 원칙은 URL이 단일 출처(single source of truth)라는 것입니다. 파생 가능한 값은 상태로 복사하지 않고 렌더링 중에 URL에서 계산합니다(중복 상태를 만들지 않는다는 원칙은 React 기초 과목의 State 구조 설계).
+
+```jsx
+// ❌ URL과 state가 따로 논다
+const [tab, setTab] = useState(searchParams.get('tab'))
+
+// ✅ 렌더링 중에 URL에서 읽는다
+const tab = searchParams.get('tab') ?? 'info'
+```
+
+URL과 로컬 상태를 섞어야 하는 경우는 입력 중인 값입니다.
+
+```jsx
+const [draft, setDraft] = useState(q) // 입력 중
+function onSubmit(e) {
+  e.preventDefault()
+  setSearchParams({ q: draft }) // 확정할 때만 URL에
+}
+```
+
+- 입력창은 로컬 상태로 두고, 제출 또는 디바운스 뒤에 URL에 반영합니다(디바운스와 지연 값은 10편).
+- 서버 데이터는 URL에 두지 않고, URL의 값을 키로 삼아 TanStack Query가 가져옵니다(26편).
+- Router의 역할은 URL을 읽고 쓰는 API 제공이고, 타입 변환과 검증은 직접 합니다. 이 반복을 줄이는 것이 다음 절의 nuqs입니다.
+
+## nuqs
+
+nuqs는 쿼리 문자열을 `useState` 와 비슷한 API로 쓰게 해 주는 타입 안전한 라이브러리입니다. 현재 메이저는 2이고 Next.js, React SPA(Vite), React Router, Remix, TanStack Router를 지원합니다. 프레임워크별 어댑터를 앱 최상단에 한 번 씌웁니다.
+
+```tsx
+import { NuqsAdapter } from 'nuqs/adapters/react'
+
+createRoot(root).render(
+  <NuqsAdapter>
+    <App />
+  </NuqsAdapter>,
+)
+// React Router v7: nuqs/adapters/react-router/v7
+// Next.js 앱 라우터: nuqs/adapters/next/app
+```
+
+`useQueryState` 는 키 하나를 파서와 함께 다룹니다.
+
+```tsx
+import { useQueryState, parseAsInteger } from 'nuqs'
+
+const [page, setPage] = useQueryState(
+  'page',
+  parseAsInteger.withDefault(1),
+)
+setPage(2)           // ?page=2
+setPage((p) => p + 1) // 함수형 갱신
+setPage(null)        // 키 제거. page는 기본값 1
+```
+
+- 파서는 직렬화와 파싱을 맡습니다. `parseAsString`, `parseAsInteger`, `parseAsFloat`, `parseAsBoolean`, `parseAsStringLiteral`(허용 목록), `parseAsArrayOf`, `parseAsJson` 이 있습니다.
+- 파싱에 실패한 값은 `null` 이 되고, `withDefault` 가 있으면 기본값이 됩니다.
+- 기본값과 같은 값을 설정하면 URL에서 키가 지워집니다(`clearOnDefault`, v2 기본값 `true`).
+- 기본 히스토리 모드는 `replace` 입니다. 탭이나 페이지처럼 뒤로 가기가 필요하면 `history: 'push'` 를 줍니다.
+- URL 갱신은 기본적으로 약 50ms 단위로 묶여서 반영되고, `limitUrlUpdates` 에 `debounce`·`throttle` 을 줄 수 있습니다.
+- `shallow` 의 기본값 `true` 는 서버 요청 없이 클라이언트에서만 갱신합니다. Next.js에서 서버 컴포넌트가 다시 렌더링되어야 하면 `false` 로 둡니다.
+
+여러 키는 `useQueryStates` 로 묶으면 한 번에 갱신됩니다.
+
+```tsx
+const [filters, setFilters] = useQueryStates(
+  {
+    q: parseAsString.withDefault(''),
+    page: parseAsInteger.withDefault(1),
+  },
+  { history: 'push' },
+)
+setFilters({ q: 'shoe', page: 1 }) // 한 번의 URL 갱신
+setFilters(null)                   // 관리하는 키 전부 제거
+```
+
+## URL 상태 직렬화 규칙
+
+URL은 문자열이라서 상태를 문자열로 바꾸는 규칙을 정해야 합니다. 팀이 한 방식으로 통일하면 공유 링크와 캐시 키가 일관됩니다.
+
+| 타입 | 권장 직렬화 | 읽을 때 |
+|------|-------------|---------|
+| 문자열 | 그대로 | 없으면 `null` |
+| 숫자 | 10진 문자열 | `Number` 후 `Number.isInteger` 등으로 검증 |
+| 불리언 | `true` 일 때만 `?open=true`, 아니면 생략 | `=== 'true'` |
+| 열거값 | 허용 목록의 문자열 | 목록에 없으면 기본값 |
+| 배열 | 키 반복(`tag=a&tag=b`) 또는 구분자(`tag=a,b`) | `getAll` 또는 `split` |
+| 날짜 | ISO 8601 문자열 | 파싱 후 유효성 확인 |
+| 객체 | 평탄화한 여러 키 | 키별 검증 |
+
+- 인코딩: 값은 `URLSearchParams` 에 맡깁니다. `set`·`append` 가 `application/x-www-form-urlencoded` 방식으로 인코딩하며 공백은 `+` 가 됩니다. 문자열을 직접 이어 붙이면 `&`, `=`, `#` 가 들어간 값에서 깨집니다.
+- 모든 값은 문자열입니다. 숫자나 불리언도 `get` 으로는 문자열이 나오므로 읽는 쪽에서 변환합니다.
+- 기본값은 URL에서 생략합니다. 같은 화면이 하나의 URL로만 표현되어 링크와 캐시 키가 갈라지지 않습니다.
+- 같은 키가 여러 번 있으면 `get` 은 첫 값, `getAll` 은 전부를 돌려줍니다. 의도에 맞는 쪽을 씁니다.
+- 읽는 쪽은 항상 검증합니다. URL은 사용자가 고칠 수 있는 외부 입력이라서 없거나 잘못되면 기본값으로 처리합니다.
+- 큰 객체를 JSON으로 통째로 넣지 않습니다. URL이 길어지고, 길이에는 브라우저·서버·프록시별 한계가 있습니다.
+- 키 이름은 짧고 일정하게 정하고, 한 번 공개한 이름은 바꾸지 않습니다. 이미 공유된 링크가 깨집니다.
+
+**흔한 실수:** `Number(searchParams.get('page'))` 를 검증 없이 쓰는 것입니다. 키가 없으면 `Number(null)` 은 `0`, 잘못된 문자열이면 `NaN` 이라서 요청과 계산이 깨집니다.
+
+## 핵심 정리
+
+- URL 상태는 새로고침, 공유, 뒤로 가기가 필요한 상태를 URL에 두는 것이며, 리소스 식별은 Path Params, 보기 옵션은 Search Params가 맡고 Hash는 서버로 전송되지 않는 클라이언트 전용 값입니다.
+- 필터, 정렬, 페이지, 탭은 각각 키로 표현하고, 읽을 때 허용 목록과 기본값으로 검증하며, 필터·정렬이 바뀌면 `page` 를 지웁니다.
+- `setSearchParams` 는 기본이 push라서 타이핑처럼 잦은 변경에는 `replace` 를 줍니다. 같은 틱의 여러 호출은 큐잉되지 않으므로 키를 한 번에 바꿉니다.
+- URL이 단일 출처이므로 URL에서 읽을 수 있는 값을 `useState` 에 복사하지 않고, 입력 중인 초안만 로컬 상태로 둡니다.
+- nuqs는 파서와 `withDefault` 로 타입 변환, 기본값 생략, 묶음 갱신을 맡기는 라이브러리이고 어댑터를 한 번 씌워 씁니다.
+- 직렬화는 문자열 기준이며 인코딩은 `URLSearchParams` 에 맡기고, 기본값은 생략하고, 민감한 값과 큰 객체는 넣지 않습니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="상품 목록에서 필터를 바꿀 때 URL의 page 값을 함께 처리하는 올바른 방법은?"
+  options={['①page를 그대로 둔다', '②page를 제거해 1페이지로 돌린다', '③page를 1 증가시킨다', '④page를 Hash로 옮긴다']}
+  correctAnswer={2}
+  explanation="조건이 바뀌면 결과 개수가 달라지므로 기존 페이지 번호가 범위를 벗어날 수 있습니다. page 키를 지워 기본값인 1페이지로 돌리는 것이 일반적입니다."
+  optionExplanations={['기존 번호가 새 결과의 범위를 넘으면 빈 화면이 됩니다.', '필터 변경 시 page를 지워 1페이지로 돌립니다.', '페이지를 올릴 이유가 없습니다.', 'Hash는 서버로 전송되지 않아서 페이지 정보를 담기에 맞지 않습니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="검색 입력창에서 글자를 칠 때마다 URL의 q 값을 갱신한다. 뒤로 가기 항목이 계속 쌓이지 않게 하려면?"
+  options={['①setSearchParams를 두 번 호출한다', '②replace 옵션을 true로 준다', '③값을 useState에만 둔다', '④Hash에 값을 쓴다']}
+  correctAnswer={2}
+  explanation="setSearchParams는 기본적으로 새 히스토리 항목을 추가합니다. replace 옵션을 주면 현재 항목을 교체하므로 타이핑해도 항목이 늘지 않습니다. 같은 틱의 호출은 큐잉되지 않아 두 번 호출해도 도움이 되지 않습니다."
+  optionExplanations={['같은 틱의 호출은 앞의 결과를 이어받지 않습니다.', '현재 항목을 교체하므로 히스토리가 늘지 않습니다.', '공유와 새로고침 복원이 사라집니다. 문제의 해법이 아닙니다.', 'Hash를 바꾸는 것도 이동이므로 항목이 쌓일 수 있고 서버에도 전달되지 않습니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="URL이 ?page=abc 일 때 const n = Number(searchParams.get('page')) 의 결과와 올바른 대응은?"
+  options={['①0이며 그대로 쓴다', '②NaN이며 검증해 기본값 1로 대체한다', '③null이며 오류로 처리한다', '④3이며 그대로 쓴다']}
+  correctAnswer={2}
+  explanation="get은 문자열 abc를 돌려주고 Number('abc')는 NaN입니다. URL은 사용자가 고칠 수 있는 입력이므로 정수와 최솟값을 검증하고 실패하면 기본값 1로 처리합니다. 키가 없으면 get이 null을 돌려주고 Number(null)은 0입니다."
+  optionExplanations={['0이 되는 경우는 키가 없거나 값이 빈 문자열일 때입니다.', 'NaN이 되므로 검증해서 기본값으로 대체합니다.', 'get은 키가 없을 때만 null을 돌려주고, 여기서는 문자열 abc가 있습니다.', '문자열을 숫자로 바꾸면 3이 되지 않습니다.']}
+/>
+
+## 참고 자료
+
+- [React Router — useSearchParams](https://reactrouter.com/api/hooks/useSearchParams)
+- [React Router — useParams](https://reactrouter.com/api/hooks/useParams)
+- [React Router — useLocation](https://reactrouter.com/api/hooks/useLocation)
+- [React Router — useNavigate](https://reactrouter.com/api/hooks/useNavigate)
+- [nuqs 문서](https://nuqs.dev/docs)
+- [nuqs — Options](https://nuqs.dev/docs/options)
+- [nuqs — Built-in parsers](https://nuqs.dev/docs/parsers/built-in)
+- [MDN — URLSearchParams](https://developer.mozilla.org/en-US/docs/Web/API/URLSearchParams)
+- [MDN — URL.hash](https://developer.mozilla.org/en-US/docs/Web/API/URL/hash)
+- [MDN — popstate event](https://developer.mozilla.org/en-US/docs/Web/API/Window/popstate_event)
+- [React — Choosing the State Structure](https://react.dev/learn/choosing-the-state-structure)

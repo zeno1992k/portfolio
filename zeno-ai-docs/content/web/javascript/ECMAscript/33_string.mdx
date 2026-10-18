@@ -1,0 +1,1014 @@
+---
+title: '33. String'
+description: 'String 생성자와 length, 불변성, 검색·추출·변환 메서드, 태그드 템플릿, 유니코드 처리(코드 유닛·코드 포인트·자소)를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** String 메서드가 UTF-16 코드 유닛 기준으로 동작하는 규칙을 이해하고, 검색·추출·치환·분리·비교 메서드를 경계 조건까지 구분해 쓰며, 이모지와 결합 문자가 섞인 문자열을 안전하게 다룹니다.
+</Callout>
+
+## String 생성자와 length
+
+`String`은 값을 문자열로 바꾸는 함수이면서 래퍼 객체를 만드는 생성자입니다. 호출 방식에 따라 결과 타입이 다릅니다.
+
+| 표현 | 결과 | `typeof` |
+|------|------|----------|
+| `'abc'` (리터럴) | 원시 문자열 | `'string'` |
+| `String(value)` | 원시 문자열 | `'string'` |
+| `new String(value)` | String 래퍼 객체 | `'object'` |
+
+```js
+String(123)          // '123'
+String(null)         // 'null'
+String(undefined)    // 'undefined'
+String([1, 2])       // '1,2'
+String({})           // '[object Object]'
+String(-0)           // '0'
+String(Symbol('a'))  // 'Symbol(a)'
+String()             // ''
+```
+
+- 값 변환 규칙 전체는 08편에서 다룹니다.
+- 심볼은 `String(sym)`으로만 변환됩니다. `'' + sym`과 템플릿 리터럴은 TypeError입니다.
+
+`new String`이 만드는 래퍼 객체는 원시 문자열과 다르게 동작하므로 쓸 이유가 없습니다(원시 값과 객체의 차이는 10편).
+
+```js
+const w = new String('abc')
+typeof w          // 'object'
+w == 'abc'        // true  (값으로 변환해 비교)
+w === 'abc'       // false (타입이 다름)
+!!new String('')  // true  (객체는 항상 truthy)
+w.valueOf()       // 'abc' (원시 문자열을 꺼냄)
+```
+
+`length`는 문자 수가 아니라 UTF-16 코드 유닛의 개수입니다.
+
+```js
+'abc'.length  // 3
+''.length     // 0
+'한'.length   // 1
+'😀'.length   // 2
+```
+
+- `length`는 쓰기·삭제·재정의가 모두 불가능합니다. 대입하면 일반 모드에서는 무시되고, strict mode에서는 TypeError입니다(19편).
+- 각 인덱스(`s[0]`)도 읽기 전용 프로퍼티입니다. 범위를 벗어난 인덱스는 `undefined`입니다.
+- `Object.keys('abc')`는 `['0', '1', '2']`입니다. `length`는 열거되지 않습니다.
+
+```js
+const s = 'abc'
+s[0]          // 'a'
+s[3]          // undefined
+s[0] = 'X'    // 무시됨 (strict mode: TypeError)
+s.length = 1  // 무시됨 (strict mode: TypeError)
+s             // 'abc'
+```
+
+문자열은 `length`와 인덱스를 가진 유사 배열이지만 배열이 아닙니다(유사 배열은 35편).
+
+- `Array.isArray('abc')`는 `false`이고 `map`, `forEach`, `reverse`가 없습니다.
+- 배열 메서드가 필요하면 `[...s]`로 변환하거나 `Array.prototype.map.call(s, fn)`처럼 빌려 씁니다.
+
+사양상 최대 길이는 `2**53 - 1`이지만 엔진은 더 작은 한도를 둡니다. V8(Node.js 24)은 `2**29 - 24`(536,870,888)를 넘으면 `RangeError: Invalid string length`를 던집니다.
+
+## 문자열 메서드와 불변성
+
+원시 문자열은 만든 뒤 바꿀 수 없습니다(불변, immutable). `String.prototype`의 모든 메서드는 원본을 그대로 두고 새 값을 반환합니다.
+
+```js
+let t = 'abc'
+t.toUpperCase()      // ❌ 반환값을 버렸으므로 t는 그대로
+t = t.toUpperCase()  // ✅ 새 문자열을 다시 대입
+t                    // 'ABC'
+```
+
+- 변수에 다른 문자열을 대입하는 것은 변수가 가리키는 값을 바꾸는 일이지 문자열을 수정하는 일이 아닙니다. `const` 여부와 관계없이 문자열 자체는 바뀌지 않습니다.
+- 반환값이 문자열이면 메서드를 이어서 호출(체이닝)할 수 있습니다.
+- `null`과 `undefined`에는 메서드가 없어 `null.trim()`은 TypeError입니다. 값이 없을 수 있으면 `value?.trim()`을 씁니다(08편).
+
+```js
+const r = '  Hello  '.trim().toLowerCase()
+r.padEnd(8, '!')  // 'hello!!!'
+```
+
+### 원시 값에서 메서드를 호출하는 방식
+
+원시 문자열은 객체가 아닌데 `'abc'.toUpperCase()`가 동작하는 이유는, 프로퍼티를 읽을 때 엔진이 임시 String 래퍼 객체를 만들어 `String.prototype`에서 메서드를 찾기 때문입니다. 호출이 끝나면 래퍼는 버려집니다.
+
+```js
+const s = 'abc'
+s.extra = 1  // 임시 래퍼에 설정되고 버려짐 (strict: TypeError)
+s.extra      // undefined
+```
+
+`String.prototype`에 직접 추가한 메서드의 `this`는 일반 모드에서 래퍼 객체이고 strict mode에서 원시 문자열입니다.
+
+### 이어 붙이기와 값 변환
+
+| 방식 | 피연산자 변환 | 심볼 |
+|------|---------------|------|
+| `a + b` | ToPrimitive 기본 힌트(`valueOf` 우선) | TypeError |
+| 템플릿 리터럴 | ToString(`toString` 우선) | TypeError |
+| `a.concat(b)` | ToString | TypeError |
+
+```js
+const o = { toString: () => 'T', valueOf: () => 'V' }
+const x = 'a' + o         // 'aV'
+const y = `a${o}`         // 'aT'
+const z = 'a'.concat(o)   // 'aT'
+```
+
+- `concat`은 인수를 몇 개든 받습니다(`'a'.concat(1, 2)`는 `'a12'`). 실무에서는 `+`나 템플릿 리터럴을 씁니다.
+- 이어 붙일 때마다 새 문자열이 만들어지지만 엔진이 내부적으로 최적화하므로, 반복문의 `+=`가 곧 성능 문제는 아닙니다. 느리다는 측정 결과가 있을 때만 바꿉니다.
+
+### 문자열 비교
+
+`===`는 코드 유닛 열이 같을 때 `true`입니다. `<`와 `>`는 코드 유닛 값을 앞에서부터 비교합니다.
+
+```js
+'abc' === 'abc'  // true
+'10' < '9'       // true  (문자 '1'이 '9'보다 앞)
+'a' < 'B'        // false (소문자 97, 대문자 66)
+```
+
+사전 순서가 필요하면 `localeCompare`를 씁니다. 비교 연산자 자체는 06편에서 다룹니다.
+
+## 검색 메서드
+
+| 메서드 | 반환 | 못 찾으면 |
+|--------|------|-----------|
+| `indexOf(search, from)` | 첫 위치 | `-1` |
+| `lastIndexOf(search, from)` | 마지막 위치 | `-1` |
+| `includes(search, from)` | boolean | `false` |
+| `startsWith(search, pos)` | boolean | `false` |
+| `endsWith(search, end)` | boolean | `false` |
+| `search(regexp)` | 첫 일치 위치 | `-1` |
+| `match(regexp)` | 일치 배열 | `null` |
+| `matchAll(regexp)` | 일치 이터레이터 | 빈 이터레이터 |
+
+```js
+const s = 'abcabc'
+s.indexOf('c')         // 2
+s.indexOf('c', 3)      // 5
+s.lastIndexOf('a')     // 3
+s.lastIndexOf('a', 2)  // 0 (시작 위치가 2 이하인 일치만)
+s.indexOf('x')         // -1
+```
+
+- 위치 인수는 정수로 바뀝니다. 음수는 0, `length`보다 크면 `length`로 보정됩니다. `lastIndexOf`는 `NaN`을 끝 위치로 취급합니다.
+- 빈 문자열 검색은 항상 성공합니다. `'abc'.indexOf('')`는 `0`, `'abc'.indexOf('', 10)`은 `3`, `'abc'.lastIndexOf('')`는 `3`입니다.
+- 대소문자를 구분합니다. 무시하려면 양쪽을 같은 케이스로 바꾸거나 정규식 `i` 플래그를 씁니다.
+- 검색어는 문자열로 변환됩니다. `'abc'.includes(undefined)`는 문자열 `'undefined'`를 찾아 `false`이고, `'undefined'.includes()`는 `true`입니다.
+- 비교가 코드 유닛 단위라서 이모지의 서로게이트 한쪽만 검색해도 일치합니다. `'😀'.indexOf('\uDE00')`은 `1`입니다.
+
+위치 `0`은 유효한 결과입니다. 조건문에 `indexOf`를 그대로 쓰면 맨 앞에서 찾았을 때 거짓으로 판정됩니다.
+
+```js
+if (s.indexOf('a'))         // ❌ 위치 0이면 falsy
+if (s.indexOf('a') !== -1)  // ✅
+if (s.includes('a'))        // ✅ (ES2015)
+```
+
+`includes`, `startsWith`, `endsWith`(모두 ES2015)는 불리언을 반환합니다.
+
+```js
+const t = 'abcdef'
+t.includes('cd', 3)    // false (index 3부터 찾음)
+t.startsWith('cd', 2)  // true  (index 2부터 비교)
+t.endsWith('cd', 4)    // true  (앞 4글자 'abcd'의 끝)
+t.startsWith('')       // true
+```
+
+- 세 메서드는 정규식을 넘기면 TypeError입니다. 정규식 검색은 `search`나 `match`를 씁니다.
+- `indexOf`는 정규식을 넘기면 문자열 `'/a/'`로 바꿔 찾으므로 에러 없이 `-1`이 나옵니다.
+- `endsWith`의 두 번째 인수는 문자열의 끝으로 간주할 위치(길이)입니다. `startsWith`의 위치와 의미가 다릅니다.
+
+`search`, `match`, `matchAll`은 정규식을 받는 메서드입니다(자세히는 32편).
+
+```js
+'a1b22'.search(/\d/)   // 1
+'a1b22'.match(/\d+/)   // ['1', index: 1, ...]
+'a1b22'.match(/\d+/g)  // ['1', '22']
+'a1b22'.match(/x/)     // null
+```
+
+```js
+const it = 'a1b22'.matchAll(/\d+/g)
+Array.from(it).length  // 2
+```
+
+- `g` 플래그 없는 `match`는 첫 일치의 상세 정보(`index`, 캡처 그룹)를 담은 배열을, `g` 플래그가 있으면 일치한 문자열만 담은 배열을 반환합니다.
+- 일치가 없으면 `null`이라서 `s.match(/x/g).length`는 TypeError입니다.
+- `matchAll`은 `g` 플래그가 없는 정규식에 TypeError입니다.
+- 문자열을 넘기면 `new RegExp(str)`로 바뀝니다. `'a.b'.search('.')`는 `.`이 임의 문자라서 `0`입니다.
+
+## charAt·at
+
+`charAt(index)`는 해당 위치의 코드 유닛 하나를 문자열로 돌려주고, `at(index)`(ES2022)는 음수 인덱스를 뒤에서부터 센다는 점이 다릅니다.
+
+| 상황 | `s[i]` | `charAt(i)` | `at(i)` |
+|------|--------|-------------|---------|
+| 범위 밖(`i = 5`) | `undefined` | `''` | `undefined` |
+| 음수(`i = -1`) | `undefined` | `''` | 마지막 글자 |
+| 소수(`i = 1.9`) | `undefined` | 인덱스 1 | 인덱스 1 |
+| 인수 생략 | `undefined` | 인덱스 0 | 인덱스 0 |
+
+```js
+'abc'.charAt(1)   // 'b'
+'abc'.charAt(5)   // ''
+'abc'.at(-1)      // 'c'
+'abc'.at(5)       // undefined
+'abc'[2]          // 'c'
+```
+
+- `charAt`과 `at`은 인수를 정수로 바꿉니다. 소수는 버리고 `NaN`은 `0`으로 취급합니다. `'abc'.at(-1.5)`는 `-1`로 버려져 `'c'`입니다.
+- `s[i]`의 `i`는 프로퍼티 키로 쓰이므로 정수가 아니면 `undefined`입니다.
+- 마지막 글자는 `s[s.length - 1]` 대신 `s.at(-1)`로 씁니다. 빈 문자열에서는 `undefined`입니다.
+- 모두 코드 유닛 단위입니다. `'😀'.at(0)`은 이모지가 아니라 길이 1의 서로게이트 한쪽입니다.
+
+`charCodeAt(index)`는 코드 유닛의 숫자 값(0–65535)을 반환하고 범위 밖이면 `NaN`입니다. 반대 방향은 `String.fromCharCode`입니다.
+
+```js
+'abc'.charCodeAt(0)         // 97
+'abc'.charCodeAt(9)         // NaN
+String.fromCharCode(97, 98) // 'ab'
+```
+
+## substring·slice
+
+두 메서드 모두 `[start, end)` 구간(end 위치의 글자는 제외)을 잘라 새 문자열로 반환합니다. `end`를 생략하면 끝까지입니다.
+
+| 상황 | `slice(start, end)` | `substring(start, end)` |
+|------|---------------------|--------------------------|
+| 음수 인수 | 뒤에서부터 센다 | 0으로 취급 |
+| `NaN` | 0으로 취급 | 0으로 취급 |
+| `start > end` | 빈 문자열 | 두 인수를 맞바꾼다 |
+| 범위 초과 | 0–`length`로 보정 | 0–`length`로 보정 |
+
+```js
+const s = 'abcdef'
+s.slice(2)          // 'cdef'
+s.slice(-3)         // 'def'
+s.slice(1, -1)      // 'bcde'
+s.slice(4, 1)       // ''
+s.substring(4, 1)   // 'bcd'    (인수를 맞바꿈)
+s.substring(-3)     // 'abcdef' (음수는 0)
+s.substring(1, -1)  // 'a'      (-1은 0, 그다음 맞바꿈)
+```
+
+- 인수는 정수로 바뀝니다. `'abcdef'.slice(1.9, 3.9)`는 `'bc'`입니다.
+- 두 번째 인수는 길이가 아니라 끝 위치입니다. `'abcdef'.substring(2, 3)`은 3글자가 아니라 `'c'` 한 글자입니다.
+- 코드 유닛 단위라서 이모지 중간을 자르면 외톨이 서로게이트가 남습니다. `'😀a'.slice(0, 1)`의 결과는 깨진 문자열입니다(isWellFormed 절 참고).
+- `slice`를 기본으로 씁니다. 음수 인덱스 규칙이 `Array.prototype.slice`와 같고 인수 맞바꿈 같은 암묵적 동작이 없습니다.
+
+## substr 폐기
+
+`substr(start, length)`는 시작 위치와 길이를 받는 추출 메서드입니다. ECMA-262 본문이 아니라 Annex B(웹 브라우저용 추가 기능)에 있고 MDN이 deprecated로 표시합니다. 제거되지는 않았지만 새 코드에서는 쓰지 않습니다.
+
+```js
+const s = 'abcdef'
+s.substr(1, 3)   // 'bcd'  (index 1부터 3글자)
+s.substr(-3, 2)  // 'de'   (뒤에서 3번째부터 2글자)
+s.substr(2)      // 'cdef'
+s.substr(2, -1)  // ''     (길이가 0 이하)
+```
+
+- `start >= 0`이고 `n >= 0`이면 `s.substr(start, n)`은 `s.slice(start, start + n)`과 같습니다.
+- `start < 0`이고 `n >= 0`이면 `s.slice(start).slice(0, n)`으로 바꿉니다.
+- `substring`·`slice`와 달리 두 번째 인수가 끝 위치가 아니라 길이라서 혼동되기 쉽습니다.
+
+## 대소문자 변환
+
+`toUpperCase`와 `toLowerCase`는 Unicode 기본 대소문자 매핑으로 변환하고, `toLocaleUpperCase`와 `toLocaleLowerCase`는 지정한 로캘의 규칙을 씁니다. 대소문자 구분이 없는 문자(한글, 숫자, 기호)는 그대로 둡니다.
+
+```js
+'Hello'.toUpperCase()    // 'HELLO'
+'Hello'.toLowerCase()    // 'hello'
+'한글abc'.toUpperCase()  // '한글ABC'
+```
+
+변환 결과의 길이가 달라질 수 있으므로 변환 전후의 인덱스가 서로 대응한다고 가정하면 안 됩니다.
+
+```js
+'ß'.toUpperCase()  // 'SS'  (길이 1 → 2)
+'ﬁ'.toUpperCase()  // 'FI'
+'İ'.toLowerCase()  // 'i̇'   (i + U+0307, 길이 2)
+```
+
+로캘에 따라 결과가 다른 문자가 있습니다.
+
+```js
+'i'.toUpperCase()            // 'I'
+'i'.toLocaleUpperCase('tr')  // 'İ'  (튀르키예어)
+'I'.toLocaleLowerCase('tr')  // 'ı'  (점 없는 i)
+```
+
+- 로캘 인수를 생략한 `toLocale*`은 실행 환경의 기본 로캘을 따르므로 환경마다 결과가 달라질 수 있습니다. 키·식별자 정규화에는 `toLowerCase`를 씁니다.
+- 문맥을 보는 규칙도 있습니다. 그리스어 시그마는 어말에서 `ς`가 됩니다. `'ΑΣ'.toLowerCase()`는 `'ας'`, `'ΑΣΑ'.toLowerCase()`는 `'ασα'`입니다.
+- 대소문자 무시 비교로 `a.toLowerCase() === b.toLowerCase()`를 흔히 쓰지만 언어마다 어긋납니다. `'ß'.toUpperCase() === 'SS'.toUpperCase()`는 `true`인데 `toLowerCase()`로 비교하면 `false`입니다.
+- 악센트는 구분하고 대소문자만 무시하려면 `a.localeCompare(b, undefined, { sensitivity: 'accent' }) === 0`을 씁니다.
+
+첫 글자만 대문자로 바꾸는 함수입니다.
+
+```js
+const cap = s => s.charAt(0).toUpperCase() + s.slice(1)
+cap('hello')  // 'Hello'
+cap('')       // ''
+```
+
+`s[0].toUpperCase()`로 쓰면 빈 문자열에서 `s[0]`이 `undefined`라서 TypeError가 납니다. `charAt(0)`은 `''`을 반환해 안전합니다.
+
+## trim·padStart·padEnd
+
+`trim`은 앞뒤 공백을, `trimStart`는 앞쪽만, `trimEnd`는 뒤쪽만 제거합니다. 안쪽 공백은 건드리지 않습니다.
+
+| 메서드 | 제거 위치 | 버전 |
+|--------|-----------|------|
+| `trim()` | 양쪽 | ES5 |
+| `trimStart()` | 앞 | ES2019 |
+| `trimEnd()` | 뒤 | ES2019 |
+
+```js
+'  a  b  '.trim()      // 'a  b'
+'  a  '.trimStart()    // 'a  '
+'  a  '.trimEnd()      // '  a'
+```
+
+- `trimLeft`와 `trimRight`는 `trimStart`와 `trimEnd`의 별칭으로, 같은 함수 객체입니다(`String.prototype.trimLeft.name`은 `'trimStart'`). 새 코드에서는 `trimStart`·`trimEnd`를 씁니다.
+- 제거 대상은 탭, 수직 탭, 폼 피드, 스페이스, NBSP(U+00A0), BOM(U+FEFF), 유니코드 Zs 범주(전각 공백 U+3000 등)와 줄 종결자(LF, CR, U+2028, U+2029)입니다.
+- 폭 없는 공백(U+200B), NEL(U+0085), U+180E는 제거되지 않습니다. 이 문자가 섞인 입력은 `trim` 뒤에도 길이가 0이 아닐 수 있습니다.
+
+`padStart(targetLength, padString)`와 `padEnd`(ES2017)는 목표 길이가 될 때까지 앞 또는 뒤를 채웁니다. `padString`을 생략하면 공백입니다.
+
+```js
+'5'.padStart(3, '0')        // '005'
+'abc'.padEnd(6, '12')       // 'abc121' (채움이 잘림)
+'abc'.padStart(8, '12345')  // '12345abc'
+'abc'.padStart(5)           // '  abc'
+'abc'.padStart(2)           // 'abc'    (이미 길면 그대로)
+'abc'.padStart(6, '')       // 'abc'    (빈 채움은 그대로)
+```
+
+- 긴 문자열을 자르지는 않습니다. 목표 길이보다 길면 원본을 반환합니다.
+- 목표 길이는 코드 유닛 기준입니다. 이모지(길이 2)가 섞이면 화면 정렬이 어긋날 수 있습니다.
+- 숫자에는 메서드가 없으므로 먼저 문자열로 바꿉니다. `(7).padStart(2, '0')`은 TypeError입니다.
+
+```js
+const h = String(7).padStart(2, '0')
+const m = String(5).padStart(2, '0')
+const time = `${h}:${m}`  // '07:05'
+```
+
+## repeat
+
+`repeat(count)`(ES2015)는 문자열을 `count`번 이어 붙인 새 문자열을 반환합니다.
+
+```js
+'ab'.repeat(3)    // 'ababab'
+'ab'.repeat(0)    // ''
+'ab'.repeat(2.9)  // 'abab' (소수는 버림)
+'-'.repeat(10)    // '----------'
+```
+
+| `count` | 결과 |
+|---------|------|
+| 0, `NaN`, 생략 | `''` |
+| 소수 | 버린 정수로 반복 (`-0.5`는 `0`이 되어 `''`) |
+| 음수(-1 이하), `Infinity` | RangeError |
+| 결과가 엔진 한도 초과 | RangeError (`Invalid string length`) |
+
+- 빈 문자열도 `Infinity`는 RangeError입니다. `''.repeat(1e9)`는 `''`입니다.
+- 들여쓰기(`' '.repeat(depth * 2)`)와 구분선(`'-'.repeat(20)`)을 만들 때 씁니다.
+
+## replace·replaceAll
+
+`replace(pattern, replacement)`는 일치하는 부분을 바꾼 새 문자열을 반환합니다. 문자열 패턴이면 첫 번째 일치만 바꾸고, `replaceAll`(ES2021)은 모든 일치를 바꿉니다.
+
+| 호출 | 바꾸는 범위 |
+|------|-------------|
+| `replace('a', x)` | 첫 번째 하나 |
+| `replace(/a/, x)` | 첫 번째 하나 |
+| `replace(/a/g, x)` | 전부 |
+| `replaceAll('a', x)` | 전부 |
+| `replaceAll(/a/g, x)` | 전부 |
+| `replaceAll(/a/, x)` | TypeError (`g` 필요) |
+
+```js
+'a.b.c'.replace('.', '-')      // 'a-b.c'
+'a.b.c'.replaceAll('.', '-')   // 'a-b-c'
+'a.b.c'.replace(/\./g, '-')    // 'a-b-c'
+'banana'.replaceAll(/a/, '-')  // TypeError
+```
+
+- 문자열 패턴은 정규식이 아니라 글자 그대로 찾습니다. `'.'`은 마침표입니다.
+- 빈 문자열 패턴은 모든 코드 유닛 사이와 양 끝에서 일치합니다. `'abc'.replaceAll('', '-')`은 `'-a-b-c-'`, `'abc'.replace('', '-')`는 `'-abc'`입니다.
+- 대소문자를 무시하려면 `/a/gi`처럼 정규식을 씁니다.
+- ES2021 이전에는 `s.split(a).join(b)`로 전체 치환을 흉내 냈습니다.
+- 원본은 바뀌지 않으므로 반환값을 받아야 합니다.
+
+치환 문자열 안에서는 `$`로 시작하는 특수 패턴이 해석됩니다.
+
+| 패턴 | 의미 |
+|------|------|
+| `$$` | 달러 기호 `$` |
+| `$&` | 일치한 부분 전체 |
+| `` $` `` | 일치한 부분의 앞쪽 문자열 |
+| `$'` | 일치한 부분의 뒤쪽 문자열 |
+| `$1`–`$99` | n번째 캡처 그룹(정규식일 때) |
+| `$<name>` | 이름 있는 캡처 그룹(정규식일 때) |
+
+```js
+'abc'.replace('b', '[$&]')  // 'a[b]c'
+'abc'.replace('b', '$$')    // 'a$c'
+'abc'.replace('b', '$1')    // 'a$1c' (문자열 패턴엔 그룹이 없음)
+'ab cd'.replace(/(\w+) (\w+)/, '$2 $1')  // 'cd ab'
+```
+
+두 번째 인수에 함수를 넘기면 일치마다 호출되고 반환값이 치환 문자열이 됩니다. 반환값은 문자열로 바뀌며 `$` 패턴은 해석되지 않습니다.
+
+- 함수의 인수는 `(match, p1, p2, …, offset, string)` 순서입니다. `p`는 캡처 그룹 수만큼 있고, 이름 있는 그룹이 있으면 맨 끝에 `groups` 객체가 하나 더 붙습니다.
+
+```js
+'a1b2'.replace(/\d/g, m => m * 2)
+// 'a2b4'
+'a1b2'.replace(/\d/g, (m, offset) => `<${m}@${offset}>`)
+// 'a<1@1>b<2@3>'
+'abc'.replace('b', () => '$&')  // 'a$&c' (해석되지 않음)
+```
+
+- 사용자 입력을 치환 문자열로 직접 넘기면 입력 속의 `$&`, `$1`이 해석됩니다. `() => input`처럼 함수로 넘기면 해석되지 않습니다.
+- 두 번째 인수를 빼면 문자열 `'undefined'`가 들어갑니다. `'abc'.replace('b')`는 `'aundefinedc'`입니다.
+- 문자열 패턴에서 `replace`는 한 번만 바꿉니다. `'aaa'.replace('a', 'b')`는 `'baa'`입니다.
+
+정규식 치환의 세부 규칙은 32편에서 다룹니다.
+
+## split
+
+`split(separator, limit)`은 구분자로 문자열을 잘라 문자열 배열을 반환합니다. 구분자는 문자열이나 정규식입니다.
+
+```js
+'a,b,c'.split(',')     // ['a', 'b', 'c']
+'a,b,c'.split(',', 2)  // ['a', 'b']
+'abc'.split('')        // ['a', 'b', 'c']
+'abc'.split()          // ['abc']
+```
+
+```js
+'a,b,'.split(',')  // ['a', 'b', '']  (끝의 빈 문자열)
+'a,,b'.split(',')  // ['a', '', 'b']  (연속 구분자 사이)
+''.split(',')      // ['']            (원본 하나)
+''.split('')       // []              (빈 배열)
+```
+
+- 빈 문자열은 구분자를 찾지 못하면 빈 문자열 하나가 든 배열이 되고, 빈 구분자(`''`)로 자르면 빈 배열이 됩니다.
+- 구분자를 생략하거나 `undefined`이면 원본 전체가 한 요소인 배열입니다.
+- `limit`은 결과 배열의 최대 길이입니다. 초과분은 버려지고 마지막 요소에 합쳐지지 않습니다. `'k=v=w'.split('=', 2)`는 `['k', 'v']`로 `w`가 사라집니다. `0`이면 `[]`이고, 음수는 부호 없는 32비트 정수로 바뀌어 사실상 제한이 없습니다.
+- 빈 문자열 구분자는 코드 유닛마다 자릅니다. `'😀'.split('')`은 서로게이트 두 개로 쪼개집니다. 코드 포인트 단위로 나누려면 `[...s]`나 `Array.from(s)`를 씁니다.
+
+정규식 구분자는 패턴 전체가 구분자 역할을 합니다. 캡처 그룹이 있으면 그 일치도 결과에 들어갑니다.
+
+```js
+'a1b2c'.split(/\d/)         // ['a', 'b', 'c']
+'a1b2c'.split(/(\d)/)       // ['a', '1', 'b', '2', 'c']
+'a, b ,c'.split(/\s*,\s*/)  // ['a', 'b', 'c']
+'a\r\nb\nc'.split(/\r?\n/)  // ['a', 'b', 'c']
+```
+
+공백으로 나눌 때 `' '`를 구분자로 쓰면 연속 공백과 앞뒤 공백이 빈 문자열 요소를 만듭니다.
+
+```js
+'a b  c'.split(' ')      // ['a', 'b', '', 'c'] (연속 공백)
+'a b  c'.split(/\s+/)    // ['a', 'b', 'c']
+' a b'.split(/\s+/)      // ['', 'a', 'b']      (앞 공백)
+' a b'.trim().split(/\s+/)  // ['a', 'b']
+```
+
+첫 구분자에서만 나누려면 `limit` 대신 위치를 직접 계산합니다.
+
+```js
+const s = 'k=v=w'
+const i = s.indexOf('=')
+const parts = [s.slice(0, i), s.slice(i + 1)]
+parts  // ['k', 'v=w']
+```
+
+배열을 다시 문자열로 합치는 `join`은 28편에서 다룹니다.
+
+## Tagged Template과 String.raw
+
+템플릿 리터럴(백틱 문자열)은 `${식}` 삽입과 여러 줄을 지원합니다(05편). 태그드 템플릿은 템플릿 앞에 함수를 붙여, 문자열 조각과 삽입값을 인수로 받는 함수 호출로 바꾸는 문법입니다.
+
+```js
+function tag(strings, ...values) {
+  console.log(strings, values)
+}
+tag`a${1}b${2}c`
+// ['a', 'b', 'c'] [1, 2]
+```
+
+호출은 `tag(['a', 'b', 'c'], 1, 2)`와 같은 형태입니다.
+
+- `strings.length`는 항상 `values.length + 1`입니다. 맨 앞이나 맨 뒤가 삽입이면 그 자리의 조각은 `''`입니다. 삽입이 없으면 조각 하나입니다.
+- `strings`는 동결된 배열이고 `raw` 프로퍼티(원문 배열, 역시 동결)를 가집니다.
+- 삽입값은 문자열로 바뀌지 않고 원래 타입 그대로 전달됩니다.
+- 태그는 어떤 값이든 반환할 수 있습니다. 문자열일 필요가 없습니다.
+- 태그 자리에는 함수를 가리키는 식이면 무엇이든 올 수 있습니다.
+
+```js
+obj.tag`x`     // 메서드 호출
+getTag()`x`    // 함수가 반환한 함수를 태그로
+```
+
+삽입값을 가공해 문자열을 돌려주는 태그의 예입니다.
+
+```js
+function hl(strings, ...values) {
+  let out = strings[0]
+  values.forEach((v, i) => {
+    out += `[${v}]` + strings[i + 1]
+  })
+  return out
+}
+hl`a${1}b${2}c`  // 'a[1]b[2]c'
+```
+
+### cooked와 raw
+
+`strings[i]`는 이스케이프를 해석한 값(cooked)이고 `strings.raw[i]`는 소스 원문입니다.
+
+```js
+function tag(s) { return [s[0], s.raw[0]] }
+tag`a\nb`
+// cooked: 'a' + 개행 문자 + 'b'
+// raw:    'a' + 역슬래시 + 'n' + 'b'
+```
+
+- 소스의 줄바꿈이 CRLF여도 cooked와 raw 모두 LF로 정규화됩니다.
+- 일반 템플릿에서는 `\unicode`, `\xerxes` 같은 잘못된 이스케이프가 SyntaxError입니다. 태그드 템플릿에서는 ES2018부터 허용되고, 그 조각의 cooked는 `undefined`, raw는 원문입니다. LaTeX나 Windows 경로처럼 역슬래시가 많은 텍스트를 태그가 직접 처리할 수 있습니다.
+
+```js
+const id = s => s
+id`\unicode`[0]      // undefined
+id`\unicode`.raw[0]  // '\\unicode' (역슬래시 포함 원문)
+```
+
+### 템플릿 객체의 동일성
+
+같은 소스 위치의 태그드 템플릿은 호출할 때마다 동일한 `strings` 객체를 받습니다. 내용이 같아도 위치가 다르면 다른 객체입니다. 태그 함수가 이 객체를 캐시 키로 쓸 수 있습니다.
+
+```js
+const id = s => s
+const f = () => id`a`
+f() === f()      // true  (같은 위치)
+id`a` === id`a`  // false (다른 위치)
+```
+
+태그드 템플릿은 HTML 이스케이프, SQL 파라미터 바인딩, CSS-in-JS(styled-components), HTML 템플릿(lit)처럼 삽입값을 가공해야 하는 곳에 쓰입니다.
+
+### String.raw
+
+`String.raw`(ES2015)는 이스케이프를 해석하지 않고 raw 문자열에 삽입값만 끼워 반환하는 내장 태그 함수입니다.
+
+```js
+String.raw`C:\Users\new`  // 역슬래시 그대로: C:\Users\new
+String.raw`\n${1 + 1}\t`  // 문자 그대로 \n2\t (5글자)
+const a = `\n`            // 개행 문자 1개
+const b = String.raw`\n`  // 역슬래시와 n, 2글자
+```
+
+- 삽입(`${}`)은 일반 템플릿처럼 평가됩니다. 해석하지 않는 대상은 이스케이프뿐입니다.
+- 일반 함수로도 호출할 수 있습니다. 첫 인수는 `raw` 프로퍼티를 가진 객체이고, 나머지가 삽입값입니다.
+
+```js
+String.raw({ raw: ['a', 'b', 'c'] }, 1, 2)  // 'a1b2c'
+String.raw({ raw: 'abc' }, 1, 2)            // 'a1b2c'
+```
+
+- 정규식 소스, Windows 경로, LaTeX 문자열처럼 역슬래시가 많은 문자열을 역슬래시를 겹쳐 쓰지 않고 만들 때 씁니다.
+- 역슬래시로 끝나는 raw 문자열은 만들 수 없습니다. 마지막 `\`가 닫는 백틱을 이스케이프하기 때문입니다.
+- raw에서도 이스케이프된 백틱과 `${`는 역슬래시가 남은 채 일반 글자로 들어갑니다. `\u{1F600}`도 해석되지 않습니다.
+
+```js
+String.raw`C:\`     // ❌ SyntaxError (\`가 닫는 백틱을 이스케이프)
+String.raw`\``       // \` (역슬래시 + 백틱, 2글자)
+String.raw`\${x}`    // \${x} (삽입되지 않고 원문 그대로)
+```
+
+## Unicode와 Code Point
+
+Unicode는 세계의 문자에 번호를 붙인 표준이고, 그 번호가 코드 포인트(code point)입니다. 코드 포인트는 U+0000부터 U+10FFFF까지 1,114,112개입니다. U+0000–U+FFFF 구간이 BMP(Basic Multilingual Plane)이고, 그 위의 보충 평면에 대부분의 이모지와 일부 한자가 있습니다.
+
+ECMAScript의 문자열 값은 16비트 정수(코드 유닛)의 나열이고, 텍스트로 해석할 때 UTF-16으로 간주합니다(UTF-16 개요는 05편).
+
+- BMP 문자는 코드 유닛 1개입니다.
+- 보충 평면 문자는 서로게이트 쌍(surrogate pair), 즉 상위 서로게이트(U+D800–U+DBFF) 하나와 하위 서로게이트(U+DC00–U+DFFF) 하나, 코드 유닛 2개입니다.
+
+코드 포인트에서 서로게이트 쌍을 계산하는 식입니다.
+
+```text
+cp' = cp - 0x10000
+high = 0xD800 + (cp' >> 10)
+low  = 0xDC00 + (cp' & 0x3FF)
+```
+
+- `cp`: 코드 포인트(0x10000 이상)
+- `cp'`: 0x10000을 뺀 20비트 값
+- `high`, `low`: 쌍을 이루는 상위·하위 서로게이트
+
+예를 들어 U+1F600은 `cp' = 0xF600`이므로 `high = 0xD83D`, `low = 0xDE00`입니다.
+
+```js
+'😀' === '\u{1F600}'      // true
+'😀' === '\uD83D\uDE00'   // true
+'😀'.length               // 2
+```
+
+코드 포인트를 쓰는 이스케이프는 `\u{…}`(ES2015, 16진수 1–6자리, 최대 10FFFF)이고, `\uNNNN`은 코드 유닛 하나를 씁니다(이스케이프 전체 목록은 05편).
+
+짝이 맞지 않는 서로게이트를 외톨이 서로게이트(lone surrogate)라고 합니다. JavaScript 문자열은 이를 허용하지만 유효한 Unicode 텍스트가 아닙니다(isWellFormed 절 참고).
+
+코드 유닛 기준 동작이 결과를 바꾸는 곳입니다.
+
+| 동작 | 코드 유닛 기준 결과 |
+|------|----------------------|
+| `length` | 이모지 하나가 2 |
+| `s[i]`, `charAt`, `at` | 이모지의 한쪽 절반 |
+| `slice`, `substring` | 이모지 중간에서 잘릴 수 있음 |
+| `split('')` | 이모지가 둘로 쪼개짐 |
+| 정규식 `.` (`u` 플래그 없음) | 한쪽 절반과 일치 |
+
+```js
+'😀'.match(/./)[0].length   // 1 (절반)
+'😀'.match(/./u)[0].length  // 2 (온전한 이모지)
+```
+
+`u` 플래그는 정규식이 코드 포인트 단위로 동작하게 합니다(자세히는 32편).
+
+## codePointAt·fromCodePoint
+
+`codePointAt(index)`는 해당 위치의 코드 포인트를 반환합니다. 위치의 코드 유닛이 상위 서로게이트이고 바로 뒤가 하위 서로게이트이면 쌍 전체의 값을 계산해 줍니다.
+
+```js
+'😀'.codePointAt(0)  // 128512 (0x1F600)
+'😀'.codePointAt(1)  // 56832  (0xDE00, 하위 서로게이트 그대로)
+'😀'.charCodeAt(0)   // 55357  (0xD83D, 코드 유닛 하나)
+'a'.codePointAt(5)   // undefined
+```
+
+- `index`는 코드 포인트 번호가 아니라 코드 유닛 위치입니다. 이모지 다음 글자의 위치는 이모지 앞 위치에 2를 더한 값입니다.
+- 범위 밖이면 `charCodeAt`은 `NaN`, `codePointAt`은 `undefined`입니다.
+
+문자열의 모든 코드 포인트를 얻으려면 이터레이터로 순회합니다.
+
+```js
+const cps = s => [...s].map(c => c.codePointAt(0))
+cps('a😀')  // [97, 128512]
+```
+
+`String.fromCodePoint(...codePoints)`(ES2015)는 코드 포인트들로 문자열을 만듭니다.
+
+```js
+String.fromCodePoint(0x1F600)        // '😀'
+String.fromCodePoint(72, 105)        // 'Hi'
+String.fromCharCode(0xD83D, 0xDE00)  // '😀' (코드 유닛 2개)
+String.fromCharCode(0x1F600)         // '\uF600' (상위 비트 잘림)
+String.fromCharCode(65601)           // 'A' (65601 % 65536)
+```
+
+- `fromCodePoint`는 0–0x10FFFF 범위의 정수가 아닌 값(`-1`, `0x110000`, `1.5`, `NaN`)에 RangeError를 던집니다. 인수를 생략하면 `''`입니다.
+- `fromCharCode`는 값을 16비트로 잘라(2의 16제곱으로 나눈 나머지) 코드 유닛으로 씁니다. 보충 평면 문자는 만들지 못하고 에러도 내지 않으므로 조용히 틀립니다.
+- 두 함수 모두 서로게이트 값(`0xD800` 등)을 그대로 받아 외톨이 서로게이트를 만듭니다.
+
+## normalize
+
+같은 글자가 서로 다른 코드 포인트 열로 표현될 수 있습니다. `é`는 U+00E9 하나이거나, `e`에 결합 악센트 U+0301이 붙은 둘입니다. 화면에는 같게 보여도 `===`는 `false`입니다.
+
+```js
+const a = '\u00e9'           // 'é' (합쳐진 형태)
+const b = 'e\u0301'          // 'é' (분해된 형태)
+a === b                      // false
+a.length                     // 1
+b.length                     // 2
+a === b.normalize()          // true
+```
+
+`normalize(form)`은 문자열을 지정한 정규화 형식으로 바꿉니다. `form`을 생략하면 `'NFC'`이고, 이름 외의 값(소문자 `'nfc'` 포함)은 RangeError입니다.
+
+| 형식 | 이름 | 동작 |
+|------|------|------|
+| `NFC` | 정준 합성 | 분해된 글자를 합쳐 가장 짧게 |
+| `NFD` | 정준 분해 | 합쳐진 글자를 기본 글자와 결합 부호로 |
+| `NFKC` | 호환 합성 | `NFC`에 모양만 다른 호환 문자까지 정리 |
+| `NFKD` | 호환 분해 | `NFD`에 호환 문자까지 정리 |
+
+`K`가 붙은 형식은 의미가 같은 다른 모양의 문자(합자, 전각 문자, 동그라미 숫자)를 일반 문자로 바꿉니다.
+
+```js
+'ﬁ'.normalize('NFKC')     // 'fi'   (합자 풀기)
+'①'.normalize('NFKC')     // '1'
+'Ａ１'.normalize('NFKC')  // 'A1'   (전각 → 반각)
+'ﬁ'.normalize('NFC')      // 'ﬁ'    (K 없는 형식은 그대로)
+```
+
+`K` 형식은 정보가 사라지므로 저장 데이터가 아니라 검색·비교용 키를 만들 때만 씁니다.
+
+한글 음절 `한`(U+D55C)은 `NFC` 형태이고, `NFD`로 바꾸면 초성·중성·종성 자모 3개(U+1112, U+1161, U+11AB)로 분해됩니다.
+
+```js
+const h = '한'
+const d = h.normalize('NFD')
+h.length                  // 1
+d.length                  // 3
+h === d                   // false
+d.normalize('NFC') === h  // true
+```
+
+- macOS 파일 시스템에서 가져온 한글 파일명처럼 자모가 분리된 `NFD`로 들어오는 입력이 있습니다. 검색·비교·저장 전에 `normalize('NFC')`로 통일합니다.
+- 비교하려는 양쪽을 같은 형식으로 맞춘 뒤 `===`로 비교합니다.
+- 악센트 제거는 `NFD`로 분해한 뒤 결합 부호(Unicode 범주 M)를 지우는 관용구를 씁니다. 정규식의 `\p` 속성 이스케이프는 32편에서 다룹니다.
+
+```js
+'café'.normalize('NFD').replace(/\p{M}/gu, '')  // 'cafe'
+```
+
+형식은 Unicode 표준 UAX #15가 정의합니다.
+
+## localeCompare
+
+`a.localeCompare(b, locales, options)`는 로캘의 정렬 규칙으로 두 문자열을 비교해 음수, 0, 양수를 반환합니다. `<`가 코드 유닛 값을 비교하는 것과 달리 사전 순서를 따릅니다.
+
+```js
+'a'.localeCompare('b')  // 음수
+'b'.localeCompare('a')  // 양수
+'a'.localeCompare('a')  // 0
+```
+
+- 사양은 부호만 정합니다. 구현에 따라 `-2`나 `2`가 나올 수 있으므로 `=== -1`이 아니라 `< 0`으로 판정합니다.
+- 정규화 형식만 다른 문자열은 같다고 판정합니다. `'\u00e9'.localeCompare('e\u0301')`은 `0`입니다.
+- `locales`를 생략하면 실행 환경의 기본 로캘이 쓰여 결과가 환경마다 달라질 수 있습니다. 서버 코드나 테스트에서는 로캘을 명시합니다.
+- `Intl`을 지원하지 않는 구현에서는 `locales`와 `options`가 무시됩니다.
+
+배열을 정렬할 때 기본 `sort()`는 코드 유닛 순입니다.
+
+```js
+const a = ['b', 'a', 'ä', 'z', 'B', 'A']
+a.sort()
+// ['A', 'B', 'a', 'b', 'z', 'ä']  (코드 유닛 순)
+a.sort((x, y) => x.localeCompare(y))
+// ['a', 'A', 'ä', 'b', 'B', 'z']  (사전 순, Node 24 기준)
+```
+
+로캘마다 순서가 다릅니다. `'ä'.localeCompare('z', 'de')`는 음수이고, 스웨덴어에서는 `ä`가 `z` 뒤에 오므로 `'ä'.localeCompare('z', 'sv')`는 양수입니다.
+
+`options`는 `Intl.Collator`와 같습니다(자세히는 31편).
+
+| 옵션 | 값 | 효과 |
+|------|----|------|
+| `sensitivity` | `'base'` | 기본 글자만 구분 (a = á = A) |
+| `sensitivity` | `'accent'` | 악센트 구분, 대소문자 무시 (a = A, a ≠ á) |
+| `sensitivity` | `'case'` | 대소문자 구분, 악센트 무시 (a ≠ A, a = á) |
+| `sensitivity` | `'variant'` | 모두 구분 (정렬 기본값) |
+| `numeric` | `true` | 숫자 덩어리를 수로 비교 |
+| `caseFirst` | `'upper'`, `'lower'` | 대소문자 순서 지정 |
+| `ignorePunctuation` | `true` | 구두점 무시 |
+
+```js
+const names = ['item10', 'item2', 'item1']
+names.sort((x, y) =>
+  x.localeCompare(y, undefined, { numeric: true }))
+// ['item1', 'item2', 'item10']
+```
+
+큰 배열을 정렬할 때는 비교마다 규칙을 해석하지 않도록 `Intl.Collator` 객체를 한 번 만들어 `compare`를 재사용합니다.
+
+```js
+const c = new Intl.Collator('en')
+const list = ['b', 'a', 'B']
+list.sort(c.compare)  // ['a', 'b', 'B']
+```
+
+## isWellFormed·toWellFormed (ES2024)
+
+외톨이 서로게이트가 없는 문자열을 well-formed 문자열이라고 합니다. `isWellFormed()`는 그 여부를 boolean으로, `toWellFormed()`는 각 외톨이 서로게이트를 대체 문자 U+FFFD(`�`)로 바꾼 새 문자열을 반환합니다.
+
+```js
+'😀'.isWellFormed()              // true
+'ab\uD800'.isWellFormed()        // false
+'ab\uD800'.toWellFormed()        // 'ab\uFFFD' ('ab�')
+'😀'.slice(0, 1).isWellFormed()  // false
+```
+
+- 짝이 맞는 쌍은 그대로 둡니다. 순서가 뒤집힌 쌍(`'\uDE00\uD83D'`)은 둘 다 외톨이입니다.
+- 원본은 바뀌지 않습니다. 이미 well-formed인 문자열은 같은 내용으로 돌려줍니다.
+- 외톨이는 이모지 중간을 `slice`·`substring`·`charAt`·`split('')`으로 자르거나, 깨진 외부 입력을 받을 때 생깁니다.
+
+외톨이 서로게이트는 UTF-8 변환이나 URL 인코딩에서 문제를 일으킵니다.
+
+| 대상 | 외톨이 서로게이트를 만났을 때 |
+|------|-------------------------------|
+| `encodeURIComponent`, `encodeURI` | URIError |
+| `TextEncoder` | U+FFFD로 대체해 인코딩 |
+| `JSON.stringify` (ES2019부터) | `\ud800` 같은 이스케이프로 출력 |
+
+```js
+const q = 'a\uD800'
+encodeURIComponent(q)                 // URIError
+encodeURIComponent(q.toWellFormed())  // 'a%EF%BF%BD'
+```
+
+## 코드 유닛·코드 포인트·자소 단위 순회
+
+문자열의 "글자 하나"는 세 가지 단위로 셀 수 있고, 단위마다 순회 방법이 다릅니다.
+
+| 단위 | 정의 | 접근·순회 |
+|------|------|-----------|
+| 코드 유닛 | 16비트 값 하나 | `length`, `s[i]`, `charAt`, `charCodeAt`, `split('')`, 인덱스 `for` |
+| 코드 포인트 | Unicode 번호 하나 | `for...of`, `[...s]`, `Array.from(s)`, `codePointAt` |
+| 자소(grapheme cluster) | 사용자가 하나로 보는 글자 | `Intl.Segmenter` (31편) |
+
+문자열별로 세면 값이 이렇게 갈립니다.
+
+| 문자열 | 코드 유닛 | 코드 포인트 | 자소 |
+|--------|-----------|-------------|------|
+| `'a'` | 1 | 1 | 1 |
+| `'한'` (NFC) | 1 | 1 | 1 |
+| `'한'.normalize('NFD')` | 3 | 3 | 1 |
+| `'😀'` | 2 | 1 | 1 |
+| `'é'` | 2 | 2 | 1 |
+| `'👍🏽'` (엄지 + 피부색) | 4 | 2 | 1 |
+| `'🇰🇷'` (국기) | 4 | 2 | 1 |
+| `'👨‍👩‍👧'` (ZWJ 연결 가족) | 8 | 5 | 1 |
+
+ZWJ(U+200D, 폭 없는 접합자)는 이모지 여러 개를 하나의 그림으로 묶는 문자입니다.
+
+코드 유닛 순회와 코드 포인트 순회의 차이입니다.
+
+```js
+const s = 'a😀'
+for (let i = 0; i < s.length; i++) console.log(s[i])
+// 'a', '\uD83D', '\uDE00'  (3번, 이모지가 쪼개짐)
+for (const ch of s) console.log(ch)
+// 'a', '😀'                (2번)
+```
+
+- `for...of`, 스프레드, `Array.from`은 문자열의 이터레이터(`String.prototype[Symbol.iterator]`)를 쓰고, 이 이터레이터는 코드 포인트 단위로 값을 내놓습니다(이터러블은 35편).
+- 외톨이 서로게이트는 그 자체로 요소 하나가 됩니다.
+- 코드 포인트 수는 `[...s].length`로 셉니다.
+
+자소 단위는 `Intl.Segmenter`로 나눕니다. 기본 `granularity`가 `'grapheme'`입니다.
+
+```js
+const seg = new Intl.Segmenter()
+const gs = [...seg.segment('🇰🇷👍🏽')]
+gs.length               // 2
+gs.map(x => x.segment)  // ['🇰🇷', '👍🏽']
+```
+
+작업에 따라 단위를 고릅니다.
+
+| 작업 | 쓸 단위 |
+|------|---------|
+| 인덱스 계산, UTF-16 크기 | 코드 유닛(`length`) |
+| 이모지가 섞인 문자열 순회·역순 | 코드 포인트(`[...s]`) |
+| 화면에 보이는 글자 수 제한, 커서 이동 | 자소(`Intl.Segmenter`) |
+
+문자열 뒤집기는 단위에 따라 결과가 달라집니다.
+
+```js
+const s = 'abc😀'
+s.split('').reverse().join('')  // ❌ 이모지 깨짐
+const r = [...s].reverse().join('')
+r                               // ✅ '😀cba'
+```
+
+- `[...s]`는 코드 포인트 단위라서 국기나 결합 문자는 여전히 깨집니다. `[...'🇰🇷'].reverse().join('')`은 두 지역 표시 문자의 순서가 바뀌어 원래와 다른 문자열(`'🇷🇰'`)이 됩니다.
+- 이모지를 자르지 않고 앞 N글자를 얻으려면 `[...s].slice(0, n).join('')`(코드 포인트 기준)을 쓰고, 보이는 글자 기준이면 `Segmenter`의 결과를 자릅니다.
+
+## 문자열 메서드 전체 표
+
+`String.prototype`의 메서드와 정적 메서드를 용도별로 모았습니다. 원본을 바꾸는 메서드는 하나도 없습니다.
+
+접근
+
+| 메서드 | 반환 | 비고 |
+|--------|------|------|
+| `at(i)` | 문자열 또는 `undefined` | ES2022. 음수 인덱스 |
+| `charAt(i)` | 문자열 | 범위 밖이면 `''` |
+| `charCodeAt(i)` | 숫자 | 코드 유닛 값. 범위 밖 `NaN` |
+| `codePointAt(i)` | 숫자 또는 `undefined` | ES2015. 코드 포인트 |
+
+검색
+
+| 메서드 | 반환 | 비고 |
+|--------|------|------|
+| `indexOf(s, from)` | 숫자 | 없으면 `-1` |
+| `lastIndexOf(s, from)` | 숫자 | 뒤에서부터 |
+| `includes(s, from)` | boolean | ES2015. 정규식 불가 |
+| `startsWith(s, pos)` | boolean | ES2015. 정규식 불가 |
+| `endsWith(s, end)` | boolean | ES2015. 정규식 불가 |
+| `search(re)` | 숫자 | 첫 일치 위치 |
+| `match(re)` | 배열 또는 `null` | `g` 유무로 형태가 다름 |
+| `matchAll(re)` | 이터레이터 | ES2020. `g` 필수 |
+
+추출·가공
+
+| 메서드 | 반환 | 비고 |
+|--------|------|------|
+| `slice(a, b)` | 문자열 | 음수는 뒤에서부터 |
+| `substring(a, b)` | 문자열 | 음수는 0, 인수 맞바꿈 |
+| `substr(a, n)` | 문자열 | Annex B. 폐기 대상 |
+| `concat(...x)` | 문자열 | `+`가 일반적 |
+| `repeat(n)` | 문자열 | ES2015. 음수·`Infinity`는 RangeError |
+| `padStart(n, p)`, `padEnd(n, p)` | 문자열 | ES2017 |
+| `trim()` | 문자열 | ES5 |
+| `trimStart()`, `trimEnd()` | 문자열 | ES2019. `trimLeft`·`trimRight`는 별칭 |
+| `replace(p, r)` | 문자열 | 문자열 패턴은 첫 일치만 |
+| `replaceAll(p, r)` | 문자열 | ES2021. 정규식은 `g` 필수 |
+| `split(sep, limit)` | 배열 | 정규식 구분자 가능 |
+
+변환·비교·검사
+
+| 메서드 | 반환 | 비고 |
+|--------|------|------|
+| `toUpperCase()`, `toLowerCase()` | 문자열 | 길이가 달라질 수 있음 |
+| `toLocaleUpperCase(l)`, `toLocaleLowerCase(l)` | 문자열 | 로캘 규칙 |
+| `normalize(form)` | 문자열 | ES2015. 기본 `NFC` |
+| `localeCompare(b, l, o)` | 숫자 | 부호만 의미 |
+| `isWellFormed()` | boolean | ES2024 |
+| `toWellFormed()` | 문자열 | ES2024. 외톨이를 U+FFFD로 |
+
+기타
+
+| 멤버 | 반환 | 비고 |
+|------|------|------|
+| `length` | 숫자 | 프로퍼티. 코드 유닛 수 |
+| `toString()`, `valueOf()` | 원시 문자열 | 문자열이 아닌 `this`면 TypeError |
+| `[Symbol.iterator]()` | 이터레이터 | 코드 포인트 단위 |
+
+정적 메서드
+
+| 메서드 | 반환 | 비고 |
+|--------|------|------|
+| `String.fromCharCode(...u)` | 문자열 | 코드 유닛(16비트로 잘림) |
+| `String.fromCodePoint(...c)` | 문자열 | ES2015. 범위 밖 RangeError |
+| `String.raw(tpl, ...v)` | 문자열 | ES2015. 이스케이프 미해석 |
+
+Annex B의 레거시 메서드는 새 코드에서 쓰지 않습니다.
+
+- `anchor`, `big`, `blink`, `bold`, `fixed`, `fontcolor`, `fontsize`, `italics`, `link`, `small`, `strike`, `sub`, `sup`은 문자열을 HTML 태그로 감쌉니다. DOM API로 요소를 만드는 편이 안전합니다.
+- `substr`은 앞의 절에서 다뤘습니다.
+- 문자열에는 `map`, `forEach`, `reverse`, `sort`, `join` 같은 배열 메서드가 없습니다. `[...s]`로 배열로 바꾼 뒤 씁니다(28편).
+
+```js
+'a'.bold()           // '<b>a</b>'
+'a'.link('x.html')   // '<a href="x.html">a</a>'
+```
+
+## 핵심 정리
+
+- 문자열은 불변이고 모든 메서드는 새 값을 반환합니다. 결과를 다시 대입해야 합니다.
+- `length`와 인덱스 접근은 UTF-16 코드 유닛 기준입니다. 코드 포인트 단위는 `for...of`·스프레드, 사용자가 보는 글자 단위는 `Intl.Segmenter`로 다룹니다.
+- `slice`는 음수 인덱스를 뒤에서부터 세고 `substring`은 음수를 0으로 바꾸며 인수를 맞바꿉니다. `substr`은 Annex B의 폐기 대상입니다.
+- `replace`는 문자열 패턴에서 첫 일치만, `replaceAll`은 전부 바꾸고 정규식이면 `g` 플래그가 필수입니다. `split`의 `limit`은 결과 배열을 자릅니다.
+- `normalize`는 같은 글자의 다른 코드 포인트 표현을 통일하고, `localeCompare`는 로캘 기준 사전 순서를 비교하며 부호만 의미가 있습니다.
+- `isWellFormed`·`toWellFormed`(ES2024)는 외톨이 서로게이트를 검사하고 U+FFFD로 치환합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="문자열 s가 이모지 😀 하나일 때 s.length와 [...s].length의 값은?"
+  options={['1과 1', '2와 1', '2와 2', '1과 2']}
+  correctAnswer={2}
+  explanation="length는 UTF-16 코드 유닛의 개수이고 😀는 서로게이트 쌍 2개라서 2입니다. 스프레드는 문자열 이터레이터를 통해 코드 포인트 단위로 펼치므로 요소가 1개입니다. 1과 1은 length를 글자 수로 착각한 경우, 2와 2는 스프레드를 코드 유닛 단위로 착각한 경우, 1과 2는 두 단위를 반대로 안 경우입니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="s가 abcdef일 때 결과가 빈 문자열인 것은?"
+  options={['s.substring(-2, 2)', 's.slice(-2)', 's.slice(4, 1)', 's.substring(4, 1)']}
+  correctAnswer={3}
+  explanation="slice는 start가 end 이상이면 빈 문자열을 반환하므로 s.slice(4, 1)이 빈 문자열입니다. substring(4, 1)은 두 인수를 맞바꿔 substring(1, 4)가 되어 bcd이고, substring(-2, 2)는 음수가 0으로 바뀌어 ab입니다. slice(-2)는 뒤에서 두 글자인 ef입니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="문자열 s와 문자열 x에 대해 TypeError가 발생하는 호출은?"
+  options={['s.replace("a", x)', 's.replaceAll("a", x)', 's.replaceAll(/a/g, x)', 's.replaceAll(/a/, x)']}
+  correctAnswer={4}
+  explanation="replaceAll은 정규식을 받을 때 g 플래그가 없으면 TypeError를 던집니다. 문자열 패턴은 replace(첫 일치만)와 replaceAll(모든 일치) 모두 허용되고, g 플래그가 있는 정규식은 replaceAll에서도 정상 동작합니다."
+/>
+
+## 참고 자료
+
+- [ECMA-262 — String Objects](https://tc39.es/ecma262/#sec-string-objects)
+- [MDN — String](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String)
+- [MDN — Template literals (Tagged templates)](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Template_literals)
+- [MDN — String.raw](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/raw)
+- [MDN — String.prototype.substr (deprecated)](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/substr)
+- [MDN — String.prototype.localeCompare](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/localeCompare)
+- [MDN — String.prototype.isWellFormed](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/isWellFormed)
+- [MDN — Intl.Segmenter](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/Segmenter)
+- [Unicode Standard Annex #15 — Normalization Forms](https://unicode.org/reports/tr15/)
+- [Unicode Standard Annex #29 — Text Segmentation](https://unicode.org/reports/tr29/)
+- [TC39 Finished Proposals](https://github.com/tc39/proposals/blob/main/finished-proposals.md)

@@ -1,0 +1,49 @@
+---
+title: '18. 최종 점검과 다음 과목 예고'
+description: 'npm run verify로 타입 테스트를 포함해 전체를 검증하고, 완성된 expense-tracker를 시연합니다'
+---
+
+이 편에서는 새 코드를 추가하지 않고, 지금까지 만든 것이 하나의 명령으로 전부 검증되는지 확인한 뒤 결과물을 시연합니다.
+
+## 개념 정리
+
+### verify에 타입 테스트 추가하기
+
+`typescript_fundamentals` 18편에서 만든 `verify` 스크립트는 `typecheck`·`test`·`build` 세 단계였습니다. 16편에서 추가한 `test:types`(`vitest --typecheck`)는 지금까지 `verify`에 포함되지 않아, 유틸 타입이 깨져도 `verify`가 통과할 수 있는 빈틈이 있었습니다.
+
+```json
+// package.json (발췌)
+{
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test:types": "vitest --typecheck --run",
+    "test": "vitest run",
+    "build": "vite build",
+    "verify": "npm run typecheck && npm run test:types && npm run test && npm run build"
+  }
+}
+```
+
+`typecheck`(전체 프로젝트 타입 검사) 다음에 `test:types`(유틸 타입 회귀 검사)를 두어, 가장 가벼운 검사부터 순서대로 실패를 드러냅니다. `test`(런타임 동작 검사)와 `build`(번들 생성)는 그 뒤를 잇습니다.
+
+## 자주 하는 실수
+
+| 증상 | 원인 | 고치는 법 |
+|------|------|-----------|
+| `verify`는 통과했는데 배포 후 유틸 타입 관련 버그 발견 | `test:types` 단계를 `verify`에 포함하지 않음 | `verify` 스크립트에 `test:types`를 반드시 넣는다 |
+| MSW 네트워크 로그가 안 보임 | `npm run preview`는 프로덕션 번들을 서빙할 뿐, MSW 서비스 워커 등록 코드가 프로덕션 빌드에서 빠져 있음 | 브라우저 시연은 `npm run dev`(MSW 활성화)에서 하고, `preview`는 번들 결과 확인용으로 구분한다 |
+| 체크리스트 항목이 어떤 편 코드인지 못 찾음 | 배럴·리팩터링(17편) 이후 파일 위치가 바뀜 | `lib/types/index.ts`에서 시작해 각 export의 선언부까지 따라간다 |
+
+## 확인 문제
+
+<Quiz
+  questionNumber={1}
+  question={"verify에서 typecheck·test:types를 build보다 앞에 두는 이유는"}
+  options={["알파벳 순서를 지키기 위해서","상대적으로 가벼운 검사를 먼저 실행해 실패를 빨리 드러내기 위해서","build가 typecheck 없이는 실행되지 않기 때문에","vite가 그 순서를 강제하기 때문에"]}
+  correctAnswer={2}
+  explanation={"타입 검사류는 비교적 가볍게 빠른 실패를 알려주므로, 시간이 오래 걸리는 build보다 앞에 두는 것이 효율적입니다."}
+/>
+
+## 참고 자료
+
+- [Vitest — Typecheck 설정 레퍼런스](https://vitest.dev/config/typecheck)

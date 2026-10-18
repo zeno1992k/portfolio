@@ -1,0 +1,1100 @@
+---
+title: '30. Number와 Math'
+description: 'Number의 변환·정밀도·검사·서식, BigInt, Math 객체의 메서드와 ES2025·ES2026에 추가된 기능을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** Number가 값을 저장하는 방식에서 생기는 오차와 한계를 설명하고, Number·BigInt·Math의 메서드를 경계 조건까지 정확히 사용할 수 있습니다.
+</Callout>
+
+## Number 생성자
+
+Number 생성자는 값을 숫자로 바꾸는 함수이고, `new`와 함께 호출하면 숫자를 감싼 래퍼 객체를 만드는 생성자입니다. Number 타입의 값은 모두 하나의 형식(64비트 부동소수점)으로 저장되므로 정수와 실수를 구분하지 않습니다(자세히는 05편).
+
+```js
+Number('42')        // 42
+Number()            // 0   (인수가 없으면 0)
+Number(undefined)   // NaN
+Number(null)        // 0
+Number(true)        // 1
+Number('  12  ')    // 12  (앞뒤 공백 무시)
+Number('')          // 0   (빈 문자열도 0)
+Number('12px')      // NaN (일부만 숫자여도 실패)
+Number('0x1f')      // 31  (0x·0b·0o 접두사 허용)
+Number('1e3')       // 1000
+Number('1_000')     // NaN (구분자는 소스 코드 전용)
+Number([5])         // 5
+Number({})          // NaN
+Number(10n)         // 10  (BigInt는 변환됨)
+```
+
+`Number(Symbol())`은 TypeError입니다. 객체를 숫자로 바꾸는 과정(ToPrimitive)과 전체 변환표는 08편에서 다룹니다.
+
+`new Number(x)`는 숫자가 아니라 객체를 만듭니다.
+
+```js
+typeof Number('5')         // 'number'
+typeof new Number('5')     // 'object'
+new Number(0) ? 'T' : 'F'  // 'T' (객체는 항상 truthy)
+new Number(5) === 5        // false
+new Number(5) + 1          // 6   (연산 때는 원시 값으로 변환)
+```
+
+숫자 값에서 메서드를 호출하면 엔진이 임시 래퍼 객체를 만들어 호출한 뒤 버립니다(자세히는 10편). 따라서 `new Number()`를 직접 쓸 일은 없습니다.
+
+Number가 가진 멤버는 다음과 같습니다.
+
+| 구분 | 멤버 | 다루는 곳 |
+|------|------|-----------|
+| 상수 | `MAX_VALUE`, `MIN_VALUE`, `EPSILON`, `MAX_SAFE_INTEGER`, `MIN_SAFE_INTEGER`, `POSITIVE_INFINITY`, `NEGATIVE_INFINITY`, `NaN` | 아래 표 |
+| 검사 | `isNaN`, `isFinite`, `isInteger`, `isSafeInteger` | 검사 절 |
+| 파싱 | `parseInt`, `parseFloat` | 아래 |
+| 서식 | `toFixed`, `toPrecision`, `toExponential`, `toString`, `toLocaleString` | 서식 절 |
+
+| 상수 | 값 |
+|------|----|
+| `Number.MAX_VALUE` | 1.7976931348623157e+308 (유한한 최댓값) |
+| `Number.MIN_VALUE` | 5e-324 (0보다 큰 최솟값. 가장 작은 음수가 아니다) |
+| `Number.EPSILON` | 2.220446049250313e-16 |
+| `Number.MAX_SAFE_INTEGER` | 9007199254740991 |
+| `Number.MIN_SAFE_INTEGER` | -9007199254740991 |
+| `Number.POSITIVE_INFINITY` | `Infinity` |
+| `Number.NEGATIVE_INFINITY` | `-Infinity` |
+
+상수는 모두 읽기 전용입니다(자세히는 14편).
+
+`Number.parseInt`와 `Number.parseFloat`는 전역 `parseInt`·`parseFloat`와 같은 함수 객체입니다(ES2015). `Number()`는 문자열 전체가 숫자여야 하지만 파싱 함수는 앞에서부터 읽다가 숫자가 아닌 글자에서 멈춥니다.
+
+```js
+parseInt('42px')       // 42
+parseFloat('3.14abc')  // 3.14
+parseInt('ff', 16)     // 255   (두 번째 인수는 진법)
+parseInt('0xff')       // 255
+parseInt('0b11')       // 0     (0b는 인식하지 않는다)
+parseInt(0.0000005)    // 5     (문자열 '5e-7'을 읽는다)
+```
+
+마지막 줄이 흔한 실수입니다. `parseInt`는 숫자를 문자열로 바꾼 뒤 읽으므로 작은 수나 큰 수의 정수화에 쓰면 안 됩니다. 소수부를 버리려면 `Math.trunc`를 씁니다.
+
+## IEEE 754와 부동소수점 오차
+
+IEEE 754는 부동소수점(floating point) 수의 저장 형식과 연산 규칙을 정한 국제 표준이고, Number는 그중 배정밀도(double precision) 64비트 형식입니다. 소수점의 위치를 지수로 옮기는 방식이라 아주 큰 수와 아주 작은 수를 함께 다룰 수 있는 대신, 모든 실수를 정확히 저장하지는 못합니다.
+
+| 필드 | 비트 수 | 역할 |
+|------|---------|------|
+| 부호 | 1 | 0이면 양수, 1이면 음수 |
+| 지수 | 11 | 편향값 1023을 뺀 2의 거듭제곱 |
+| 가수 | 52 | `1.xxx` 형태의 소수부. 맨 앞의 1은 저장하지 않는다 |
+
+```text
+값 = (-1)^부호 × (1 + 가수 / 2^52) × 2^(지수 - 1023)
+```
+
+저장하지 않는 맨 앞의 1까지 합치면 유효 숫자는 53비트이고, 10진수로 약 15–17자리입니다. 지수 비트가 특수한 값이면 숫자가 아닌 값을 나타냅니다.
+
+| 지수 비트 | 가수 비트 | 의미 |
+|-----------|-----------|------|
+| 모두 0 | 모두 0 | `+0` 또는 `-0` |
+| 모두 0 | 0이 아님 | 비정규 수. `Number.MIN_VALUE`까지 점점 작아지는 구간 |
+| 모두 1 | 모두 0 | `Infinity` 또는 `-Infinity` |
+| 모두 1 | 0이 아님 | `NaN` |
+
+2진수로 유한하게 끝나는 수, 즉 2의 거듭제곱의 합(정수, 0.5, 0.25, 0.75 등)만 정확히 저장됩니다. 0.1은 2진수에서 `0.000110011001100…`처럼 무한히 반복되어 53비트에서 잘리므로 가장 가까운 근삿값이 저장됩니다.
+
+```js
+(0.1).toFixed(20)   // '0.10000000000000000555' (실제 저장값)
+0.1 + 0.2           // 0.30000000000000004
+0.1 + 0.2 === 0.3   // false
+0.1 * 3             // 0.30000000000000004
+1.005 * 100         // 100.49999999999999
+0.5 + 0.25          // 0.75 (2의 거듭제곱의 합이라 정확)
+```
+
+근삿값끼리 계산하므로 결과도 근삿값입니다. 연산 한 번마다 정확한 결과를 구한 뒤 가장 가까운 표현 가능한 값으로 반올림하며, 동점이면 가수가 짝수인 쪽을 고릅니다. 오차는 연산을 거칠수록 쌓이고 결합법칙이 성립하지 않아 계산 순서가 결과를 바꿉니다.
+
+```js
+0.1 + 0.2 + 0.3   // 0.6000000000000001
+0.3 + 0.2 + 0.1   // 0.6
+```
+
+표현 가능한 수 사이의 간격은 값이 클수록 넓어집니다. 값의 범위가 2배가 될 때마다 간격도 2배가 됩니다.
+
+| 값의 범위 | 이웃한 두 수의 간격 |
+|-----------|---------------------|
+| 1 이상 2 미만 | 2의 -52제곱 (`Number.EPSILON`) |
+| 2 이상 4 미만 | `Number.EPSILON`의 2배 |
+| 2의 52제곱 이상 2의 53제곱 미만 | 1 |
+| 2의 53제곱 이상 2의 54제곱 미만 | 2 |
+
+표현 범위를 넘으면 예외 없이 오버플로는 `Infinity`, 언더플로는 `0`이 됩니다(`Number.MAX_VALUE * 2`, `Number.MIN_VALUE / 2`). 이 오차는 JavaScript만의 문제가 아니라 배정밀도 부동소수점을 쓰는 모든 언어(Java의 `double`, C의 `double`, Python의 `float`)에서 같습니다.
+
+대응 방법은 목적에 따라 나뉩니다.
+
+- 비교: 허용 오차를 두고 비교합니다(다음 절).
+- 금액·수량: 원, 센트 같은 최소 단위의 정수로 저장하고 계산합니다. 정수끼리의 덧셈·뺄셈·곱셈은 안전한 정수 범위 안에서 정확합니다.
+- 표시: `toFixed`나 `toLocaleString`으로 자릿수를 정리합니다. 값 자체는 바뀌지 않습니다.
+- 큰 정수: BigInt를 씁니다.
+- 정확한 십진 소수 계산이 필요하면 십진 연산 라이브러리를 씁니다.
+
+흔한 실수는 두 가지입니다.
+
+- `a + b === 0.3`처럼 계산 결과를 `===`로 비교합니다.
+- 소수로 증가시키는 반복문의 종료 조건에 `!==`를 씁니다.
+
+```js
+for (let x = 0; x !== 1; x += 0.1) {}  // 끝나지 않는다
+// 10번째 x가 0.9999999999999999라서 1을 지나친다
+for (let x = 0; x < 1; x += 0.1) {}    // ✅ 부등호로 종료
+```
+
+## Number.EPSILON
+
+`Number.EPSILON`은 1과 1보다 큰 최소 표현 가능 수의 차이이며 `2 ** -52`(약 2.22e-16)입니다(ES2015).
+
+```js
+Number.EPSILON === 2 ** -52    // true
+1 + Number.EPSILON > 1         // true
+1 + Number.EPSILON / 2 === 1   // true (절반은 사라짐)
+```
+
+주된 쓰임은 계산 결과의 허용 오차 비교입니다.
+
+```js
+const isClose = (a, b) => Math.abs(a - b) < Number.EPSILON
+isClose(0.1 + 0.2, 0.3)   // true  (차이 5.55e-17)
+isClose(1.1 + 2.2, 3.3)   // false (차이 4.44e-16)
+```
+
+`Number.EPSILON`은 1 근처의 간격입니다. 2 이상의 값은 이웃한 수의 간격이 이보다 넓어서, 간격 하나만큼의 오차만 있어도 `Number.EPSILON`을 넘습니다. 값의 크기에 비례하는 상대 오차로 비교해야 합니다.
+
+```js
+const nearlyEqual = (a, b) =>
+  Math.abs(a - b) <=
+  Number.EPSILON * Math.max(Math.abs(a), Math.abs(b))
+
+nearlyEqual(1.1 + 2.2, 3.3)        // true
+nearlyEqual(1000.1 + 0.2, 1000.3)  // true
+```
+
+- 연산을 여러 번 거친 값은 오차가 쌓이므로 `Number.EPSILON`에 배수를 곱해 허용치를 정합니다.
+- 상대 오차 방식은 한쪽이 0이면 항상 `false`입니다(`nearlyEqual(0, 1e-20)`). 0과 비교할 때는 목적에 맞는 절대 허용치를 따로 정합니다.
+
+## 안전한 정수 범위
+
+안전한 정수는 Number로 정확히 표현되고, 이웃한 다른 정수와 같은 값으로 뭉개지지 않는 정수입니다. 범위는 `-(2 ** 53 - 1)`부터 `2 ** 53 - 1`까지입니다.
+
+```js
+Number.MAX_SAFE_INTEGER  // 9007199254740991  (2 ** 53 - 1)
+Number.MIN_SAFE_INTEGER  // -9007199254740991
+2 ** 53                  // 9007199254740992  (안전하지 않음)
+2 ** 53 + 1              // 9007199254740992  (뭉개짐)
+2 ** 53 + 2              // 9007199254740994
+2 ** 53 + 3              // 9007199254740996  (동점은 짝수 쪽)
+```
+
+가수가 53비트라서 `2 ** 53` 이상에서는 이웃한 수의 간격이 2 이상이 되고, 그 사이의 정수는 저장할 수 없습니다.
+
+| 값의 범위 | 표현할 수 있는 정수 |
+|-----------|---------------------|
+| 2의 53제곱 미만 | 모든 정수 |
+| 2의 53제곱 이상 2의 54제곱 미만 | 2의 배수만 |
+| 2의 54제곱 이상 2의 55제곱 미만 | 4의 배수만 |
+
+안전 범위를 넘은 정수에 1을 더하는 식의 계산은 틀린 값을 에러 없이 돌려줍니다. 실무에서 가장 자주 만나는 경우는 서버의 64비트 정수 ID입니다.
+
+```js
+JSON.parse('{"id":9007199254740993}').id
+// 9007199254740992  (파싱 단계에서 이미 끝자리가 바뀜)
+```
+
+해결은 서버가 ID를 문자열로 보내게 하거나, 문자열로 받아 `BigInt`로 변환하는 것입니다(자세히는 39편). 안전 범위 판별은 `Number.isSafeInteger`를 씁니다(검사 절에서 다룹니다).
+
+## NaN과 Infinity
+
+`NaN`은 계산 결과가 유효한 수가 아님을 나타내는 Number 값이고, `Infinity`는 표현 범위를 넘는 크기를 나타내는 Number 값입니다. 둘 다 전역 프로퍼티(읽기 전용)이면서 `Number.NaN`, `Number.POSITIVE_INFINITY`로도 접근합니다. `NaN`의 성질(자기 자신과 같지 않음, 모든 비교가 `false`, falsy)은 05편에서 다룹니다.
+
+`NaN`이 만들어지는 경우는 네 가지입니다.
+
+| 원인 | 예 |
+|------|----|
+| 숫자로 변환 실패 | `Number('abc')`, `parseInt('x')`, `undefined + 1` |
+| 결과가 정의되지 않는 연산 | `0 / 0`, `Infinity - Infinity`, `Infinity * 0`, `Infinity / Infinity` |
+| 정의역 밖의 Math 인수 | `Math.sqrt(-1)`, `Math.log(-1)`, `Math.acos(2)` |
+| `NaN`이 섞인 연산 | `NaN + 1`, `Math.max(1, NaN)` |
+
+`NaN`은 한 번 생기면 이후 산술 결과에 계속 전염됩니다. 어디서 처음 생겼는지 추적하기 어려우므로 입력을 받는 지점에서 검사합니다.
+
+`Infinity`는 0으로 나누거나 오버플로가 나면 만들어집니다. 예외는 던져지지 않습니다.
+
+```js
+1 / 0                 // Infinity   (예외 없음)
+-1 / 0                // -Infinity
+Number.MAX_VALUE * 2  // Infinity   (오버플로)
+Infinity + 1          // Infinity
+Infinity - Infinity   // NaN
+1 / Infinity          // 0
+5 % Infinity          // 5
+Infinity % 5          // NaN
+5 % 0                 // NaN
+```
+
+- `Infinity`는 모든 유한한 수보다 큽니다. 최솟값을 찾는 반복의 초기값(`let min = Infinity`)으로 쓰입니다. `Math.min()`은 `Infinity`, `Math.max()`는 `-Infinity`를 반환합니다.
+- `Infinity === Infinity`는 `true`입니다. 자기 자신과 같지 않은 값은 `NaN`뿐입니다.
+- `Number('Infinity')`는 `Infinity`이지만 `Number('infinity')`는 `NaN`입니다. 대소문자를 구분합니다.
+- `JSON.stringify`는 `NaN`과 `Infinity`를 `null`로 바꿉니다(`JSON.stringify([NaN, Infinity])`는 `'[null,null]'`, 자세히는 39편).
+- 0으로 나누기가 예외가 되는 곳은 BigInt입니다(`1n / 0n`은 RangeError).
+
+`NaN`은 `===`로 찾을 수 없으므로 `if (x === NaN)`은 항상 거짓입니다. 판별은 다음 절의 `Number.isNaN`을 씁니다.
+
+## isFinite·isInteger·isNaN·isSafeInteger
+
+Number의 정적 메서드 네 개는 값이 어떤 종류의 숫자인지 검사합니다. 모두 ES2015에서 추가되었고 인수를 숫자로 변환하지 않습니다. 변환하는 쪽은 전역 함수 `isNaN`과 `isFinite`입니다(ES1).
+
+| 함수 | `true`가 되는 조건 | 인수 변환 |
+|------|--------------------|-----------|
+| `Number.isNaN(x)` | Number 타입이고 `NaN` | 없음 |
+| `Number.isFinite(x)` | Number 타입이고 `NaN`·`±Infinity`가 아님 | 없음 |
+| `Number.isInteger(x)` | Number 타입이고 유한하며 소수부가 0 | 없음 |
+| `Number.isSafeInteger(x)` | `isInteger`이면서 안전한 정수 범위 안 | 없음 |
+| `isNaN(x)` | `Number(x)`가 `NaN` | 있음 |
+| `isFinite(x)` | `Number(x)`가 유한한 수 | 있음 |
+
+전역 함수는 숫자가 아닌 값을 변환해서 판정하므로 결과가 직관과 어긋납니다.
+
+```js
+isNaN('abc')             // true   (Number('abc')가 NaN)
+Number.isNaN('abc')      // false  (문자열은 NaN이 아님)
+isNaN(undefined)         // true
+Number.isNaN(undefined)  // false
+isNaN('')                // false  (Number('') = 0)
+isFinite('12')           // true
+Number.isFinite('12')    // false
+isFinite(null)           // true   (Number(null) = 0)
+Number.isFinite(null)    // false
+isNaN(1n)                // TypeError (BigInt는 변환 불가)
+Number.isNaN(1n)         // false
+```
+
+`Number.isNaN`은 `Object.is(x, NaN)`과 결과가 같습니다. 전역 `isNaN`은 `NaN`이 아닌 값(문자열, `undefined`, `{}`)도 `true`로 만들 수 있어서 쓰지 않습니다.
+
+`isInteger`와 `isSafeInteger`의 결과는 다음과 같습니다.
+
+| 값 | `isInteger` | `isSafeInteger` |
+|----|-------------|-----------------|
+| `5`, `5.0` | `true` | `true` |
+| `5.5` | `false` | `false` |
+| `'5'` | `false` | `false` |
+| `2 ** 53` | `true` | `false` |
+| `1e21` | `true` | `false` |
+| `Infinity`, `NaN` | `false` | `false` |
+| `5n` | `false` | `false` |
+| `new Number(5)` | `false` | `false` |
+
+- `5.0`은 `5`와 같은 값입니다. 소수점 표기가 정수 여부를 바꾸지 않습니다.
+- `Number.isInteger(2 ** 53 + 1)`은 `true`입니다. 계산 결과가 이미 `2 ** 53`으로 저장된 뒤에 검사하기 때문입니다. 정수 판별만으로는 정확성을 알 수 없으므로 안전 범위는 `isSafeInteger`로 따로 확인합니다.
+- 계산 결과의 오차가 판정에 영향을 줍니다. `4.35 * 100`은 `434.99999999999994`라서 `Number.isInteger(4.35 * 100)`이 `false`입니다.
+
+문자열 입력이 숫자인지 확인하는 흔한 방식은 빈 문자열에서 틀립니다. `Number('')`가 `0`이기 때문입니다.
+
+```js
+const isNumeric = (s) =>
+  typeof s === 'string' && s.trim() !== '' &&
+  Number.isFinite(Number(s))
+
+isNumeric('12.5')       // true
+isNumeric('')           // false
+isNumeric('12px')       // false
+isNumeric('Infinity')   // false
+isNumeric('0x1f')       // true  (16진 문자열도 숫자로 변환됨)
+```
+
+## toFixed·toPrecision·toString
+
+`Number.prototype`의 서식 메서드는 숫자를 문자열로 만듭니다. 반환값이 문자열이므로 계산에 다시 쓰려면 `Number()`로 변환해야 합니다.
+
+### toFixed
+
+`toFixed(digits)`는 소수점 아래 `digits`자리로 맞춘 문자열을 반환합니다.
+
+```js
+(3.14159).toFixed(2)   // '3.14'
+(3).toFixed(2)         // '3.00'  (모자란 자리는 0으로 채움)
+(1.5).toFixed()        // '2'     (인수 생략은 0)
+(1234.5678).toFixed(1) // '1234.6'
+typeof (1).toFixed(1)  // 'string'
+```
+
+- `digits`는 0부터 100까지입니다. 범위 밖이면 RangeError입니다.
+- 반올림은 십진 표기가 아니라 실제 저장된 2진 근삿값을 기준으로 합니다. 1.005는 `1.00499999999999989…`로 저장되므로 `(1.005).toFixed(2)`는 `'1.00'`입니다.
+- 근삿값이 정확히 동점(`.5`)이면 0에서 먼 쪽으로 올립니다. `(2.5).toFixed(0)`은 `'3'`, `(-2.5).toFixed(0)`은 `'-3'`, `(0.5).toFixed(0)`은 `'1'`입니다.
+- 절댓값이 `1e21` 이상이면 `toString()`과 같은 지수 표기를 반환합니다(`(1e21).toFixed(2)`는 `'1e+21'`).
+- 음수가 반올림되어 0이 되어도 부호가 남습니다. `(-0.0001).toFixed(2)`는 `'-0.00'`입니다.
+
+### toPrecision과 toExponential
+
+`toPrecision(p)`는 정수부와 소수부를 합쳐 유효 숫자 `p`개로 맞춥니다. `p`는 1부터 100까지입니다.
+
+```js
+(123.456).toPrecision(4)    // '123.5'
+(123456).toPrecision(7)     // '123456.0'
+(5).toPrecision(3)          // '5.00'
+(0.000123).toPrecision(2)   // '0.00012'
+(123.456).toPrecision(2)    // '1.2e+2'
+(1e-7).toPrecision(3)       // '1.00e-7'
+```
+
+10진 지수가 -7 이하이거나 `p` 이상이면 지수 표기로 바뀝니다. 마지막 두 줄이 그 경우입니다.
+
+`toExponential(fractionDigits)`는 항상 지수 표기로 반환합니다. `fractionDigits`는 0부터 100까지이고 생략하면 필요한 만큼 표시합니다.
+
+```js
+(12345).toExponential(2)   // '1.23e+4'
+(12345).toExponential()    // '1.2345e+4'
+(0).toExponential(2)       // '0.00e+0'
+```
+
+### toString
+
+`toString(radix)`는 `radix`진법의 문자열을 반환합니다. `radix`는 2부터 36까지이고 생략하면 10입니다. 범위 밖이면 RangeError입니다.
+
+```js
+(255).toString(16)    // 'ff'
+(255).toString(2)     // '11111111'
+(35).toString(36)     // 'z'
+(0.5).toString(2)     // '0.1'
+(-255).toString(2)    // '-11111111' (2의 보수 아님)
+(255).toString(1)     // RangeError
+```
+
+- 문자열을 다시 숫자로 읽을 때는 `parseInt('ff', 16)`처럼 진법을 지정합니다.
+- 32비트 2의 보수 표현이 필요하면 부호 없는 시프트를 거칩니다. `(-5 >>> 0).toString(2)`는 `'11111111111111111111111111111011'`입니다(자세히는 06편).
+- 숫자 리터럴 바로 뒤의 `.`은 소수점으로 읽히므로 `5.toString()`은 SyntaxError입니다. `(5).toString()` 또는 `5..toString()`으로 씁니다(자세히는 05편).
+
+10진수로 변환할 때 `toString()`, `String(n)`, 템플릿 리터럴은 같은 결과를 냅니다. 이 결과는 같은 값으로 되돌아오는 가장 짧은 십진 문자열입니다. 그래서 0.1이 실제로는 `0.1000000000000000055…`로 저장되어 있어도 `0.1`로 출력됩니다.
+
+일반 표기와 지수 표기의 경계는 정해져 있습니다.
+
+| 절댓값 | 표기 | 예 |
+|--------|------|----|
+| 1e21 이상 | 지수 표기 | `1e+21` |
+| 1e-6 이상 1e21 미만 | 일반 표기 | `0.000001`, `123456789012345680000` |
+| 1e-6 미만 | 지수 표기 | `1e-7`, `5e-7` |
+
+## toLocaleString
+
+`Number.prototype.toLocaleString(locales, options)`는 숫자를 지역 관습과 옵션에 맞춰 서식화한 문자열을 반환합니다. 내부적으로 `Intl.NumberFormat`을 쓰는 단축 호출입니다(자세히는 31편).
+
+```js
+const n = 1234567.891
+n.toLocaleString('en-US')   // '1,234,567.891'
+n.toLocaleString('de-DE')   // '1.234.567,891'
+n.toLocaleString('en-IN')   // '12,34,567.891'
+n.toLocaleString('ko-KR')   // '1,234,567.891'
+```
+
+- 소수부는 기본으로 최대 3자리까지 표시하며 넘으면 반올림합니다(`1234.5678`은 `'1,234.568'`).
+- `locales`를 생략하거나 `undefined`로 두면 실행 환경의 기본 로캘을 씁니다. 같은 코드가 환경마다 다른 결과를 내므로 결과가 중요한 곳에서는 로캘을 명시합니다.
+- 반올림은 동점일 때 0에서 먼 쪽입니다(`roundingMode`의 기본값 `'halfExpand'`). `toFixed`와 방식이 달라서 같은 값도 결과가 다를 수 있습니다. V8에서 `(1.005).toLocaleString('en-US', { maximumFractionDigits: 2 })`는 `'1.01'`이고 `(1.005).toFixed(2)`는 `'1.00'`입니다.
+
+자주 쓰는 옵션은 다음과 같습니다.
+
+| 옵션 | 값 | 효과 |
+|------|----|------|
+| `style` | `'currency'`(+ `currency`), `'percent'`, `'unit'`(+ `unit`) | 통화·백분율·단위 서식 |
+| `minimumFractionDigits`, `maximumFractionDigits` | 정수 | 소수 자릿수 범위 |
+| `minimumIntegerDigits` | 정수 | 정수부 최소 자릿수(앞을 0으로 채움) |
+| `notation` | `'compact'` | 큰 수를 줄여서 표기 |
+
+```js
+const usd = { style: 'currency', currency: 'USD' }
+const krw = { style: 'currency', currency: 'KRW' }
+const price = 1234.5
+price.toLocaleString('en-US', usd)   // '$1,234.50'
+price.toLocaleString('ko-KR', krw)   // '₩1,235'
+```
+
+통화는 통화별 소수 자릿수를 따릅니다. 원(KRW)은 0자리라서 `1234.5`가 `'₩1,235'`로 반올림됩니다.
+
+```js
+const ratio = 0.256
+const pct0 = { style: 'percent' }
+const pct1 = { style: 'percent', maximumFractionDigits: 1 }
+ratio.toLocaleString('en-US', pct0)   // '26%'
+ratio.toLocaleString('en-US', pct1)   // '25.6%'
+const compact = { notation: 'compact' }
+const size = 12345
+size.toLocaleString('en-US', compact)   // '12K'
+size.toLocaleString('ko-KR', compact)   // '1.2만'
+```
+
+- `NaN`은 `'NaN'`, `Infinity`는 `'∞'`로 표시됩니다(`en-US`).
+- BigInt에도 같은 메서드가 있고 정밀도를 잃지 않습니다(`(123456789012345678901234567890n).toLocaleString('en-US')`).
+- 같은 인수로 여러 번 호출하면 `Intl.NumberFormat` 객체를 한 번 만들어 `format()`을 반복 호출하는 편이 효율적입니다(MDN 권고).
+- 결과는 표시용 문자열입니다. 구분 기호와 공백 문자는 로캘마다 다릅니다(`fr-FR`은 일반 공백이 아닌 특수 공백 문자를 씁니다). 되돌려 `Number('1,234')`로 읽으면 `NaN`이므로 계산에는 원본 숫자를 씁니다.
+
+## 숫자 구분자와 진법 리터럴
+
+숫자 리터럴은 10진수 외에 16진·8진·2진과 지수 형태로 쓸 수 있고, 긴 숫자는 `_`로 끊어 읽기 쉽게 만들 수 있습니다. 어떤 표기든 결과는 같은 Number 값이며 출력은 항상 10진수입니다.
+
+| 진법 | 접두사 | 예 | 값 |
+|------|--------|----|----|
+| 10진 | 없음 | `255` | 255 |
+| 16진 | `0x`, `0X` | `0xff` | 255 |
+| 2진 (ES2015) | `0b`, `0B` | `0b11111111` | 255 |
+| 8진 (ES2015) | `0o`, `0O` | `0o377` | 255 |
+| 지수 | `e`, `E` | `2.55e2` | 255 |
+
+- 16진수의 `a`–`f`는 대소문자를 구분하지 않습니다(`0xFF`와 `0xff`).
+- `.5`(0.5)와 `5.`(5)도 유효한 리터럴입니다.
+- 앞이 0인 `0377`은 레거시 8진수(255)입니다. `089`처럼 8이나 9가 있으면 10진수 89입니다. strict mode에서는 둘 다 SyntaxError이므로 8진수는 `0o`로 씁니다(자세히는 19편).
+- 문자열은 다릅니다. `Number('0377')`은 `377`입니다.
+
+숫자 구분자(ES2021)는 값에 영향을 주지 않는 밑줄입니다.
+
+```js
+1_000_000          // 1000000
+0xFF_FF            // 65535
+0b1010_0001        // 161
+3.14_15            // 3.1415
+1e1_0              // 10000000000
+1_000n             // 1000n (BigInt에도 사용)
+```
+
+위치 규칙은 다음과 같습니다. 숫자와 숫자 사이에만 둘 수 있고, 한 번에 하나만 둡니다.
+
+| 위치 | 결과 | 예 |
+|------|------|----|
+| 끝 | SyntaxError | `1_` |
+| 연속 | SyntaxError | `1__0` |
+| 소수점 옆 | SyntaxError | `1._5`, `1_.5` |
+| 지수 기호 옆 | SyntaxError | `1_e3`, `1e_3` |
+| 진법 접두사 바로 뒤 | SyntaxError | `0x_1` |
+| 앞이 0인 정수 | SyntaxError | `0_1`, `0_0` |
+| 소수부 안 | 가능 | `0.0_1` |
+
+맨 앞에 두면 `_1`은 숫자가 아니라 식별자로 읽혀 ReferenceError가 됩니다.
+
+구분자는 소스 코드의 리터럴에서만 인식됩니다. 문자열 파싱과 출력에는 영향이 없습니다.
+
+```js
+Number('1_000')        // NaN
+parseInt('1_000')      // 1
+parseFloat('1_000.5')  // 1
+```
+
+진법이 붙은 문자열을 읽고 쓰는 방식도 함수마다 다릅니다.
+
+```js
+(10).toString(2)       // '1010'
+Number('0b1010')       // 10
+Number('0o17')         // 15
+Number('-0xff')        // NaN  (접두사 문자열은 부호 불가)
+parseInt('-0xff')      // -255
+parseInt('0b11')       // 0    (0b·0o를 인식하지 않음)
+parseInt('1010', 2)    // 10
+```
+
+## BigInt
+
+BigInt는 크기에 제한이 없는 정수를 정확히 다루는 원시 타입입니다(ES2020). Number의 안전한 정수 범위를 넘는 값을 다루려고 추가되었습니다.
+
+```js
+123n                       // 리터럴: 정수 뒤에 n
+BigInt(123)                // 123n
+BigInt('9007199254740993') // 9007199254740993n
+typeof 1n                  // 'bigint'
+2n ** 64n                  // 18446744073709551616n
+Number.MAX_SAFE_INTEGER + 2   // 9007199254740992 (오차)
+BigInt(Number.MAX_SAFE_INTEGER) + 2n   // 9007199254740993n
+```
+
+리터럴은 정수 뒤에 `n`을 붙입니다. `0xFFn`, `0b101n`, `0o17n`, `1_000n`은 가능하고 `1.5n`, `1e3n`, `01n`은 SyntaxError입니다.
+
+`BigInt()`는 함수로만 호출합니다. `new BigInt(1)`은 TypeError입니다. 변환 규칙은 다음과 같습니다.
+
+| 입력 | 예 | 결과 |
+|------|----|------|
+| 정수인 Number | `BigInt(10)` | `10n` |
+| 소수·`NaN`·`Infinity` | `BigInt(1.5)` | RangeError |
+| 정수 형태의 문자열 | `BigInt(' 12 ')`, `BigInt('')`, `BigInt('0x1f')` | `12n`, `0n`, `31n` |
+| 정수가 아닌 문자열 | `BigInt('1.5')`, `BigInt('1e3')`, `BigInt('abc')` | SyntaxError |
+| 불리언 | `BigInt(true)` | `1n` |
+| `null`, `undefined`, Symbol | `BigInt(null)` | TypeError |
+
+연산 규칙은 06편에서 자세히 다룹니다. 이 절에서 알아야 할 것은 다음과 같습니다.
+
+- 산술 연산자 `+ - * / % **`와 `++`, `--`, 단항 `-`, 비트 연산자 `& | ^ ~ << >>`를 BigInt끼리 쓸 수 있습니다. 단항 `+`와 `>>>`는 TypeError입니다.
+- `/`는 0 방향으로 소수부를 버립니다(`7n / 2n`은 `3n`, `-7n / 2n`은 `-3n`). `%`의 부호는 피제수를 따릅니다(`-7n % 3n`은 `-1n`).
+- 0으로 나누기(`1n / 0n`)와 음수 지수(`2n ** -1n`)는 RangeError입니다.
+- `0n`은 falsy입니다. `-0n`은 없고 `0n === -0n`은 `true`입니다. `NaN`과 `Infinity`에 해당하는 값도 없습니다.
+
+비교는 Number·문자열과 섞어도 됩니다. 값만 비교하며 타입까지 비교하는 `===`만 `false`입니다.
+
+```js
+1n == 1        // true
+1n === 1       // false (타입이 다름)
+2n > 1         // true
+1n < 1.5       // true
+2n == '2'      // true
+Object.is(1n, 1n)   // true (BigInt는 값으로 비교)
+```
+
+타입이 다르므로 컬렉션과 검색에서는 구분됩니다.
+
+```js
+new Set([1n, 1, 1n]).size   // 2  (1n과 1은 다른 값)
+new Map([[1n, 'a']]).get(1) // undefined
+[1n].includes(1)            // false
+[1n, 1].indexOf(1)          // 1
+```
+
+정렬할 때 비교 함수에 뺄셈을 쓸 수 없습니다. `a - b`가 BigInt를 반환하는데 `sort`는 반환값을 Number로 변환하기 때문입니다.
+
+```js
+[10n, 9n, 1n].sort()                // [1n, 10n, 9n] (문자열 순)
+[3n, 1n, 2n].sort((a, b) => a - b)  // TypeError
+[10n, 9n, 1n].sort((a, b) =>
+  a < b ? -1 : a > b ? 1 : 0)          // [1n, 9n, 10n]
+```
+
+`BigInt.asIntN`과 `BigInt.asUintN`은 값을 고정 비트 폭으로 잘라 부호 있는 정수·부호 없는 정수로 해석합니다.
+
+```js
+BigInt.asUintN(64, -1n)   // 18446744073709551615n
+BigInt.asIntN(8, 255n)    // -1n
+BigInt.asIntN(8, 128n)    // -128n
+```
+
+크기에 제한이 없으므로 큰 값의 계산도 정확합니다.
+
+```js
+const fact = (n) => (n <= 1n ? 1n : n * fact(n - 1n))
+fact(25n)   // 15511210043330985984000000n
+```
+
+- BigInt를 Number로 바꾸면(`Number(2n ** 64n)`은 `18446744073709552000`) 안전 범위 밖의 값은 정밀도를 잃습니다.
+- `toString(radix)`와 `toLocaleString`을 쓸 수 있습니다.
+- Number보다 연산과 메모리 비용이 큽니다. 안전 범위를 넘는 정수가 필요한 곳(64비트 ID, 큰 정수 계산)에서만 씁니다.
+- 고정 폭 BigInt 배열 타입은 48편에서 다룹니다.
+
+## BigInt의 제약: 혼합 연산·JSON·Math
+
+BigInt는 Number 중심으로 설계된 기능과 자동으로 호환되지 않습니다. 어느 방향으로 변환해도 정보를 잃을 수 있으므로 암묵적 변환을 허용하지 않고 명시적으로 변환하게 합니다.
+
+### 혼합 연산
+
+```js
+1n + 1             // TypeError
+1n + BigInt(1)     // 2n
+Number(1n) + 1     // 2
+1n + '1'           // '11' (문자열 연결은 가능)
++1n                // TypeError (Number로 바꾸려면 Number(1n))
+```
+
+- 산술 연산자의 양쪽은 같은 타입이어야 합니다. 예외는 문자열 연결(`+`)뿐이고 이때는 BigInt가 문자열이 됩니다.
+- 비교(`<`, `==`)는 섞어도 됩니다.
+- `Number.isInteger(1n)`은 `false`이고 전역 `isNaN(1n)`은 TypeError입니다. Number 전용 함수에 BigInt를 넘기면 이렇게 어긋납니다.
+
+### JSON
+
+`JSON.stringify`는 BigInt를 직렬화하지 못합니다.
+
+```js
+JSON.stringify({ id: 1n })
+// TypeError: Do not know how to serialize a BigInt
+```
+
+변환 함수(replacer)에서 문자열로 바꿔 직렬화하고, 읽을 때 reviver에서 되돌립니다.
+
+```js
+const text = JSON.stringify({ id: 1n }, (k, v) =>
+  typeof v === 'bigint' ? v.toString() : v)
+// '{"id":"1"}'
+JSON.parse(text, (k, v) => (k === 'id' ? BigInt(v) : v))
+// { id: 1n }
+```
+
+- `BigInt.prototype.toJSON`을 정의하면 모든 곳에 적용되지만 내장 프로토타입을 수정하는 방식이라 권하지 않습니다.
+- `JSON.parse`는 큰 정수를 항상 Number로 읽으므로 파싱 시점에 이미 정밀도를 잃습니다. 값이 안전 범위를 넘을 수 있으면 문자열로 주고받습니다(자세히는 39편).
+
+### Math
+
+`Math`의 메서드는 Number 전용이라 BigInt를 넘기면 TypeError입니다.
+
+```js
+Math.sqrt(4n)      // TypeError
+Math.max(1n, 2n)   // TypeError
+Math.abs(-1n)      // TypeError
+2n ** 10n          // 1024n (거듭제곱은 ** 연산자로)
+```
+
+필요한 기능은 직접 만듭니다.
+
+```js
+const absBig = (x) => (x < 0n ? -x : x)
+const maxBig = (a, b) => (a > b ? a : b)
+absBig(-5n)        // 5n
+maxBig(3n, 8n)     // 8n
+```
+
+정수 제곱근이나 로그에 해당하는 내장 기능은 없습니다. 직접 구현하거나(뉴턴법 등) Number로 변환하고 정밀도 손실을 감수해야 합니다.
+
+## Math 객체
+
+`Math`는 수학 상수와 함수를 담은 내장 객체입니다(내장 객체 전반은 20편). 생성자도 함수도 아니며 모든 멤버가 정적입니다. 호출은 `Math.메서드()` 형태로만 합니다.
+
+```js
+new Math()     // TypeError: Math is not a constructor
+Math()         // TypeError: Math is not a function
+typeof Math    // 'object'
+```
+
+상수는 모두 읽기 전용이고 값은 다음과 같습니다.
+
+| 상수 | 값 | 의미 |
+|------|----|------|
+| `Math.PI` | 3.141592653589793 | 원주율 |
+| `Math.E` | 2.718281828459045 | 자연로그의 밑 |
+| `Math.LN2` | 0.6931471805599453 | 2의 자연로그 |
+| `Math.LN10` | 2.302585092994046 | 10의 자연로그 |
+| `Math.LOG2E` | 1.4426950408889634 | e의 밑 2 로그 |
+| `Math.LOG10E` | 0.4342944819032518 | e의 상용로그 |
+| `Math.SQRT2` | 1.4142135623730951 | 2의 제곱근 |
+| `Math.SQRT1_2` | 0.7071067811865476 | 1/2의 제곱근 |
+
+메서드는 용도별로 나뉩니다.
+
+| 분류 | 메서드 |
+|------|--------|
+| 반올림·절댓값·부호 | `round`, `floor`, `ceil`, `trunc`, `abs`, `sign` |
+| 최대·최소 | `max`, `min` |
+| 거듭제곱·로그 | `pow`, `sqrt`, `cbrt`, `hypot`, `exp`, `expm1`, `log`, `log2`, `log10`, `log1p` |
+| 삼각 | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2` |
+| 쌍곡 | `sinh`, `cosh`, `tanh`, `asinh`, `acosh`, `atanh` |
+| 난수 | `random` |
+| 정밀도·비트 | `fround`, `f16round`, `clz32`, `imul` |
+| 합계 | `sumPrecise` |
+
+모든 메서드에 공통인 규칙이 있습니다.
+
+- 인수를 Number로 변환합니다. 변환할 수 없으면 `NaN`입니다. BigInt와 Symbol은 TypeError입니다.
+- 인수가 모자라면 `undefined`로 취급되어 대부분 `NaN`을 반환합니다.
+- 반환값은 항상 Number입니다.
+- 삼각·지수·로그 계열은 명세가 정확한 값이 아니라 구현이 근사한 값을 허용합니다. 마지막 자리가 엔진마다 다를 수 있으므로 결과를 `===`로 비교하지 않습니다.
+
+```js
+Math.abs('-5')        // 5    ('-5' → -5)
+Math.abs(null)        // 0
+Math.abs(undefined)   // NaN
+Math.abs([])          // 0    ([] → '' → 0)
+Math.abs([-2])        // 2
+Math.abs({})          // NaN
+Math.abs()            // NaN
+```
+
+삼각함수의 각도는 라디안입니다. 도(degree)는 `deg * Math.PI / 180`으로 바꿉니다.
+
+```js
+const toRad = (deg) => (deg * Math.PI) / 180
+Math.sin(toRad(90))   // 1
+Math.sin(Math.PI)     // 1.2246467991473532e-16 (0이 아님)
+Math.tan(Math.PI / 4) // 0.9999999999999999
+Math.atan2(1, 1)      // 0.7853981633974483 (45도)
+Math.atan2(0, -1)     // 3.141592653589793
+```
+
+`Math.PI`가 근삿값이라서 `Math.sin(Math.PI)`는 정확히 0이 되지 않습니다. `Math.atan2(y, x)`는 인수 순서가 y, x이고 사분면을 구분해 -π부터 π까지의 각도를 반환합니다. `Math.atan(y / x)`는 점 (1, 1)과 점 (-1, -1)을 구분하지 못합니다.
+
+그 밖의 두 메서드는 32비트 정수 연산용입니다.
+
+- `Math.clz32(x)`: `x`를 32비트 정수로 보았을 때 앞쪽의 0 비트 수입니다(`Math.clz32(1)`은 31, `Math.clz32(0)`은 32).
+- `Math.imul(a, b)`: 두 값을 32비트 정수로 곱해 하위 32비트만 남깁니다(`Math.imul(0xffffffff, 5)`는 `-5`).
+
+## round·ceil·floor·abs
+
+`Math.round(x)`는 가장 가까운 정수를 반환하고, 소수부가 정확히 `.5`인 동점이면 `+Infinity` 쪽(큰 쪽) 정수를 고릅니다. `Math.floor(x)`는 `x` 이하의 가장 큰 정수(내림), `Math.ceil(x)`는 `x` 이상의 가장 작은 정수(올림)입니다. 둘 다 수직선 방향이므로 음수에서는 "0에서 멀어지는 방향"이 아닙니다.
+
+| x | `round` | `floor` | `ceil` |
+|---|---------|---------|--------|
+| 2.5 | 3 | 2 | 3 |
+| 1.5 | 2 | 1 | 2 |
+| 0.5 | 1 | 0 | 1 |
+| -0.5 | -0 | -1 | -0 |
+| -1.5 | -1 | -2 | -1 |
+| -2.5 | -2 | -3 | -2 |
+
+- 결과가 `-0`이 될 수 있습니다(`Math.round(-0.4)`, `Math.ceil(-0.5)`). `-0 === 0`은 `true`라서 대부분 문제가 없습니다(자세히는 05편).
+- `2 ** 52` 이상의 값은 이미 정수라 변하지 않습니다. `NaN`, `±Infinity`도 그대로입니다.
+- `Math.round(x)`와 `Math.floor(x + 0.5)`는 같지 않습니다. `0.49999999999999994`에서 앞은 `0`, 뒤는 `1`입니다. `0.49999999999999994 + 0.5`가 `1`로 반올림되기 때문입니다.
+
+### 음수 반올림 규칙
+
+`Math.round`는 동점을 항상 큰 쪽으로 보냅니다. 양수에서는 올림이지만 음수에서는 0 쪽으로 이동하므로, 양수와 음수의 결과가 대칭이 아닙니다.
+
+| 방식 | 2.5 | -2.5 |
+|------|-----|------|
+| `Math.round(x)` (동점은 큰 쪽) | 3 | -2 |
+| `x.toFixed(0)` (동점은 0에서 먼 쪽) | `'3'` | `'-3'` |
+| `Math.sign(x) * Math.round(Math.abs(x))` | 3 | -3 |
+
+세 번째 식은 부호를 떼고 반올림한 뒤 되붙여서 동점을 0에서 먼 쪽으로 보내는 직접 구현입니다. 회계 규칙이나 다른 언어는 동점을 짝수 쪽으로 보내는 방식을 쓰는 경우도 있으므로 요구 사항에 맞는 방식을 골라야 합니다.
+
+### 소수 자리 반올림
+
+소수 둘째 자리로 반올림하는 흔한 패턴은 `Math.round(x * 100) / 100`입니다. 곱하는 단계에서 오차가 생기면 틀립니다.
+
+```js
+const x = 1.005               // 1.00499999999999989…로 저장
+x * 100                       // 100.49999999999999
+Math.round(x * 100) / 100     // 1     (기대값은 1.01)
+Number(x.toFixed(2))          // 1     (toFixed도 저장값 기준)
+Number(Math.round(x + 'e2') + 'e-2')   // 1.01
+```
+
+마지막 식은 `'1.005e2'`라는 문자열을 숫자로 읽으면 정확히 `100.5`가 된다는 점을 이용합니다. 십진 표기를 기준으로 반올림하는 방식이지만 한계가 있습니다.
+
+- `x`가 `1e-7`처럼 이미 지수 표기로 문자열이 되는 값이면 `'1e-7e2'`가 되어 `NaN`입니다.
+- 동점 처리는 여전히 `Math.round` 규칙이라 음수 `-1.005`는 `-1`이 됩니다.
+- `Math.round((x + Number.EPSILON) * 100) / 100`으로 보정하는 방법은 `1.005`에서는 `1.01`이 되지만 효과가 1 근처에서만 있습니다. `10.075 + Number.EPSILON`은 `10.075`와 같은 값이라 보정이 아무 일도 하지 않습니다.
+
+정확한 십진 반올림이 필요한 금액 계산은 정수 단위로 저장하는 방식이 안전합니다.
+
+### abs
+
+`Math.abs(x)`는 절댓값을 반환합니다.
+
+```js
+Math.abs(-5)          // 5
+Math.abs('-5')        // 5     (문자열은 숫자로 변환)
+Math.abs(-0)          // 0     (-0도 +0이 됨)
+Math.abs(-Infinity)   // Infinity
+Math.abs(null)        // 0
+Math.abs(undefined)   // NaN
+```
+
+두 값의 차이를 구할 때 `Math.abs(a - b)`를 씁니다. BigInt에는 쓸 수 없습니다(BigInt의 제약 절 참조).
+
+## max·min·pow·sqrt
+
+### max와 min
+
+`Math.max(...values)`와 `Math.min(...values)`는 인수 중 최댓값·최솟값을 반환합니다.
+
+```js
+Math.max(1, 5, 3)    // 5
+Math.min(1, 5, 3)    // 1
+Math.max()           // -Infinity (인수가 없을 때)
+Math.min()           // Infinity
+Math.max(1, NaN)     // NaN (하나라도 NaN이면 NaN)
+Math.max('3', 2)     // 3    (숫자로 변환)
+Math.max(null, -1)   // 0    (null → 0)
+Math.max(-0, 0)      // 0    (+0이 -0보다 큰 값으로 취급)
+Math.min(0, -0)      // -0
+```
+
+- 배열의 최댓값은 스프레드로 펼쳐서 넘깁니다. `Math.max(...arr)` 또는 `Math.max.apply(null, arr)`입니다(자세히는 36편).
+- 배열을 그대로 넘기면 `Math.max([1, 2, 3])`은 `NaN`입니다(`'1,2,3'`이 숫자가 아님). 요소가 하나뿐이면 `Math.max([5])`가 `5`라서 실수를 못 알아차릴 수 있습니다.
+- 빈 배열이면 `Math.max(...[])`는 `-Infinity`입니다.
+- 인수 개수에는 엔진별 한도가 있어서 매우 큰 배열(10만 개를 넘는 정도)을 펼치면 RangeError가 날 수 있습니다. 이때는 `reduce`나 반복문으로 직접 비교합니다.
+
+```js
+arr.reduce((m, x) => (x > m ? x : m), -Infinity)
+```
+
+범위를 제한하는 `clamp`는 두 메서드의 조합입니다.
+
+```js
+const clamp = (x, lo, hi) => Math.min(Math.max(x, lo), hi)
+clamp(15, 0, 10)   // 10
+clamp(-3, 0, 10)   // 0
+clamp(5, 0, 10)    // 5
+```
+
+### pow
+
+`Math.pow(x, y)`는 `x`의 `y`제곱이며 `x ** y`와 같은 결과를 냅니다(`**`는 ES2016, 자세히는 06편).
+
+```js
+Math.pow(2, 10)       // 1024
+Math.pow(2, 0.5)      // 1.4142135623730951
+2 ** -1               // 0.5
+Math.pow(0, 0)        // 1
+Math.pow(NaN, 0)      // 1  (지수가 0이면 항상 1)
+Math.pow(1, Infinity) // NaN
+Math.pow(-8, 1 / 3)   // NaN
+Math.pow(2, 1024)     // Infinity
+```
+
+- `NaN`이 전염되지 않는 유일한 경우가 지수 0입니다.
+- 밑이 1이고 지수가 무한대(또는 `NaN`)이면 IEEE 754는 1을 반환하지만 JavaScript는 하위 호환 때문에 `NaN`을 반환합니다.
+- 음수의 소수 거듭제곱은 수학적으로 실수 해가 있어도 `NaN`입니다. 세제곱근은 `Math.cbrt`를 씁니다.
+- `**`는 오른쪽 결합이라 `2 ** 3 ** 2`는 `512`이고, 단항 마이너스 바로 뒤에 쓰면 SyntaxError입니다(`-2 ** 2`). `(-2) ** 2`는 `4`입니다.
+- BigInt의 거듭제곱은 `**` 연산자만 가능합니다. `Math.pow(2n, 3n)`은 TypeError입니다.
+
+### sqrt
+
+`Math.sqrt(x)`는 제곱근을 반환합니다.
+
+```js
+Math.sqrt(16)         // 4
+Math.sqrt(2)          // 1.4142135623730951
+Math.sqrt(-1)         // NaN (실수 범위에 해가 없음)
+Math.sqrt(-0)         // -0
+Math.sqrt(Infinity)   // Infinity
+Math.sqrt('9')        // 3
+Math.sqrt(2) ** 2     // 2.0000000000000004
+```
+
+결과를 다시 제곱해도 원래 값이 보장되지 않습니다. 두 점 사이의 거리처럼 제곱의 합에 제곱근을 씌우는 계산은 `Math.hypot`을 쓰는 편이 안전합니다.
+
+## Math.random과 정수 난수 공식
+
+`Math.random()`은 0 이상 1 미만의 의사 난수를 반환합니다. 0은 나올 수 있고 1은 나오지 않습니다.
+
+```js
+Math.random()   // 0.7134…  (호출마다 다름)
+```
+
+- 거의 균등한 분포를 내지만 알고리즘은 엔진마다 다릅니다.
+- 시드(seed)를 지정할 수 없어 같은 난수열을 재현할 수 없습니다. 재현이 필요한 테스트나 시뮬레이션은 시드를 받는 난수 생성기를 따로 구현합니다.
+- 암호학적으로 안전하지 않습니다. 토큰, 비밀번호, 키에는 Web Crypto의 `crypto.getRandomValues`와 `crypto.randomUUID()`를 씁니다(호스트 API이며 ECMAScript 표준이 아닙니다).
+
+### 정수 난수 공식
+
+`Math.random()`에 범위의 크기를 곱하고 `Math.floor`로 내린 뒤 시작값을 더합니다.
+
+| 구하는 범위 | 공식 |
+|-------------|------|
+| 0 이상 n 미만 | `Math.floor(Math.random() * n)` |
+| min 이상 max 미만 | `Math.floor(Math.random() * (max - min)) + min` |
+| min 이상 max 이하 | `Math.floor(Math.random() * (max - min + 1)) + min` |
+
+```js
+function randomInt(min, max) {   // min 이상 max 이하
+  min = Math.ceil(min)
+  max = Math.floor(max)
+  return Math.floor(Math.random() * (max - min + 1)) + min
+}
+randomInt(1, 6)   // 1, 2, 3, 4, 5, 6 중 하나
+```
+
+`Math.random()`은 최대 `0.9999999999999999`이므로 `* 6`은 `5.999999999999999`가 되고 `floor`는 5, 1을 더해 6이 나옵니다. 7은 나오지 않습니다. `min`과 `max`가 소수일 수 있으면 `Math.ceil(min)`, `Math.floor(max)`로 정수 범위를 먼저 구합니다.
+
+배열에서 임의의 요소를 고르는 식도 같은 공식입니다.
+
+```js
+const pick = (arr) =>
+  arr[Math.floor(Math.random() * arr.length)]
+```
+
+흔한 실수는 다음과 같습니다.
+
+- `Math.round(Math.random() * n)`은 양 끝값이 나올 확률이 가운데의 절반입니다. `Math.round(Math.random() * 2)`는 0과 2가 각각 25퍼센트, 1이 50퍼센트입니다. 반올림은 범위의 양 끝에서 절반 폭만 차지하기 때문입니다. 반드시 `Math.floor`를 씁니다.
+- `Math.floor(Math.random() * max) + min`은 범위가 `max - min`이 아니라 `max`로 계산되어 `min`부터 `max + min - 1`까지 나옵니다.
+- `arr.sort(() => Math.random() - 0.5)`는 균등한 섞기가 아닙니다. 섞기는 Fisher–Yates 알고리즘으로 구현합니다.
+- `Math.random().toString(36).slice(2)`로 만든 문자열은 고유성과 예측 불가능성을 보장하지 않습니다. 식별자는 `crypto.randomUUID()`를 씁니다.
+
+```js
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[arr[i], arr[j]] = [arr[j], arr[i]]
+  }
+  return arr
+}
+```
+
+## Math.trunc·sign·hypot·cbrt·log 계열
+
+### Math.trunc
+
+`Math.trunc(x)`는 소수부를 버려 0 방향의 정수를 반환합니다(ES2015). 음수에서 `Math.floor`와 결과가 다릅니다.
+
+```js
+Math.trunc(4.7)     // 4
+Math.trunc(-4.7)    // -4   (floor는 -5)
+Math.trunc('7.9')   // 7
+Math.trunc(-0.5)    // -0
+Math.trunc(NaN)     // NaN
+```
+
+`~~x`나 `x | 0`도 소수부를 버리지만 먼저 32비트 정수로 변환합니다. 범위가 크면 값이 바뀝니다.
+
+```js
+2 ** 31 | 0      // -2147483648
+~~1e10           // 1410065408
+Math.trunc(1e10) // 10000000000
+```
+
+`parseInt`로 소수부를 버리면 숫자를 문자열로 바꾸는 과정에서 틀립니다. `parseInt(0.0000005)`가 `5`가 되는 경우입니다.
+
+### Math.sign
+
+`Math.sign(x)`는 부호를 `1`, `-1`, `0`, `-0`, `NaN` 중 하나로 반환합니다.
+
+```js
+Math.sign(5)      // 1
+Math.sign(-3)     // -1
+Math.sign(0)      // 0
+Math.sign(-0)     // -0
+Math.sign(NaN)    // NaN
+Math.sign('-3')   // -1
+```
+
+### Math.hypot
+
+`Math.hypot(...values)`는 인수 제곱의 합의 제곱근(유클리드 거리)을 반환합니다. 인수 개수에 제한이 없어 2차원 이상의 거리에도 쓸 수 있습니다.
+
+```js
+Math.hypot(3, 4)         // 5
+Math.hypot(3, 4, 12)     // 13
+Math.hypot()             // 0
+Math.hypot(1e200, 1e200) // 1.414213562373095e+200
+Math.sqrt(1e200 ** 2 + 1e200 ** 2)   // Infinity
+```
+
+`Math.sqrt`로 직접 계산하면 제곱하는 중간 단계에서 오버플로가 나지만 `hypot`은 피합니다. 인수 중 하나라도 `±Infinity`이면 `NaN`이 섞여 있어도 `Infinity`를 반환하고, `Infinity` 없이 `NaN`이 있으면 `NaN`입니다.
+
+### Math.cbrt
+
+`Math.cbrt(x)`는 세제곱근을 반환하며 음수도 실수 해를 돌려줍니다(ES2015).
+
+```js
+Math.cbrt(27)     // 3
+Math.cbrt(-8)     // -2
+Math.cbrt(64)     // 4
+64 ** (1 / 3)     // 3.9999999999999996 (1/3이 근삿값)
+(-8) ** (1 / 3)   // NaN
+```
+
+### 로그와 지수
+
+| 메서드 | 값 | 예 |
+|--------|----|----|
+| `Math.exp(x)` | e의 x제곱 | `Math.exp(1)` → `2.718281828459045` |
+| `Math.log(x)` | 자연로그 | `Math.log(Math.E)` → `1` |
+| `Math.log10(x)` | 상용로그 | `Math.log10(1000)` → `3` |
+| `Math.log2(x)` | 밑이 2인 로그 | `Math.log2(1024)` → `10` |
+| `Math.log1p(x)` | `Math.log(1 + x)` | 0에 가까운 `x`에서 정밀 |
+| `Math.expm1(x)` | `Math.exp(x) - 1` | 0에 가까운 `x`에서 정밀 |
+
+로그는 `0`이면 `-Infinity`, 음수이면 `NaN`입니다. 밑 변환 공식으로 직접 나누면 오차가 생기므로 `log10`·`log2`를 씁니다.
+
+```js
+Math.log(0)                  // -Infinity
+Math.log(-1)                 // NaN
+Math.log10(1000)             // 3
+Math.log(1000) / Math.LN10   // 2.9999999999999996
+Math.log1p(1e-10)            // 9.999999999500001e-11
+Math.log(1 + 1e-10)          // 1.000000082690371e-10
+Math.expm1(1e-10)            // 1.00000000005e-10
+Math.exp(1e-10) - 1          // 1.000000082740371e-10
+```
+
+`1 + x`나 `exp(x) - 1`은 `x`가 매우 작으면 1에 더해지는 단계에서 정밀도를 잃습니다. `log1p`와 `expm1`은 이를 피합니다(ES2015).
+
+자릿수를 `Math.floor(Math.log10(n)) + 1`로 구하는 방식은 `n`이 0이면 `-Infinity`이고, 경계 근처에서 틀립니다. `n`이 `999999999999999`이면 `16`이 나옵니다(실제는 15자리). 정수의 자릿수는 `String(n).length`로 셉니다.
+
+## Math.sumPrecise (ES2026)
+
+`Math.sumPrecise(iterable)`는 숫자들의 합을 중간 반올림 없이 정확한 값으로 계산한 뒤 한 번만 Number로 반올림해 반환합니다(ES2026). MDN은 2026년 4월부터 최신 브라우저에서 쓸 수 있다고 표시합니다. 지원하지 않는 환경이 있을 수 있으므로 쓰기 전에 `typeof Math.sumPrecise === 'function'`으로 확인합니다.
+
+일반 합산은 더할 때마다 반올림하므로 오차가 쌓이거나, 크기가 크게 다른 값에서 작은 값이 사라집니다.
+
+```js
+const tenths = Array(10).fill(0.1)
+tenths.reduce((a, b) => a + b, 0)   // 0.9999999999999999
+Math.sumPrecise(tenths)             // 1
+const spike = [1e20, 0.1, -1e20]
+spike.reduce((a, b) => a + b, 0)    // 0   (0.1이 사라짐)
+Math.sumPrecise(spike)              // 0.1
+const xs = [0.1, 0.2, 0.3]
+xs.reduce((a, b) => a + b, 0)       // 0.6000000000000001
+Math.sumPrecise(xs)                 // 0.6
+```
+
+- 인수는 이터러블 하나입니다(배열, `Set`, 제너레이터 등, 자세히는 35편). `Math.max`처럼 값을 나열하는 방식이 아닙니다. `Math.sumPrecise(1, 2)`는 TypeError입니다.
+- 모든 요소가 Number 타입이어야 합니다. 문자열, BigInt, `null`은 변환 없이 TypeError입니다.
+- 빈 이터러블의 합은 `-0`입니다. `-0`이 덧셈의 항등원이기 때문입니다(어떤 값에 `-0`을 더해도 그 값 그대로).
+- 정확한 합을 구한 뒤 한 번만 반올림하므로 입력 순서에 결과가 영향을 받지 않습니다.
+- 입력값 자체가 이미 근삿값이라는 한계는 남습니다. `Math.sumPrecise([0.1, 0.2])`는 `0.30000000000000004`입니다. 저장된 0.1과 0.2의 정확한 합을 반올림한 결과가 그 값이기 때문입니다.
+- 오차를 줄이는 보정 합산(Kahan 합산)은 오차를 줄일 뿐 정확한 합을 보장하지 않습니다.
+
+## Math.f16round (ES2025)
+
+`Math.f16round(x)`는 `x`를 16비트 반정밀도 부동소수점으로 표현할 수 있는 가장 가까운 값으로 반올림해, 그 값을 일반 Number로 반환합니다(ES2025). 같은 해 추가된 `Float16Array`(48편)에 저장될 값을 미리 계산하거나 낮은 정밀도를 흉내 낼 때 씁니다. MDN은 2025년 4월부터 최신 브라우저에서 쓸 수 있다고 표시합니다.
+
+| 형식 | 크기 | 지수 | 가수 | 반올림 메서드 |
+|------|------|------|------|---------------|
+| 배정밀도 (Number) | 64비트 | 11 | 52 | 없음 |
+| 단정밀도 | 32비트 | 8 | 23 | `Math.fround` (ES2015) |
+| 반정밀도 | 16비트 | 5 | 10 | `Math.f16round` (ES2025) |
+
+```js
+Math.f16round(5.5)       // 5.5          (정확히 표현됨)
+Math.f16round(5.05)      // 5.05078125
+Math.f16round(0.1)       // 0.0999755859375
+Math.fround(5.05)        // 5.050000190734863 (32비트)
+Math.f16round(65504)     // 65504        (최대 유한 값)
+Math.f16round(65519)     // 65504
+Math.f16round(65520)     // Infinity
+Math.f16round(2 ** -24)  // 5.960464477539063e-8 (최소 양수)
+Math.f16round(2 ** -25)  // 0
+```
+
+- 최대 유한 값은 `65504`입니다. 65504와 다음 값(65536)의 중간인 `65520`부터는 `Infinity`가 됩니다.
+- 최소 양수는 `2 ** -24`(약 5.96e-8)입니다. 그 절반 이하는 `0`입니다.
+- 가수가 10비트라 유효 숫자는 약 3자리입니다. 2048 이하의 정수는 모두 정확하지만 2048 이상 4096 미만에서는 2의 배수만 표현됩니다(`Math.f16round(2049)`는 `2048`, `Math.f16round(2051)`은 `2052`).
+- `NaN`, `±Infinity`, `±0`은 그대로 반환합니다.
+- 반환값은 여전히 64비트 Number입니다. 이 값으로 계산하면 다시 64비트 정밀도로 계산되므로, 반정밀도 연산을 흉내 내려면 연산 결과마다 다시 `f16round`를 적용합니다.
+- `Math.fround`는 같은 방식으로 32비트 단정밀도에 반올림합니다(`Math.fround(0.1)`은 `0.10000000149011612`). 32비트 범위를 넘으면 `Infinity`입니다(`Math.fround(2 ** 128)`).
+
+## 핵심 정리
+
+- Number는 64비트 부동소수점이라 `0.1 + 0.2`처럼 2진수로 끝나지 않는 소수에 오차가 생기고, 정수는 `2 ** 53 - 1`까지만 정확합니다. 비교는 `Number.EPSILON`을 크기에 맞춰 씁니다.
+- 판별은 인수를 변환하지 않는 `Number.isNaN`·`isFinite`·`isInteger`·`isSafeInteger`를 쓰고, `toFixed`·`toPrecision`·`toString`·`toLocaleString`의 결과는 문자열입니다.
+- BigInt는 정수 전용이며 Number와 산술 연산을 섞거나 `JSON.stringify`·`Math` 메서드에 넘기면 TypeError입니다.
+- `Math.round`는 동점을 `+Infinity` 쪽으로 보내 `-2.5`가 `-2`가 됩니다. min 이상 max 이하의 정수 난수는 `Math.floor(Math.random() * (max - min + 1)) + min`입니다.
+- `Math.sumPrecise`(ES2026)는 정확한 합을 한 번만 반올림하고, `Math.f16round`(ES2025)는 16비트 부동소수점 값으로 반올림합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="다음 중 결과가 true인 표현식은?"
+  options={['Number.isNaN("abc")', 'isNaN("abc")', 'Number.isFinite("12")', 'isNaN("")']}
+  correctAnswer={2}
+  explanation="전역 isNaN은 인수를 Number로 변환한 뒤 검사하므로 Number('abc')가 NaN인 isNaN('abc')는 true입니다. Number.isNaN은 변환하지 않아 문자열에 false를 반환하고, Number.isFinite도 문자열이면 false입니다. isNaN('')은 Number('')가 0이라서 false입니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="Math.round(-2.5)와 (-2.5).toFixed(0)의 결과를 차례로 나열한 것은?"
+  options={['-3, "-3"', '-2, "-3"', '-2, "-2"', '-3, "-2"']}
+  correctAnswer={2}
+  explanation="Math.round는 동점(.5)을 +Infinity 쪽 정수로 보내므로 -2입니다. toFixed는 동점일 때 절댓값이 큰 쪽으로 올리므로 '-3'이고, 반환 타입은 문자열입니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="BigInt에 대한 설명으로 옳은 것은?"
+  options={['1n + 1은 2n이다', '7n / 2n은 3n이다', 'Math.sqrt(4n)은 2를 반환한다', 'JSON.stringify(1n)은 문자열 1을 반환한다']}
+  correctAnswer={2}
+  explanation="BigInt의 나눗셈은 0 방향으로 소수부를 버리므로 7n / 2n은 3n입니다. 1n + 1은 BigInt와 Number를 섞어서 TypeError이고, Math 메서드는 BigInt를 받지 못해 TypeError이며, JSON.stringify도 BigInt를 직렬화하지 못해 TypeError입니다."
+/>
+
+## 참고 자료
+
+- [ECMA-262 — Number Objects](https://tc39.es/ecma262/#sec-number-objects)
+- [ECMA-262 — BigInt Objects](https://tc39.es/ecma262/#sec-bigint-objects)
+- [ECMA-262 — The Math Object](https://tc39.es/ecma262/#sec-math-object)
+- [MDN — Number](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number)
+- [MDN — Number.prototype.toFixed()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/toFixed)
+- [MDN — Number.prototype.toLocaleString()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/toLocaleString)
+- [MDN — Intl.NumberFormat()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/NumberFormat/NumberFormat)
+- [MDN — BigInt](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/BigInt)
+- [MDN — Math](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math)
+- [MDN — Math.pow()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/pow)
+- [MDN — Math.sumPrecise()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/sumPrecise)
+- [MDN — Math.f16round()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/f16round)
+- [TC39 Finished Proposals](https://github.com/tc39/proposals/blob/main/finished-proposals.md)

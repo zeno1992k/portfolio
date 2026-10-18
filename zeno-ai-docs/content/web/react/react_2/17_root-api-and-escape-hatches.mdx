@@ -1,0 +1,429 @@
+---
+title: '17. React DOM Root API와 Escape Hatch'
+description: 'createRoot·hydrateRoot와 root 옵션, 여러 Root, flushSync, createPortal, 그리고 React 밖의 DOM·Browser API·서드파티 위젯·Canvas·Web Component와 안전하게 연결하는 방법을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** Root의 생성부터 해제까지의 흐름과 옵션을 설명하고, React가 관리하지 않는 DOM·API·위젯을 다룰 때 지켜야 할 경계를 구분할 수 있습니다.
+</Callout>
+
+## createRoot
+
+`createRoot`는 브라우저 DOM 노드 하나를 React가 관리하는 Root로 만드는 함수입니다. `react-dom/client`에서 가져옵니다.
+
+```jsx
+import { createRoot } from 'react-dom/client'
+
+const domNode = document.getElementById('root')
+const root = createRoot(domNode, options)
+root.render(<App />)
+```
+
+- 반환값은 `render`와 `unmount` 두 메서드를 가진 Root 객체입니다.
+- 클라이언트에서만 그리는 앱은 `createRoot`를 쓰고, 서버가 만든 HTML이 이미 있으면 `hydrateRoot`를 씁니다.
+- 서버가 만든 HTML이 들어 있는 노드에 `createRoot`를 쓰면 기존 DOM 노드를 모두 지우고 처음부터 다시 만듭니다.
+- Root 하나는 DOM 노드 하나에 대응해야 합니다.
+
+## root.render
+
+`root.render(node)`는 React 노드를 Root에 그립니다. 반환값은 없습니다.
+
+```jsx
+root.render(<App />) // 첫 호출: 노드 안의 기존 HTML을 지우고 렌더링
+root.render(<App />) // 이후 호출: 바뀐 부분만 DOM에 반영
+```
+
+- 첫 호출은 Root 노드 안의 기존 내용을 비웁니다.
+- 이후 호출은 새 JSX와 이전 JSX를 비교해 필요한 DOM만 바꾸고, 가능하면 기존 DOM 노드를 재사용합니다. 같은 Root에 같은 컴포넌트를 다시 넘기면 state가 유지됩니다.
+- `render`는 비동기로 반영됩니다. `render` 바로 다음 줄에서는 Effect(`useEffect`, `useLayoutEffect`)가 아직 실행되지 않았을 수 있습니다. 동기 반영이 필요하면 `flushSync`를 씁니다(아래 절).
+- 앱을 시작할 때 한 번 호출하는 것이 일반적입니다. 이후 갱신은 컴포넌트 안의 state가 맡습니다.
+
+## root.unmount
+
+`root.unmount()`는 Root 안의 트리를 모두 해제하고 React와 DOM 노드의 연결을 끊습니다. 반환값은 없습니다.
+
+```jsx
+root.unmount()
+root.render(<App />) // ❌ Cannot update an unmounted root
+const next = createRoot(domNode) // ✅ 같은 노드에 새 Root
+```
+
+- 트리 안의 모든 컴포넌트가 언마운트되고 state와 이벤트 핸들러가 정리됩니다. Effect의 cleanup도 실행됩니다.
+- 해제한 Root에는 `render`를 다시 호출할 수 없습니다. 같은 노드에 다시 그리려면 `createRoot`로 새 Root를 만듭니다.
+- 전체가 React인 앱은 보통 `unmount`를 쓰지 않습니다. 기존 페이지의 일부에 React를 얹은 구조에서 그 영역이 사라질 때 호출합니다.
+
+## hydrateRoot
+
+`hydrateRoot`는 서버가 만든 HTML을 재사용해 그 위에 React를 연결합니다(자세히는 Hydration 절).
+
+```jsx
+import { hydrateRoot } from 'react-dom/client'
+
+const root = hydrateRoot(domNode, <App />, options)
+```
+
+| 항목 | `createRoot` | `hydrateRoot` |
+|------|--------------|---------------|
+| 용도 | 클라이언트 렌더링 | 서버 HTML에 연결 |
+| 인수 | 노드, 옵션 | 노드, 초기 JSX, 옵션 |
+| 기존 HTML | 지우고 새로 그림 | 재사용하고 이벤트만 연결 |
+| 반환값 | `render`, `unmount` | `render`, `unmount` |
+
+- 두 번째 인수로 초기 JSX를 받습니다. 이 JSX가 서버가 렌더링한 JSX와 같아야 합니다.
+- `hydrateRoot`의 `root.render`는 옵션을 받지 않습니다. 옵션은 `hydrateRoot`에 넘깁니다.
+- 앱 시작 시 한 번만 호출합니다. 여러 번 호출하지 않습니다.
+- Hydration이 끝나기 전에 `root.render`를 부르면 서버 HTML을 버리고 클라이언트 렌더링으로 바뀝니다.
+- 서버 HTML이 없는 앱은 `createRoot`를 씁니다.
+
+## Hydration
+
+Hydration은 서버가 만든 HTML에 React가 이벤트 핸들러를 붙이고 컴포넌트 트리와 연결하는 과정입니다. 서버 렌더링 자체는 이 과목의 범위 밖입니다.
+
+핵심 규칙은 하나입니다. 클라이언트의 첫 렌더링 결과가 서버가 만든 HTML과 같아야 합니다. 다르면 버그입니다. 개발 모드에서는 불일치를 경고하지만, 속성 차이는 고쳐 주지 않습니다.
+
+불일치의 흔한 원인은 다음과 같습니다.
+
+- 서버와 클라이언트가 다른 데이터를 쓴다.
+- `typeof window !== 'undefined'` 같은 브라우저 전용 분기로 첫 렌더링 결과가 달라진다.
+- `window.matchMedia` 같은 브라우저 API를 렌더링 중에 읽는다.
+- React가 만든 HTML 주변에 불필요한 공백이 있다.
+
+피할 수 없는 텍스트·속성 차이(예: 현재 시각)는 `suppressHydrationWarning`으로 경고를 끕니다.
+
+```jsx
+<h1 suppressHydrationWarning={true}>
+  {new Date().toLocaleDateString()}
+</h1>
+```
+
+- 한 단계 깊이까지만 적용되고, 어긋난 텍스트를 고쳐 주지도 않습니다. 탈출구일 뿐입니다.
+- 의도적으로 클라이언트에서만 달라야 하면 state로 두 번에 나눠 그립니다. 첫 렌더링은 서버와 같은 값, Effect 안에서 `setIsClient(true)` 후 다른 값입니다. 컴포넌트를 두 번 렌더링하므로 느려집니다.
+- 전체 문서를 Hydration하려면 `html`을 루트 컴포넌트에서 그리고 `hydrateRoot(document, <App />)`로 연결합니다.
+- React 19는 `head`와 `body`에 있는 예상 밖 태그를 건너뜁니다. 서드파티 스크립트나 브라우저 확장 프로그램이 넣은 태그 때문에 생기던 불일치 에러가 줄었습니다.
+- React 19의 불일치 에러는 서버와 클라이언트 값을 비교한 diff와 함께 한 번만 나옵니다.
+
+**흔한 실수:** `useId`로 만든 ID가 서버와 달라지는 경우입니다. `identifierPrefix`는 서버에서 쓴 값과 같아야 합니다(아래 "root 옵션").
+
+## root 옵션
+
+`createRoot`와 `hydrateRoot`의 마지막 인수는 옵션 객체이고, 둘 다 같은 이름의 옵션을 받습니다.
+
+| 옵션 | 호출 시점 |
+|------|-----------|
+| `onCaughtError` | Error Boundary가 에러를 잡았을 때 |
+| `onUncaughtError` | Error Boundary가 잡지 못한 에러가 던져졌을 때 |
+| `onRecoverableError` | React가 에러에서 자동으로 복구했을 때 |
+| `identifierPrefix` | `useId`가 만드는 ID의 접두사 문자열 |
+
+- 세 콜백은 `(error, errorInfo)`를 받고, `errorInfo.componentStack`에 컴포넌트 스택이 들어 있습니다. `onCaughtError`·`onUncaughtError`는 React 19에서 추가됐습니다(자세히는 13편).
+- `onRecoverableError`는 복구한 에러의 원인이 `error.cause`에 들어 있을 수 있습니다. 사용자에게는 보이지 않는 에러이므로 에러 수집 서비스로 보내 두는 용도로 씁니다.
+- `identifierPrefix`는 한 페이지에 Root가 여러 개일 때 `useId` ID가 겹치지 않게 합니다. `hydrateRoot`에서는 서버가 쓴 접두사와 같은 값을 줘야 합니다(`useId`는 5편).
+- `hydrateRoot`에만 있는 옵션으로 `formState`가 있습니다. Server Function 제출에서 받은 `useActionState`의 상태이고 서버 값과 같아야 합니다.
+
+```jsx
+const root = createRoot(domNode, {
+  identifierPrefix: 'widget-a-',
+  onRecoverableError: (error, info) => {
+    report(error, info.componentStack)
+  },
+})
+```
+
+## 여러 Root
+
+한 페이지에 Root를 여러 개 만들 수 있습니다. 기존 서버 렌더링 페이지의 일부분에만 React를 얹는 경우입니다.
+
+```jsx
+const nav = createRoot(document.getElementById('nav'))
+const cart = createRoot(document.getElementById('cart'))
+nav.render(<NavBar />)
+cart.render(<CartBadge />)
+```
+
+- 전체가 React인 앱은 Root가 하나입니다. 여러 개인 것은 부분 도입한 페이지입니다.
+- Root끼리는 별개의 트리입니다. state와 Context를 공유하지 않으므로 공유가 필요하면 외부 저장소나 DOM 이벤트로 연결해야 합니다(자세히는 23편).
+- 각 Root에 `identifierPrefix`를 다르게 줘서 `useId` 충돌을 막습니다.
+- DOM 노드 하나에는 Root를 하나만 만듭니다.
+- 모달·툴팁처럼 트리 밖 DOM에 그리고 싶다면 Root를 더 만들지 말고 `createPortal`을 씁니다(아래 절).
+
+## Root Lifecycle
+
+Root는 생성, 렌더링, 갱신, 해제의 순서로 지나갑니다.
+
+| 단계 | 호출 | 일어나는 일 |
+|------|------|-------------|
+| 생성 | `createRoot`·`hydrateRoot` | 노드와 Root 연결, 아직 화면 변화 없음 |
+| 첫 렌더링 | `root.render` | 기존 HTML을 지우고(Hydration이면 재사용) 그림 |
+| 갱신 | 컴포넌트 state 변경, 또는 `root.render` 재호출 | 바뀐 DOM만 반영 |
+| 해제 | `root.unmount` | 트리 정리, Effect cleanup 실행, 연결 끊김 |
+
+- 해제한 Root는 다시 쓸 수 없습니다. 새로 만들어야 합니다.
+- 기존 페이지가 그 영역을 없앨 때는 `unmount`를 호출해 트리를 정리합니다.
+- 개발 중 `StrictMode`는 컴포넌트를 한 번 더 마운트·언마운트하며 Effect cleanup이 올바른지 확인합니다. Root 수준의 해제와는 별개입니다.
+
+## flushSync
+
+`flushSync(callback)`은 콜백 안의 state 업데이트를 즉시 동기적으로 DOM에 반영합니다. 다음 줄이 실행될 때 DOM은 이미 갱신돼 있습니다.
+
+```jsx
+import { flushSync } from 'react-dom'
+
+flushSync(() => {
+  setTodos([...todos, newTodo])
+})
+listRef.current.lastChild.scrollIntoView() // 새 항목이 DOM에 있음
+```
+
+- 대표적인 쓰임은 방금 추가한 요소로 스크롤하거나 포커스를 주는 경우입니다. `flushSync` 없이는 state 반영이 다음 렌더링으로 미뤄져서 이전 마지막 항목으로 스크롤됩니다.
+- 브라우저 이벤트가 콜백 안에서 동기적으로 DOM 변경을 기대하는 서드파티 연동에도 씁니다. `beforeprint` 핸들러에서 인쇄용 state를 반영하는 경우가 공식 예입니다.
+- 성능을 크게 해칩니다. 최후의 수단으로만 씁니다.
+- Suspense 경계가 `fallback`을 보이게 할 수 있습니다.
+- 콜백 안의 업데이트를 반영하는 데 필요하면 Effect를 동기로 실행하고, 콜백 밖의 대기 중인 업데이트까지 같이 반영할 수 있습니다.
+- 렌더링 중이나 `useEffect`·`useLayoutEffect`, 클래스 컴포넌트의 생명주기 메서드 안에서는 호출할 수 없습니다. 아무 동작 없이 경고만 냅니다. 이벤트 핸들러에서 씁니다.
+
+## createPortal
+
+`createPortal(children, domNode)`는 React 트리의 위치는 그대로 두고 자식을 다른 DOM 노드 안에 그립니다.
+
+```jsx
+import { createPortal } from 'react-dom'
+
+function Modal({ children }) {
+  return createPortal(
+    <div className="modal">{children}</div>,
+    document.body,
+  )
+}
+```
+
+- 이 편에서는 서드파티 위젯 안쪽 노드에 React 내용을 그리는 용도만 다룹니다. 모달·툴팁 같은 일반 용도, 이벤트 버블링, Context는 14편을 봅니다.
+- 이벤트는 DOM 트리가 아니라 React 트리를 따라 전파됩니다.
+- 지도 라이브러리가 만든 팝업 노드처럼 React가 만들지 않은 DOM 노드가 대상이면, 그 노드를 state에 담아 두었다가 포털로 그립니다.
+
+```jsx
+const [popup, setPopup] = useState(null)
+
+useEffect(() => {
+  const map = createMapWidget(boxRef.current)
+  setPopup(addPopupToMapWidget(map))
+}, [])
+
+// 렌더링: popup이 있을 때만 그 노드 안에 그림
+{popup !== null && createPortal(<p>Hello</p>, popup)}
+```
+
+## DOM 직접 조작
+
+Ref는 React가 렌더링 결과로 만든 DOM 노드를 직접 다루는 탈출구입니다(Ref 심화는 3편). 안전한 사용과 위험한 사용이 갈립니다.
+
+| 구분 | 예 |
+|------|----|
+| 안전: 읽기, 비파괴 동작 | `focus()`, `scrollIntoView()`, 크기·위치 측정 |
+| 안전: React가 건드릴 이유가 없는 노드 | JSX에서 항상 비어 있는 `div`의 자식 추가·삭제 |
+| 위험: React가 관리하는 노드 | 자식 추가·삭제·제거, 텍스트·속성 덮어쓰기 |
+
+```jsx
+ref.current.remove() // ❌ React가 노드를 잃어버림
+setShow(true)        // 이후 렌더링에서 에러
+```
+
+- React가 관리하는 노드를 직접 바꾸면 충돌과 불일치가 생기고, 다음 렌더링에서 직접 바꾼 내용이 되돌려지거나 에러가 납니다.
+- 다른 컴포넌트가 소유한 노드를 직접 건드리면 코드가 깨지기 쉬워집니다. 노드를 쓰려면 그 컴포넌트가 `ref`를 prop으로 노출해야 합니다.
+- `ref`는 렌더링 중이 아니라 이벤트 핸들러나 Effect에서 읽고 씁니다.
+- 화면에 보이는 것을 바꾸는 일은 가능하면 state와 props로 하고, DOM 직접 조작은 포커스·스크롤·측정·브라우저 API 호출처럼 React가 표현하지 못하는 일에만 씁니다.
+
+## Browser API
+
+React가 감싸지 않은 브라우저 API는 Effect에서 연결하고, cleanup에서 해제합니다.
+
+```jsx
+useEffect(() => {
+  function handleScroll() {
+    console.log(window.scrollX, window.scrollY)
+  }
+  window.addEventListener('scroll', handleScroll)
+  return () => {
+    window.removeEventListener('scroll', handleScroll)
+  }
+}, [])
+```
+
+- Effect는 렌더링 이후, 브라우저에서만 실행됩니다. 서버 렌더링 중에는 `window`가 없으므로 렌더링 본문에서 읽지 않습니다.
+- cleanup이 없으면 리스너가 중복되고 메모리가 새 나갑니다.
+- 개발의 `StrictMode`는 setup, cleanup, setup 순으로 한 번 더 실행합니다. 두 번 호출하면 에러가 나는 API는 cleanup으로 원상 복구해야 합니다. `dialog` 요소의 `showModal()`은 두 번 호출하면 에러가 나므로 cleanup에서 `close()`를 부릅니다.
+
+```jsx
+useEffect(() => {
+  const dialog = dialogRef.current
+  dialog.showModal()
+  return () => dialog.close()
+}, [])
+```
+
+- React 19.3은 `react-dom`의 `browser()`를 추가했습니다. `use(browser())`를 부르면 서버에서는 중단(suspend)하고 클라이언트에서는 정상 렌더링하므로, 브라우저에서만 읽을 수 있는 값(localStorage, 시간대)을 렌더링에서 쓸 때 서버 렌더링을 건너뛰는 용도로 씁니다(`use`는 15편).
+- 값이 바뀔 수 있는 브라우저 상태(온라인 여부, 미디어 쿼리)를 렌더링에 쓰려면 Effect 대신 `useSyncExternalStore`가 맞습니다(자세히는 5편).
+
+## Third-party Widget
+
+React 밖에서 DOM을 직접 만드는 서드파티 위젯은 "React가 건드릴 이유가 없는 빈 노드"를 빌려줘서 연결합니다.
+
+```jsx
+function Map({ zoom }) {
+  const boxRef = useRef(null)
+  const mapRef = useRef(null)
+
+  useEffect(() => {
+    mapRef.current = new MapWidget(boxRef.current)
+    return () => mapRef.current.destroy()
+  }, [])
+
+  useEffect(() => {
+    mapRef.current.setZoomLevel(zoom)
+  }, [zoom])
+
+  return <div ref={boxRef} />
+}
+```
+
+- 위젯 생성은 한 Effect에서, React state와 위젯의 동기화는 다른 Effect에서 합니다. 의존성이 달라서 분리하면 `zoom`이 바뀔 때 위젯을 다시 만들지 않습니다.
+- JSX의 `div`는 자식이 없으므로 React가 그 안을 건드리지 않습니다. 위젯이 안쪽을 마음대로 채울 수 있습니다.
+- cleanup에서 위젯을 해제합니다. StrictMode가 개발 중에 setup을 한 번 더 실행하므로 cleanup이 위젯을 완전히 해제해야 합니다.
+- 위젯이 만든 DOM 안쪽에 React 컴포넌트를 넣어야 하면 앞 절의 포털을 씁니다.
+- 위젯의 이벤트 콜백이 최신 props를 읽어야 하면 stale closure를 조심합니다(자세히는 4편).
+
+## Canvas
+
+Canvas는 DOM이 아니라 픽셀 버퍼에 그립니다. React는 `canvas` 요소만 관리하고 그림 그리기는 Effect에서 직접 합니다.
+
+```jsx
+function Chart({ points }) {
+  const canvasRef = useRef(null)
+
+  useEffect(() => {
+    const ctx = canvasRef.current.getContext('2d')
+    ctx.clearRect(0, 0, 300, 150)
+    points.forEach(([x, y]) => ctx.fillRect(x, y, 4, 4))
+  }, [points])
+
+  return <canvas ref={canvasRef} width={300} height={150} />
+}
+```
+
+- 그림은 React의 렌더링 결과가 아니므로 `points`가 바뀌면 Effect가 매번 처음부터 다시 그립니다.
+- 그리기 명령은 렌더링 본문이 아니라 Effect나 이벤트 핸들러에 둡니다. 렌더링은 순수해야 합니다.
+- 애니메이션 루프(`requestAnimationFrame`)나 리스너를 만들었다면 cleanup에서 취소합니다.
+- 프레임마다 바뀌는 값을 state로 두면 매 프레임 렌더링이 일어납니다. 그런 값은 ref에 담고 Effect 안에서 직접 그리는 방법이 있습니다.
+
+## Web Component
+
+Web Component는 `my-element` 같은 커스텀 요소(custom element)입니다. 브라우저가 관리하는 요소이고 React 19는 이를 완전히 지원합니다. React 19 발표 글은 Custom Elements Everywhere의 테스트를 모두 통과했다고 밝힙니다.
+
+```jsx
+<my-element label="Hi" items={[1, 2, 3]} onspeak={handle} />
+```
+
+- 클라이언트 렌더링에서는 prop 이름이 커스텀 요소 인스턴스의 프로퍼티로 있으면 프로퍼티로 대입하고, 없으면 속성으로 설정합니다. 프로퍼티로 대입하면 배열·객체 같은 값을 그대로 넘길 수 있습니다.
+- 속성은 문자열로 변환됩니다. `value={[1,2,3]}`이 속성으로 가면 `"1,2,3"`이 됩니다.
+- 서버 렌더링에서는 문자열, 숫자, `true`만 속성으로 출력되고, 객체와 `false`는 출력되지 않습니다.
+- 커스텀 이벤트는 `on` 접두사로 받습니다. 이벤트 이름은 대소문자를 구분하고 대시도 쓸 수 있습니다. `onsay-hi`는 `say-hi`를, `onsayHi`는 `sayHi`를 듣습니다.
+
+## Mutation 최소화
+
+React 밖과 연결하는 코드는 DOM을 바꾸는 범위를 최소로 줄여야 합니다. 네 가지 기준으로 정리됩니다.
+
+1. 먼저 state와 props로 표현할 수 있는지 확인합니다. 표현할 수 있으면 직접 바꾸지 않습니다.
+2. 직접 바꿀 때는 React가 관리하지 않는 노드로 한정합니다. 빈 `div`를 하나 두고 그 안쪽만 외부 코드에 맡깁니다.
+3. 바꾼 것은 cleanup에서 되돌립니다. 리스너 제거, 위젯 해제, 다이얼로그 닫기입니다.
+4. 읽기·측정(`getBoundingClientRect`, `scrollHeight`)과 비파괴 동작(`focus`, `scrollIntoView`)을 쓰기보다 먼저 고려합니다.
+
+```jsx
+// ❌ React가 렌더링하는 노드의 내용을 직접 바꿈
+ref.current.textContent = 'Done'
+
+// ✅ 화면에 보이는 값은 state로
+const [label, setLabel] = useState('Wait')
+```
+
+- 직접 조작이 늘수록 렌더링 결과와 DOM이 어긋날 가능성이 커집니다. 디버깅도 어려워집니다.
+- 외부 코드가 DOM에 바꾼 결과를 React state로 되돌려 받아야 하면 이벤트로 알리고 `setState`로 반영합니다. DOM을 단일 진실 공급원으로 쓰지 않습니다.
+
+## 문서 메타데이터
+
+React 19는 컴포넌트 안에서 `title`, `meta`, `link` 요소를 그리면 React가 문서의 `head`로 올려 줍니다. 컴포넌트가 어디에 있든 `head`에 들어갑니다. 예전에 Effect에서 `document.title`을 바꾸거나 별도 라이브러리를 쓰던 일을 대체합니다.
+
+```jsx
+function BlogPost({ post }) {
+  return (
+    <article>
+      <title>{post.title}</title>
+      <meta name="description" content={post.summary} />
+      <h1>{post.title}</h1>
+    </article>
+  )
+}
+```
+
+- 클라이언트 전용 앱, 스트리밍 서버 렌더링, Server Component에서 모두 동작합니다.
+- `title`의 자식은 문자열 하나여야 합니다. 문자열과 변수를 나란히 쓰면 자식이 배열이 되므로 템플릿 문자열 하나로 만듭니다.
+
+```jsx
+<title>Page {n}</title>       // ❌ 자식이 배열
+<title>{`Page ${n}`}</title>  // ✅ 문자열 하나
+```
+
+- `title`은 한 번에 하나만 그립니다. 여러 개를 그리면 브라우저와 검색 엔진의 동작이 정해져 있지 않습니다.
+- `meta`는 `name`, `charset`, `httpEquiv`, `itemProp` 중 정확히 하나를 가져야 합니다.
+- 예외는 `head`로 올라가지 않습니다. `itemProp`이 있는 `meta`와 `title`은 문서 메타데이터가 아니라 그 자리의 마이크로데이터로 취급됩니다. `svg` 안의 `title`은 SVG 접근성 설명입니다.
+- 정적 메타데이터는 이것으로 충분하지만, 라우팅·SEO 전체 전략은 프레임워크(Next.js 과목)의 메타데이터 기능과 함께 설계합니다.
+
+## 핵심 정리
+
+- `createRoot`는 클라이언트 렌더링용, `hydrateRoot`는 서버 HTML에 연결용이며 Root 하나는 DOM 노드 하나에 대응합니다.
+- `root.render`는 첫 호출에서 기존 내용을 지우고 이후에는 바뀐 부분만 반영합니다. `root.unmount` 뒤에는 새 Root를 만들어야 합니다.
+- 옵션은 `onCaughtError`·`onUncaughtError`·`onRecoverableError`·`identifierPrefix`이고, Root가 여러 개면 접두사를 다르게 줍니다.
+- `flushSync`는 DOM을 즉시 갱신하지만 성능을 해치므로 스크롤·포커스·서드파티 연동의 최후 수단입니다.
+- React가 관리하는 노드는 직접 바꾸지 않고, 브라우저 API·위젯·Canvas는 Ref와 Effect(cleanup 포함)로 연결합니다.
+- React 19는 `title`과 `meta`를 `head`로 올려 주고 Web Component의 프로퍼티·커스텀 이벤트를 지원합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="서버가 만든 HTML이 이미 들어 있는 노드에 hydrateRoot 대신 createRoot를 사용하면 어떻게 되는가?"
+  options={['기존 HTML을 재사용하고 이벤트만 연결한다', '기존 DOM 노드를 모두 지우고 처음부터 새로 만든다', '에러가 발생해 렌더링되지 않는다', '두 방식의 결과는 완전히 같다']}
+  correctAnswer={2}
+  explanation="createRoot는 첫 render에서 Root 노드 안의 기존 내용을 지우고 새로 그립니다. 서버 HTML을 재사용하며 이벤트만 연결하는 것은 hydrateRoot입니다. 에러는 나지 않지만 서버 렌더링의 이점이 사라집니다."
+  optionExplanations={['재사용은 hydrateRoot의 동작입니다.', '정답입니다. 기존 HTML을 지우고 클라이언트에서 다시 만듭니다.', '에러가 나지는 않습니다. 단지 서버 HTML이 버려집니다.', '결과가 다릅니다. hydrateRoot만 기존 HTML을 재사용합니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="root.unmount()를 호출한 뒤 같은 root에 root.render를 호출하면 어떻게 되는가?"
+  options={['트리가 처음부터 다시 그려진다', '아무 일도 일어나지 않는다', '해제한 Root는 재사용할 수 없어 에러가 난다', '경고만 출력되고 이전 state가 복원된다']}
+  correctAnswer={3}
+  explanation="unmount한 Root에 render를 호출하면 Cannot update an unmounted root 에러가 납니다. 같은 DOM 노드에 다시 그리려면 createRoot로 새 Root를 만들어야 합니다."
+  optionExplanations={['새 Root를 만들어야 다시 그려집니다.', '조용히 무시되지 않고 에러가 납니다.', '정답입니다. 해제한 Root는 다시 쓸 수 없습니다.', 'state는 unmount 때 정리되며 복원되지 않습니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="React가 렌더링하는 노드에 대해 ref를 이용한 DOM 조작 중 안전한 것은?"
+  options={['ref.current.remove()로 노드를 제거한다', 'ref.current.textContent를 직접 바꿔 화면 값을 갱신한다', 'ref.current.focus()나 scrollIntoView()를 호출한다', 'ref.current에 자식 노드를 직접 추가한다']}
+  correctAnswer={3}
+  explanation="focus, scrollIntoView, 크기 측정 같은 비파괴 동작은 React의 관리와 충돌하지 않습니다. React가 관리하는 노드를 제거하거나 내용을 바꾸거나 자식을 추가하면 이후 렌더링에서 충돌하거나 에러가 납니다."
+  optionExplanations={['React가 노드를 잃어 이후 렌더링에서 에러가 납니다.', '다음 렌더링에서 되돌려지거나 어긋납니다. 화면 값은 state로 바꿉니다.', '정답입니다. 비파괴 동작이라 안전합니다.', 'React가 관리하는 자식 목록과 어긋납니다. 항상 비어 있는 노드에서만 안전합니다.']}
+/>
+
+## 참고 자료
+
+- [React — createRoot](https://react.dev/reference/react-dom/client/createRoot)
+- [React — hydrateRoot](https://react.dev/reference/react-dom/client/hydrateRoot)
+- [React — flushSync](https://react.dev/reference/react-dom/flushSync)
+- [React — createPortal](https://react.dev/reference/react-dom/createPortal)
+- [React — Manipulating the DOM with Refs](https://react.dev/learn/manipulating-the-dom-with-refs)
+- [React — Synchronizing with Effects](https://react.dev/learn/synchronizing-with-effects)
+- [React — Using React for a part of an existing page](https://react.dev/learn/add-react-to-an-existing-project)
+- [React — Common components (custom elements)](https://react.dev/reference/react-dom/components)
+- [React — title](https://react.dev/reference/react-dom/components/title)
+- [React — meta](https://react.dev/reference/react-dom/components/meta)
+- [React 19 발표 글](https://react.dev/blog/2024/12/05/react-19)

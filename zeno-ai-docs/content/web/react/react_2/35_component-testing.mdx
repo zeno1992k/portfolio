@@ -1,0 +1,451 @@
+---
+title: '35. 컴포넌트 테스트'
+description: 'Props·이벤트·Form·Context·Reducer·Portal·Error Boundary·Suspense·비동기 UI·Hook을 React Testing Library로 테스트하는 방법과, Provider를 감싼 render 헬퍼, 스냅샷 테스트의 한계를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 컴포넌트가 의존하는 것(Props, Context, 포털, 경계, 비동기 데이터)별로 테스트 구성을 고르고, 공통 Provider를 감싼 render 헬퍼를 만들 수 있습니다.
+</Callout>
+
+이 문서의 코드는 34편의 설정(Vitest, jsdom, Testing Library, jest-dom, MSW)이 되어 있다고 전제합니다. 모든 예제는 `vitest` 5.0, `@testing-library/react` 16, React 19.3에서 실행해 확인했습니다.
+
+## Props 테스트
+
+Props 테스트는 Props를 바꿨을 때 화면이 달라지는지 확인합니다. Props 객체 자체가 아니라 렌더 결과를 단언합니다.
+
+```tsx
+test('count가 있으면 숫자를 보인다', () => {
+  const { rerender } = render(<Badge label="새 글" />)
+  expect(screen.queryByText('3')).not.toBeInTheDocument()
+
+  rerender(<Badge label="새 글" count={3} />)
+  expect(screen.getByText('3')).toBeInTheDocument()
+})
+```
+
+- Props를 바꿀 때는 `render`가 돌려주는 `rerender`로 같은 컴포넌트를 다른 Props로 다시 그립니다. State는 유지된 채 Props만 바뀝니다.
+- 조건부로 나타나는 요소는 없음을 `queryBy`로, 있음을 `getBy`로 단언합니다.
+- 기본값(`count = 0`)은 Props를 생략한 렌더 하나로 확인합니다.
+- Props 조합마다 렌더 결과가 달라지는 경우는 `test.each` 표로 묶으면 케이스가 한눈에 보입니다.
+
+```tsx
+test.each([
+  ['solid', 'solid'],
+  ['ghost', 'ghost'],
+])('variant=%s', (variant, className) => {
+  render(<Button variant={variant}>확인</Button>)
+  const button = screen.getByRole('button', { name: '확인' })
+  expect(button).toHaveClass(className)
+})
+```
+
+**흔한 실수:** 자식 컴포넌트에 Props가 정확히 전달됐는지 검사하는 것입니다. 사용자가 보는 결과가 아니라 구현이라서 리팩터링마다 깨집니다. 자식이 그린 결과를 화면에서 확인합니다.
+
+## 이벤트 테스트
+
+이벤트 테스트는 사용자 동작을 일으킨 뒤, 부모에게 알리는 콜백과 화면의 변화를 확인합니다.
+
+```tsx
+test('누르면 콜백이 호출되고 숫자가 올라간다', async () => {
+  const user = userEvent.setup()
+  const onLike = vi.fn()
+  render(<Like onLike={onLike} />)
+
+  const button = screen.getByRole('button', { name: /좋아요/ })
+  await user.click(button)
+  expect(onLike).toHaveBeenCalledWith(1)
+  const next = screen.getByRole('button', { name: '좋아요 1' })
+  expect(next).toBeVisible()
+})
+```
+
+- 콜백 Props는 `vi.fn()`(Jest는 `jest.fn()`)으로 만든 가짜 함수를 넘기고 `toHaveBeenCalledWith`, `toHaveBeenCalledTimes`로 호출 인수와 횟수를 검사합니다. 콜백은 부모와의 약속이라서 호출 여부가 곧 계약입니다.
+- State가 바꾼 결과는 State 변수가 아니라 화면 변화로 단언합니다.
+- 키보드 동작은 `user.keyboard('{Enter}')`, `user.tab()`으로 보냅니다. 포커스 이동 순서와 Enter·Space 동작이 접근성 검사를 겸합니다.
+- 핸들러를 `fireEvent`로 한 번에 호출하는 것보다 `user-event`가 실제 사용자 흐름에 가깝습니다(자세히는 34편).
+
+**흔한 실수:** 동작 뒤에 `await`를 빼먹거나, 이벤트가 만든 비동기 변화를 `getBy`로 바로 확인하는 것입니다. 비동기 변화는 `findBy`로 기다립니다.
+
+## Form 테스트
+
+폼 테스트는 사용자가 채우고 제출하는 흐름을 레이블과 역할로 따라갑니다. 검증 오류, 제출 성공 두 갈래를 확인합니다.
+
+```tsx
+test('형식이 틀리면 오류를 보이고 제출하지 않는다', async () => {
+  const user = userEvent.setup()
+  const onSubmit = vi.fn()
+  render(<LoginForm onSubmit={onSubmit} />)
+
+  const submit = screen.getByRole('button', { name: '로그인' })
+  await user.type(screen.getByLabelText('이메일'), 'bad')
+  await user.click(submit)
+  expect(screen.getByRole('alert')).toHaveTextContent('형식')
+  expect(onSubmit).not.toHaveBeenCalled()
+})
+```
+
+```tsx
+test('올바른 값이면 입력 값과 함께 제출한다', async () => {
+  const user = userEvent.setup()
+  const onSubmit = vi.fn()
+  render(<LoginForm onSubmit={onSubmit} />)
+
+  const submit = screen.getByRole('button', { name: '로그인' })
+  await user.type(screen.getByLabelText('이메일'), 'a@b.c')
+  await user.click(submit)
+  expect(onSubmit).toHaveBeenCalledWith({ email: 'a@b.c' })
+})
+```
+
+- 입력은 `user.type`, 값 비우기는 `user.clear`, 드롭다운은 `user.selectOptions`, 체크박스는 `user.click`입니다.
+- 입력 값 단언에는 `toHaveValue`, 체크 상태에는 `toBeChecked`, 비활성 상태에는 `toBeDisabled`를 씁니다.
+- 오류 문구는 `role="alert"` 영역으로 찾는 것이 안정적입니다. 스크린 리더 사용자에게도 같은 방식으로 전달됩니다(자세히는 32편).
+- React 19의 `form action`과 `useActionState`로 만든 폼도 같은 방식으로 테스트합니다. 제출 버튼을 클릭하면 Action 함수가 `FormData`와 함께 실행됩니다(자세히는 06편, 07편). 서버 호출은 가짜 함수로 바꾸고, 전송 중에는 `useFormStatus`가 만드는 `pending` 표시를, 끝나면 결과 영역을 `findBy`로 확인합니다.
+
+```tsx
+const send = vi.fn().mockResolvedValue('이미 가입된 이메일')
+render(<Contact send={send} />) // useActionState 폼
+await user.type(screen.getByLabelText('이메일'), 'a@b.c')
+const submit = screen.getByRole('button', { name: '보내기' })
+await user.click(submit)
+const alert = await screen.findByRole('alert')
+expect(alert).toHaveTextContent('이미')
+```
+
+**흔한 실수:** 폼 라이브러리(React Hook Form 등)의 내부 상태를 검사하는 것입니다. 라이브러리가 아니라 사용자가 보는 오류 문구와 제출 인수를 확인합니다(자세히는 31편).
+
+## Context 테스트
+
+Context를 쓰는 컴포넌트는 Provider 없이 렌더하면 기본값만 보이므로, 값을 정해서 Provider로 감싸 렌더합니다. `render`의 `wrapper` 옵션을 씁니다.
+
+```tsx
+test('테마 값에 따라 문구가 달라진다', () => {
+  render(<ThemeLabel />, {
+    wrapper: ({ children }) => (
+      <ThemeProvider value="dark">{children}</ThemeProvider>
+    ),
+  })
+  expect(screen.getByText('테마: dark')).toBeInTheDocument()
+})
+```
+
+- Context의 값은 테스트마다 다르게 주입합니다. 실제 Provider를 쓸 수 있으면 실제를 쓰고, 값이 복잡하면 테스트 전용 Provider에 고정 값을 넣습니다.
+- Provider가 State를 가지고 있다면 소비 컴포넌트에서 버튼을 눌러 값이 바뀌고 화면이 따라 바뀌는지를 통합적으로 검사합니다(자세히는 01편).
+- Provider 밖에서 쓰면 에러를 던지는 커스텀 훅은 에러를 단언합니다. React가 렌더 중 에러를 `console.error`로도 찍기 때문에 소음을 막으려고 스파이로 가립니다.
+
+```tsx
+test('Provider 밖에서는 에러', () => {
+  const spy = vi.spyOn(console, 'error')
+  spy.mockImplementation(() => {})
+  expect(() => render(<Consumer />)).toThrow('Provider 필요')
+  spy.mockRestore()
+})
+```
+
+**흔한 실수:** 각 테스트가 필요한 Provider를 일일이 감싸는 반복입니다. 공통 Provider는 아래 "render 헬퍼"로 모읍니다.
+
+## Reducer 테스트
+
+Reducer는 `(state, action)`을 받아 새 State를 돌려주는 순수 함수라서 React 없이 호출해서 검사합니다. 컴포넌트 테스트보다 먼저, 가장 빠르게 쓸 수 있는 테스트입니다.
+
+```ts
+test('added는 항목을 뒤에 붙인다', () => {
+  const state = { items: ['a'] }
+  const next = reducer(state, { type: 'added', text: 'b' })
+
+  expect(next).toEqual({ items: ['a', 'b'] })
+  expect(state.items).toEqual(['a']) // 원본 불변
+})
+```
+
+- Action 종류마다 케이스를 하나씩 두고, 입력 State, Action, 기대 State를 `test.each` 표로 쓰면 빠짐이 눈에 보입니다.
+- 불변성 검사로 원본 State를 바꾸지 않았는지(`state`가 그대로인지)를 확인합니다. `toEqual`은 값 비교이고, 참조까지 확인하려면 `not.toBe(state)`를 씁니다.
+- 처리하지 않는 Action, 빈 목록 같은 경계 값을 한두 개 넣습니다.
+- Reducer가 컴포넌트에 연결된 `useReducer`도 화면 쪽에서 한 번 확인합니다. 버튼을 눌러 항목이 나타나고 사라지는 흐름 하나면 연결 오류를 잡습니다(자세히는 02편).
+
+## Portal 테스트
+
+`createPortal`로 그린 요소는 컴포넌트 트리 밖의 DOM(보통 `document.body`)에 붙습니다. `screen`은 `document.body` 전체를 대상으로 하므로 포털 안의 요소도 그대로 찾아집니다.
+
+```tsx
+test('모달 내용이 보이고 닫기 콜백이 호출된다', async () => {
+  const user = userEvent.setup()
+  const onClose = vi.fn()
+  render(<Modal onClose={onClose}>내용</Modal>)
+
+  const dialog = screen.getByRole('dialog', { name: '안내' })
+  expect(within(dialog).getByText('내용')).toBeVisible()
+  const close = within(dialog).getByRole('button', {
+    name: '닫기',
+  })
+  await user.click(close)
+  expect(onClose).toHaveBeenCalled()
+})
+```
+
+- `render`가 돌려주는 `container`는 포털 밖이라서 `container` 안에서 쿼리하면 포털 요소를 못 찾습니다. `screen`이나 `within(document.body)`를 씁니다.
+- 영역을 좁힐 때는 `within(dialog)`처럼 대화상자 요소 안에서 찾습니다.
+- 컴포넌트를 `unmount`하면 포털이 붙인 DOM도 함께 사라지므로, 닫힌 뒤 `queryByRole('dialog')`가 `null`인지 확인할 수 있습니다.
+- 이벤트는 React 트리를 따라 버블링되므로 포털 안에서 일으킨 클릭이 React 부모의 핸들러에 도달합니다(자세히는 14편).
+
+**흔한 실수:** `container.querySelector`로 모달을 찾는 것입니다. 포털은 `container` 밖에 있습니다.
+
+## Error Boundary 테스트
+
+Error Boundary 테스트는 자식이 렌더 중 에러를 던졌을 때 대체 UI가 나타나는지 확인합니다. 렌더 중 에러를 의도적으로 일으키는 자식을 하나 만듭니다.
+
+```tsx
+function Bomb() {
+  throw new Error('boom')
+}
+
+test('자식이 터지면 fallback을 보인다', () => {
+  const spy = vi.spyOn(console, 'error')
+  spy.mockImplementation(() => {})
+  render(<Boundary><Bomb /></Boundary>)
+  expect(screen.getByRole('alert')).toHaveTextContent('문제')
+  spy.mockRestore()
+})
+```
+
+- Error Boundary가 잡은 에러도 개발 모드에서는 React가 `console.error`로 기록하고, 에러가 `window`까지 올라옵니다. 테스트 출력이 지저분해지므로 `console.error`를 스파이로 가리고 테스트가 끝나면 `mockRestore`로 복원합니다.
+- 경계 바깥의 형제 요소가 그대로 남아 있는지도 확인합니다. 경계의 목적은 오류를 격리하는 것입니다.
+- 다시 시도 버튼이 있다면 클릭 뒤에 자식이 정상 상태로 렌더되는지까지 확인합니다. 정상으로 바뀌는 조건(`explode` Props, 데이터)은 테스트에서 바꿀 수 있어야 합니다(자세히는 13편).
+- 이벤트 핸들러나 `setTimeout` 안의 에러는 경계가 잡지 않습니다. 이런 경로는 핸들러 안의 `try/catch`가 하는 일을 따로 검사합니다.
+
+## Suspense 테스트
+
+Suspense 테스트는 fallback이 먼저 보이고, 데이터나 코드가 준비되면 실제 UI로 바뀌는 흐름을 확인합니다. 무엇이 일시 중단을 일으키는지에 따라 기다리는 방법이 다릅니다.
+
+`React.lazy`는 일반 `render`와 `findBy`로 충분합니다.
+
+```tsx
+const Heavy = lazy(() => import('./Heavy'))
+
+test('코드가 로드되면 화면이 바뀐다', async () => {
+  render(
+    <Suspense fallback={<p>로딩 중</p>}>
+      <Heavy />
+    </Suspense>,
+  )
+  expect(screen.getByText('로딩 중')).toBeInTheDocument()
+  expect(await screen.findByText('무거운 화면')).toBeVisible()
+})
+```
+
+`use(promise)`로 읽는 컴포넌트는 일시 중단이 `render`가 감싼 `act` 범위 안에서 일어납니다. 동기 `render`만 쓰면 React가 `act`를 `await`하라고 경고하고 결과가 나타나지 않습니다. 렌더를 `await act(async () => ...)`로 감쌉니다(자세히는 15편).
+
+```tsx
+test('Promise가 풀리면 내용을 보인다', async () => {
+  let resolve!: (value: string) => void
+  const promise = new Promise<string>((r) => {
+    resolve = r
+  })
+
+  await act(async () => {
+    render(<Page promise={promise} />)
+  })
+  expect(screen.getByText('로딩 중')).toBeInTheDocument()
+
+  await act(async () => { resolve('도착') })
+  expect(screen.getByText('도착')).toBeInTheDocument()
+})
+```
+
+- Promise를 테스트가 직접 만들고 풀면 로딩 상태와 완료 상태를 따로 단언할 수 있습니다.
+- 이미 풀린 Promise(`Promise.resolve('도착')`)로도 `await act(async () => { render(...) })` 뒤에는 완료 상태가 보입니다.
+- 렌더 중에 새 Promise를 만들면 매번 일시 중단됩니다. Promise는 테스트 밖에서 만들어 Props로 넘기거나 캐시합니다(자세히는 15편).
+- 데이터 라이브러리의 `useSuspenseQuery`를 쓰는 화면은 MSW로 응답을 만들고 `findBy`로 기다립니다(자세히는 28편).
+- Suspense 경계 위치와 로딩 전략은 구현 설계 문제이므로, 테스트는 사용자가 보는 순서(fallback → 결과)만 검증합니다(자세히는 11편).
+
+## Async UI 테스트
+
+비동기 UI 테스트는 화면이 거치는 상태를 상태마다 하나씩 확인합니다. 로딩, 성공, 빈 결과, 오류가 기본 네 가지입니다. 네트워크는 MSW로 응답만 바꿉니다(자세히는 30편).
+
+```tsx
+test('서버 오류면 안내 문구를 보인다', async () => {
+  server.use(
+    http.get('/api/todos', () => {
+      return new HttpResponse(null, { status: 500 })
+    }),
+  )
+  renderWithProviders(<TodoList />)
+  expect(await screen.findByRole('alert')).toBeVisible()
+})
+```
+
+| 상태 | 만드는 방법 | 확인 |
+|------|-------------|------|
+| 로딩 | 렌더 직후 | 로딩 문구(`getBy`) |
+| 성공 | `HttpResponse.json([...])` | 목록 항목(`findBy`) |
+| 빈 결과 | `HttpResponse.json([])` | 빈 상태 문구(`findBy`) |
+| 오류 | 상태 500 또는 `HttpResponse.error()` | `role="alert"` 문구(`findBy`) |
+
+- 기본 핸들러는 성공 응답으로 두고, 테스트에서 `server.use`로 빈 결과와 오류를 덮어씁니다. 덮어쓴 핸들러는 `afterEach`의 `resetHandlers`가 되돌립니다.
+- 사라지는 로딩 문구는 `waitForElementToBeRemoved`로 확인할 수 있습니다.
+- 요청이 제대로 나갔는지 확인하려고 요청 자체를 단언하지 않습니다. 핸들러 안에서 필수 값이 빠졌으면 오류 응답을 돌려주게 하고, 그 오류가 화면에 나타나는지로 잡습니다. MSW 문서가 권하는 방식입니다. 화면에 흔적이 없는 단방향 요청(분석 전송 등)만 예외입니다.
+- 데이터 라이브러리(TanStack Query)는 실패 시 기본으로 재시도하므로 테스트용 `QueryClient`에서 `retry: false`로 끕니다(아래 "render 헬퍼").
+
+## Hook 테스트
+
+커스텀 훅은 컴포넌트 안에서만 호출할 수 있어서, `renderHook`이 임시 컴포넌트를 만들어 대신 호출해 줍니다.
+
+```tsx
+import { act, renderHook } from '@testing-library/react'
+
+test('inc는 count를 1 올린다', () => {
+  const { result } = renderHook(() => useCounter(5))
+  expect(result.current.count).toBe(5)
+
+  act(() => { result.current.inc() })
+  expect(result.current.count).toBe(6)
+})
+```
+
+- 반환값은 `result.current`에 있고, 렌더될 때마다 최신 값으로 바뀝니다. `result.current`를 변수에 담아 두면 낡은 값을 보게 되므로 단언할 때마다 `result.current`를 읽습니다.
+- 훅이 State를 바꾸는 함수는 `act`로 감싸 호출합니다. 화면 이벤트를 거치지 않으므로 React가 모르는 경로입니다.
+- 인수가 바뀔 때의 동작은 `renderHook`의 `rerender(새 인수)`로 확인합니다.
+- Context나 `QueryClient`가 필요한 훅은 `wrapper` 옵션으로 Provider를 감쌉니다. 비동기 훅은 `waitFor`로 결과를 기다립니다.
+
+```tsx
+const { result } = renderHook(() => useTodos(), { wrapper })
+await waitFor(() => {
+  expect(result.current.isSuccess).toBe(true)
+})
+expect(result.current.data).toHaveLength(1)
+```
+
+- 훅 하나가 컴포넌트와 분리되어 있을 때만 `renderHook`을 씁니다. 훅의 동작이 화면과 밀접하면 그 훅을 쓰는 컴포넌트를 렌더해서 화면으로 확인하는 편이 사용자 관점에 맞습니다.
+
+**흔한 실수:** 훅을 일반 함수처럼 테스트 안에서 직접 호출하는 것입니다. Hook은 렌더 중에만 호출할 수 있어서 에러가 납니다.
+
+## render 헬퍼
+
+라우터, `QueryClient`, 스토어를 쓰는 컴포넌트는 Provider 없이 렌더되지 않습니다. 모든 테스트가 같은 Provider를 감싸므로 테스트용 `render` 헬퍼를 `test-utils.tsx` 같은 파일에 한 번 만들어 재사용합니다. Testing Library의 권장 방식도 `wrapper`를 가진 사용자 지정 `render`입니다.
+
+```tsx
+type Props = { children: ReactNode }
+
+function createWrapper(route: string) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  const Wrapper = ({ children }: Props) => (
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={[route]}>
+        {children}
+      </MemoryRouter>
+    </QueryClientProvider>
+  )
+  return { queryClient, Wrapper }
+}
+```
+
+```tsx
+export function renderWithProviders(
+  ui: ReactElement,
+  route = '/',
+) {
+  const { queryClient, Wrapper } = createWrapper(route)
+  const view = render(ui, { wrapper: Wrapper })
+  return { queryClient, ...view }
+}
+```
+
+- `QueryClient`는 테스트마다 새로 만들어 캐시가 테스트 사이에 새지 않게 합니다. 헬퍼 함수 안에서 만들면 호출마다 새 인스턴스입니다.
+- TanStack Query는 기본으로 실패 시 3번 재시도하므로 오류 상태 테스트가 제한 시간에 걸립니다. `retry: false`로 끕니다. 쿼리 쪽에서 `retry`를 직접 지정한 경우는 그 값이 우선합니다(자세히는 28편).
+- 라우터는 `MemoryRouter`의 `initialEntries`로 시작 주소를 정합니다. 라우트 로더와 액션이 필요하면 React Router의 `createRoutesStub`이 데이터 모드 테스트에 권장되며, 재사용 컴포넌트를 라우터 훅과 함께 격리해 테스트하는 용도입니다.
+- 같은 파일에 `export * from '@testing-library/react'`를 추가하면 Testing Library의 나머지 함수도 다시 내보내져서, 테스트 파일은 `import { renderWithProviders, screen } from './test-utils'` 한 곳에서 가져옵니다.
+- 스토어는 모듈 전역 상태라서 테스트 사이에 값이 남습니다. Zustand 스토어는 각 테스트가 끝날 때 초기 상태로 되돌립니다.
+
+```tsx
+afterEach(() => {
+  useCart.setState(useCart.getInitialState(), true)
+})
+```
+
+- 두 번째 인수 `true`는 병합이 아니라 전체 교체입니다. 스토어가 여러 개면 Zustand 공식 테스트 가이드의 방식으로 `__mocks__/zustand.ts`를 만들어 모든 스토어를 한꺼번에 초기화합니다(자세히는 24편).
+- 테스트에 필요한 상태는 렌더 전에 `useCart.setState({ count: 3 })`처럼 직접 넣어 둡니다. 상태를 만들기 위해 화면을 여러 번 조작하는 것보다 빠르고 안정적입니다.
+
+**흔한 실수:** 모든 Provider를 모든 테스트에 감싸는 것입니다. 필요한 Provider만 감싼 가벼운 헬퍼를 두고, 값을 정해서 주입해야 하는 테스트에는 따로 `wrapper`를 줍니다.
+
+## 스냅샷 테스트의 한계
+
+스냅샷 테스트는 출력(렌더된 DOM 등)을 직렬화해 파일에 저장해 두고, 이후 실행에서 같은지 비교하는 테스트입니다.
+
+```tsx
+test('배지를 렌더한다', () => {
+  const { asFragment } = render(<Badge label="a" />)
+  expect(asFragment()).toMatchSnapshot()
+})
+```
+
+- `toMatchSnapshot()`은 `.snap` 파일에, `toMatchInlineSnapshot()`은 테스트 파일 안에 저장합니다. 처음 실행하면 스냅샷이 만들어지고 이후에는 비교합니다. 의도한 변경이면 `vitest -u`(감시 모드에서는 `u` 키)로 갱신합니다.
+- 기본 설정에서 Vitest는 CI에서 스냅샷을 새로 쓰지 않고, 일치하지 않으면 실패로 처리합니다.
+
+| 한계 | 설명 |
+|------|------|
+| 의도를 말해 주지 않는다 | 통과해도 무엇이 올바른지 알 수 없고, 사용자가 겪는 동작을 검증하지 못한다 |
+| 무관한 변경에 깨진다 | 클래스 이름, 마크업 구조가 바뀌면 동작이 같아도 실패한다 |
+| 갱신이 습관이 된다 | 실패할 때마다 `-u`로 덮어쓰면 검사가 사라진다 |
+| 큰 스냅샷은 리뷰가 안 된다 | 수백 줄의 차이를 사람이 읽지 않고 승인하게 된다 |
+| 상호작용을 검사하지 않는다 | 클릭 뒤 상태, 비동기 흐름은 직접 단언해야 한다 |
+
+- 스냅샷은 작고 정적인 출력(직렬화 함수의 결과, 에러 메시지, 작은 표현 컴포넌트)에서만 씁니다. `toMatchInlineSnapshot`으로 테스트 파일 안에 두면 리뷰 때 눈에 들어옵니다.
+- 화면 전체를 스냅샷으로 찍는 대신, 사용자가 보는 핵심(문구, 역할, 상태)을 단언합니다. 접근성 트리를 검사하는 `toMatchAriaSnapshot()`도 Vitest 문서에 있지만 이 문서에서는 다루지 않습니다.
+- 시각 변화를 잡고 싶다면 DOM 스냅샷이 아니라 스크린샷 비교(`toMatchScreenshot()`, 브라우저 모드)나 E2E 도구를 씁니다.
+
+## 핵심 정리
+
+- 컴포넌트 테스트는 의존하는 것(Props, Context, 포털, 경계, 비동기 데이터)을 테스트가 직접 정하고, 사용자가 보는 결과를 단언합니다.
+- Props는 `rerender`, 이벤트는 `vi.fn()` 콜백과 화면 변화, 폼은 레이블·역할·`role="alert"`로 검증합니다.
+- Context는 `wrapper`로 값을 주입하고, Reducer는 React 없이 순수 함수로 테스트합니다. Portal은 `container`가 아니라 `screen`으로 찾습니다.
+- Error Boundary는 `console.error`를 가리고 fallback을 확인하고, `use`를 읽는 Suspense는 `await act(async () => ...)`로 렌더를 감쌉니다.
+- 비동기 UI는 로딩·성공·빈 결과·오류를 MSW 응답으로 만들어 상태마다 확인하고, 훅은 `renderHook`으로 테스트합니다.
+- 공통 Provider(`QueryClient`는 테스트마다 새로, `retry: false`)는 render 헬퍼로 모으고 스토어는 매 테스트 뒤 초기화합니다. 스냅샷은 작고 정적인 출력에만 씁니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="createPortal로 document.body에 그려지는 모달을 테스트할 때 가장 적절한 방법은?"
+  options={['render가 돌려주는 container 안에서 querySelector로 찾는다', 'screen 쿼리나 within(document.body)로 찾는다', '포털은 테스트할 수 없으므로 컴포넌트를 포털 없이 바꾼다', 'jsdom 대신 실제 브라우저에서만 테스트한다']}
+  correctAnswer={2}
+  explanation="screen은 document.body 전체를 대상으로 하므로 포털 안의 요소도 찾습니다. 포털은 컴포넌트의 container 밖에 붙기 때문에 container 안에서 찾으면 실패합니다. 영역을 좁힐 때는 within(dialog)를 씁니다."
+  optionExplanations={['포털 내용은 container 밖이라 찾지 못합니다.', 'screen이 body 전체를 보므로 포털 요소도 찾습니다.', '포털은 jsdom에서도 테스트됩니다. 테스트 때문에 구현을 바꿀 필요가 없습니다.', '단위·통합 수준 테스트는 jsdom에서 충분합니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="use로 Promise를 읽는 컴포넌트를 Suspense 안에서 테스트할 때 동기 render만 쓰면 생기는 문제와 해결로 맞는 것은?"
+  options={['문제가 없다. findBy로 항상 기다릴 수 있다', 'act 범위 안에서 일시 중단이 일어나 경고가 나므로 render를 await act 호출로 감싸 비동기로 처리한다', 'Suspense가 동작하지 않으므로 fallback을 직접 렌더한다', 'MSW를 쓰면 render를 감쌀 필요가 없다']}
+  correctAnswer={2}
+  explanation="use가 일으키는 일시 중단이 render의 act 범위 안에서 일어나면 React가 act를 await하지 않았다는 경고를 내고 완료 상태가 나타나지 않습니다. render를 await act 호출(비동기 함수)로 감싸면 중단과 재개가 처리됩니다. lazy는 동기 render와 findBy로 충분합니다."
+  optionExplanations={['use를 읽는 경우에는 동기 render만으로 결과가 나타나지 않는 것이 실제로 확인되는 문제입니다.', 'act를 await하는 형태로 렌더를 감싸는 것이 맞는 해결입니다.', 'Suspense는 정상 동작합니다. 렌더를 기다리는 방식이 문제입니다.', 'MSW 여부와 무관합니다. 문제는 act 범위에서의 일시 중단입니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="TanStack Query를 쓰는 컴포넌트의 render 헬퍼에서 QueryClient를 retry false로 만들고, 호출마다 새로 만드는 이유로 맞는 것은?"
+  options={['재시도를 끄면 테스트가 빨라지고 캐시를 테스트 간에 공유하기 위해서이다', '오류 상태 테스트가 재시도 때문에 제한 시간에 걸리지 않게 하고, 캐시가 테스트 사이에 새지 않게 하기 위해서이다', 'QueryClient는 Provider 안에서 한 번만 만들 수 있기 때문이다', 'MemoryRouter가 QueryClient를 요구하기 때문이다']}
+  correctAnswer={2}
+  explanation="TanStack Query는 실패 시 기본으로 재시도하고 간격이 늘어나서 오류 상태를 확인하는 테스트가 제한 시간을 넘길 수 있으므로 retry를 끕니다. 또 QueryClient의 캐시가 테스트 사이에 남으면 앞 테스트의 데이터가 뒤 테스트에 영향을 주므로 호출마다 새로 만듭니다."
+  optionExplanations={['캐시는 공유하지 않아야 합니다. 공유하면 테스트가 서로 영향을 줍니다.', '재시도 지연 방지와 캐시 격리, 두 이유가 모두 맞습니다.', 'QueryClient는 여러 개 만들 수 있고 테스트마다 새로 만드는 것이 권장됩니다.', '라우터와 QueryClient는 서로 요구하지 않는 별개의 라이브러리입니다.']}
+/>
+
+## 참고 자료
+
+- [Testing Library — React Testing Library API (renderHook, wrapper, rerender)](https://testing-library.com/docs/react-testing-library/api/)
+- [Testing Library — Setup (사용자 지정 render)](https://testing-library.com/docs/react-testing-library/setup)
+- [Testing Library — About Queries](https://testing-library.com/docs/queries/about/)
+- [Testing Library — user-event 소개](https://testing-library.com/docs/user-event/intro)
+- [React — act](https://react.dev/reference/react/act)
+- [React — Component (Error Boundary가 잡는 오류)](https://react.dev/reference/react/Component)
+- [React — use](https://react.dev/reference/react/use)
+- [TanStack Query — Testing](https://tanstack.com/query/latest/docs/framework/react/guides/testing)
+- [React Router — Testing (Data Mode)](https://reactrouter.com/start/data/testing)
+- [React Router — Testing (createRoutesStub)](https://reactrouter.com/start/framework/testing)
+- [Zustand — Testing](https://zustand.docs.pmnd.rs/learn/guides/testing)
+- [Vitest — Snapshot](https://vitest.dev/guide/snapshot.html)
+- [MSW — Node.js 통합](https://mswjs.io/docs/integrations/node)
+- [MSW — 모범 사례: 요청 단언 피하기](https://mswjs.io/guides/best-practices/avoid-request-assertions)

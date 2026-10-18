@@ -1,0 +1,316 @@
+---
+title: '01. Context 설계'
+description: 'Context를 값의 성격별로 나누는 기준, State와 Dispatch 분리, Provider 컴포넌트와 커스텀 훅, 재렌더링 범위와 value 안정화, 남용 판단, Composition과의 비교, selector가 없어서 생기는 한계와 대안을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** Context를 언제 쓰고 어떻게 나눌지 판단하고, Provider와 커스텀 훅으로 감싸 구성하며, 어떤 변화가 어디까지 재렌더링을 일으키는지 설명할 수 있습니다.
+</Callout>
+
+## Context 분리
+
+Context를 하나로 크게 만들지 않고, 값의 성격이 다른 것끼리 나눕니다. 값이 바뀌면 그 Context를 읽는 모든 컴포넌트가 다시 렌더링되기 때문입니다(자세히는 아래 "Context 재렌더링").
+
+- 바뀌는 빈도: 테마·언어는 거의 안 바뀌고, 장바구니·알림은 자주 바뀝니다.
+- 읽는 쪽: 같은 값을 쓰는 컴포넌트 묶음이 다르면 따로 둡니다.
+- 도메인: 인증, 테마, 장바구니처럼 주제가 다르면 따로 둡니다.
+
+```jsx
+const ThemeContext = createContext('light')
+const AuthContext = createContext(null)
+const CartContext = createContext(null)
+```
+
+Context 객체는 서로 독립입니다. 한 컴포넌트가 여러 Context를 읽거나 제공할 수 있고, 다른 Context의 값을 덮어쓰지 않습니다. 같은 Context를 중첩해서 제공하면 가장 가까운 Provider의 값이 쓰입니다.
+
+`createContext(defaultValue)`의 기본값은 위쪽에 Provider가 하나도 없을 때만 쓰입니다. 시간에 따라 바뀌지 않는 정적 값입니다. 의미 있는 기본값이 없으면 `null`을 넣습니다.
+
+**흔한 실수:** 앱 전체 상태를 `AppContext` 하나에 넣는 것입니다. 한 필드만 바뀌어도 그 Context를 읽는 모든 컴포넌트가 다시 렌더링됩니다.
+
+## State / Dispatch Context
+
+상태를 읽는 컴포넌트와 상태를 바꾸는 컴포넌트가 다르면, 값과 바꾸는 함수를 두 Context로 나눕니다. React 공식 문서가 `useReducer`와 Context를 함께 쓸 때 제시하는 구성입니다.
+
+```jsx
+export const TasksContext = createContext(null)
+export const TasksDispatchContext = createContext(null)
+```
+
+- `dispatch`는 `useReducer`가 돌려주는 함수이고, 공식 문서는 `dispatch`의 아이덴티티가 안정적이라고 설명합니다. 렌더링마다 같은 함수가 오므로 Dispatch Context의 값은 바뀌지 않습니다.
+- 버튼처럼 `dispatch`만 쓰는 컴포넌트는 State Context를 구독하지 않습니다. 상태가 바뀌어도 이 컴포넌트는 Context 때문에 다시 렌더링되지 않습니다.
+- 상태를 읽는 컴포넌트는 State Context 값이 바뀔 때 다시 렌더링됩니다.
+
+`useState`로도 같은 구성이 됩니다. `[count, setCount]`에서 `count`와 `setCount`를 각각 다른 Context로 제공하면 됩니다. `set` 함수도 아이덴티티가 안정적입니다.
+
+**흔한 실수:** 한 Context에 `{ state, dispatch }` 객체를 넣는 것입니다. 상태가 바뀔 때 객체가 새로 만들어져서 `dispatch`만 쓰는 컴포넌트까지 다시 렌더링됩니다.
+
+## Context + Reducer
+
+상태 갱신 로직이 복잡하면 `useReducer`로 모으고 그 결과를 Context로 내려보냅니다. Reducer는 한 파일에 두고, 컴포넌트는 `dispatch`로 action만 보냅니다(`useReducer` 기초는 기초 25편, Reducer 작성법은 02편).
+
+```jsx
+function TasksProvider({ children }) {
+  const [tasks, dispatch] = useReducer(tasksReducer, [])
+  return (
+    <TasksContext value={tasks}>
+      <TasksDispatchContext value={dispatch}>
+        {children}
+      </TasksDispatchContext>
+    </TasksContext>
+  )
+}
+```
+
+| 문제 | Context + Reducer의 해결 |
+|------|--------------------------|
+| props 전달 단계가 깊다 | 중간 컴포넌트가 상태·핸들러를 받지 않는다 |
+| 상태 로직이 컴포넌트에 흩어진다 | Reducer 파일 하나에 모인다 |
+| 핸들러를 매번 내려보낸다 | 필요한 곳에서 `dispatch`를 직접 꺼낸다 |
+
+한 앱에 이런 쌍이 여러 개 있어도 됩니다. 도메인마다 Context와 Reducer를 하나씩 둡니다.
+
+## Provider Component
+
+Provider Component는 상태를 만들고 Context에 제공하는 일을 맡는 전용 컴포넌트입니다. 위 예의 `TasksProvider`가 그 형태입니다.
+
+- `children`을 prop으로 받아서 그대로 Provider 안에 넣습니다. 앱은 `<TasksProvider>`로 감싸기만 합니다.
+- 상태 선언, Reducer 연결, 초기값 계산을 Provider 안에 가둡니다. 앱 컴포넌트에는 Context 배선이 보이지 않습니다.
+- React 19부터는 Context 객체 자체를 Provider로 렌더링합니다. 19 미만에서는 `.Provider`를 붙입니다.
+
+```jsx
+<ThemeContext value="dark">
+  <Page />
+</ThemeContext>
+{/* React 19 미만 */}
+<ThemeContext.Provider value="dark">
+  <Page />
+</ThemeContext.Provider>
+```
+
+`Context.Consumer`로 값을 읽는 방식은 `useContext`가 생기기 전의 방법이고, 새 코드에서는 `useContext`를 쓰라고 공식 문서가 안내합니다.
+
+Provider를 어디에 둘지는 읽는 컴포넌트를 모두 감싸는 가장 낮은 위치로 정합니다. 앱 최상단에 전부 모아 두면 쓰이지 않는 곳에서도 상태가 살아 있고, 필요 이상으로 넓은 범위가 갱신됩니다.
+
+**흔한 실수:** Provider를 읽는 컴포넌트와 같은 컴포넌트 안에서 렌더링하고 그 안에서 `useContext`를 호출하는 것입니다. `useContext`는 같은 컴포넌트가 반환한 Provider의 영향을 받지 않습니다. Provider는 읽는 컴포넌트보다 위에 있어야 합니다.
+
+## Custom Hook
+
+Context를 읽는 코드를 커스텀 훅으로 감쌉니다(Hook 작성 규칙은 기초 26편).
+
+```jsx
+export function useTasks() {
+  return useContext(TasksContext)
+}
+export function useTasksDispatch() {
+  return useContext(TasksDispatchContext)
+}
+```
+
+- 컴포넌트가 Context 객체를 import하지 않아도 됩니다. Context 객체는 파일 안에 숨기고 훅만 내보냅니다.
+- 나중에 읽는 방식을 바꾸거나 로직을 추가해도 훅 안만 고치면 됩니다.
+- 기본값을 `null`로 둔 Context는 훅에서 Provider 누락을 바로 잡아냅니다.
+
+```jsx
+export function useTasks() {
+  const tasks = useContext(TasksContext)
+  if (tasks === null) {
+    throw new Error('TasksProvider 안에서 사용해야 합니다')
+  }
+  return tasks
+}
+```
+
+이 검사가 없으면 Provider를 빼먹었을 때 `null`을 읽고 엉뚱한 곳에서 오류가 납니다. 값 자체가 `null`일 수 있는 Context라면 초기값을 구별 가능한 `undefined`로 두는 식으로 조정합니다.
+
+`useContext`는 컴포넌트 최상위에서만 호출할 수 있습니다. 조건문 안에서 읽어야 하면 `use(Context)`를 씁니다(자세히는 15편).
+
+## Context 재렌더링
+
+Provider의 `value`가 바뀌면 React는 그 Context를 읽는 모든 하위 컴포넌트를 다시 렌더링합니다. 이전 값과 다음 값은 `Object.is`로 비교합니다.
+
+- 원시 값(문자열, 숫자, 불리언)은 값이 같으면 같다고 봅니다.
+- 객체·배열·함수는 참조가 같아야 같다고 봅니다. `{ a: 1 }`은 렌더링마다 새 객체이므로 매번 다릅니다.
+- 소비자가 `React.memo`로 감싸져 있어도 소용없습니다. `memo`는 부모가 넘기는 props만 비교하고, Context 변경에는 그대로 다시 렌더링됩니다.
+- Context 값의 일부 필드만 읽어도 소용없습니다. `useContext`는 `value` 전체를 구독합니다.
+
+반대로 Context를 읽지 않는 컴포넌트는 Context 변경으로 인한 갱신이 없습니다. 중간에 낀 컴포넌트도 Context를 읽지 않으면 영향이 없습니다.
+
+Provider 컴포넌트가 자기 상태 때문에 다시 렌더링될 때, `children`이 부모가 만들어 내려준 같은 엘리먼트라면 React는 그 하위를 다시 렌더링하지 않습니다. 이때 갱신되는 것은 Context를 읽는 컴포넌트뿐입니다. Provider를 `children` 받는 컴포넌트로 만드는 이유 중 하나입니다.
+
+```jsx
+function App() {
+  return (
+    <TasksProvider>
+      <Header />  {/* Context를 안 읽으면 갱신되지 않음 */}
+      <TaskList /> {/* useTasks()를 쓰므로 갱신됨 */}
+    </TasksProvider>
+  )
+}
+```
+
+## value 객체 안정화
+
+Provider가 렌더링될 때마다 `value`에 새 객체를 넣으면, 상태가 그대로여도 모든 소비자가 다시 렌더링됩니다.
+
+```jsx
+function AuthProvider({ children }) {
+  const [user, setUser] = useState(null)
+  // ❌ 렌더링마다 새 객체
+  return (
+    <AuthContext value={{ user, setUser }}>
+      {children}
+    </AuthContext>
+  )
+}
+```
+
+`useMemo`로 객체를 고정하고, 함수는 `useCallback`으로 고정합니다. 공식 문서가 이 방식을 안내합니다(자세히는 19편).
+
+```jsx
+const login = useCallback((res) => {
+  setCurrentUser(res.user)
+}, [])
+const value = useMemo(
+  () => ({ currentUser, login }),
+  [currentUser, login],
+)
+return <AuthContext value={value}>{children}</AuthContext>
+```
+
+- `useMemo`의 의존성은 `value`에 들어가는 값 전부입니다. 하나라도 바뀌면 새 객체가 만들어집니다.
+- Provider가 자기 상태 없이 부모 때문에 다시 렌더링되는 경우에 특히 효과가 큽니다. 상태가 바뀌어서 `value`가 달라져야 하는 경우에는 고정해도 소비자는 어차피 갱신됩니다.
+- 값이 원시 값 하나이거나 `dispatch`뿐이면 고정할 것이 없습니다.
+
+객체를 고정하는 것보다 값을 읽는 쪽에 맞게 Context를 나누는 편이 더 근본적입니다. 자주 바뀌는 값과 거의 안 바뀌는 값이 한 객체에 섞여 있으면, 고정해도 자주 바뀌는 값이 바뀔 때마다 객체가 새로 만들어집니다.
+
+## Feature Context
+
+Feature Context는 앱 전체가 아니라 한 기능(feature) 안에서만 쓰는 Context입니다. 그 기능의 컴포넌트 트리를 감싸는 Provider를 기능 폴더 안에 두고, 그 안의 컴포넌트만 읽습니다.
+
+```text
+features/cart/
+  CartContext.jsx   Context·Reducer·Provider·훅
+  CartPage.jsx      <CartProvider>로 감싼 진입점
+  CartItem.jsx      useCart()로 읽음
+```
+
+- Context 객체, Reducer, Provider, 커스텀 훅을 한 파일에 모읍니다. 바깥에는 `CartProvider`와 훅만 내보냅니다.
+- Provider를 기능의 진입 컴포넌트에 둡니다. 해당 페이지에 들어갈 때 만들어지고, 나갈 때 사라집니다.
+- 같은 Provider를 두 곳에 렌더링하면 각각 독립된 상태를 갖습니다. 목록의 항목마다 폼 상태를 격리하는 데 쓸 수 있습니다.
+- 전역 상태가 필요 없는데 앱 최상단에 Provider를 두는 습관을 피하는 방법이기도 합니다.
+
+전역이어야 하는 값(로그인한 사용자, 테마, 로케일)은 앱 최상단 Provider가 맞습니다. 값의 수명과 범위가 Provider 위치를 정합니다.
+
+## Context 남용
+
+Context는 props 전달 단계를 줄여 주지만 상태 관리 도구는 아닙니다. 다음 경우에는 Context가 적합하지 않습니다.
+
+| 상황 | 이유 | 대안 |
+|------|------|------|
+| 한두 단계만 내려보낸다 | props가 흐름을 더 잘 드러낸다 | props 전달 |
+| 입력값·마우스 좌표처럼 자주 바뀐다 | 소비자 전체가 매번 다시 렌더링된다 | 지역 상태, 외부 스토어 |
+| 서버에서 받은 데이터를 담는다 | 캐싱·재요청·동기화를 직접 구현해야 한다 | 서버 상태 라이브러리(26편) |
+| 읽는 쪽이 필드 일부만 필요하다 | selector가 없어 전체를 구독한다 | Context 분리, 외부 스토어 |
+| 값이 한 컴포넌트에서만 쓰인다 | 범위가 불필요하게 넓다 | 지역 상태 |
+
+React 공식 문서는 Context를 쓰기 전에 두 가지를 먼저 시도하라고 안내합니다. 첫째 props로 직접 전달하고, 둘째 컴포넌트를 추출해 JSX를 `children`으로 넘기는 것입니다. 이 둘이 맞지 않을 때 Context를 씁니다. Context가 맞는 대표 사례는 테마, 현재 사용자, 라우팅 정보, 복잡한 상태입니다.
+
+**흔한 실수:**
+
+- 모든 상태를 Context에 올리는 것입니다. 상태는 쓰는 곳 가장 가까이에 둡니다(상태 위치 판단은 22편).
+- Provider를 쓰고 나서 중간 컴포넌트에도 같은 값을 props로 또 내려보내는 것입니다. 두 경로가 생겨 어느 쪽이 기준인지 흐려집니다.
+- 같은 모듈이 번들러에서 중복으로 만들어져 Context 객체가 둘이 되는 것입니다. Context는 객체가 `===`로 같아야 동작하므로 Provider를 못 찾는 증상이 나옵니다.
+
+## Composition과 비교
+
+Composition은 컴포넌트를 `children`이나 다른 JSX prop으로 조립해서, 중간 컴포넌트를 거치지 않고 필요한 컴포넌트에 데이터를 닿게 하는 방법입니다.
+
+```jsx
+// ❌ Layout이 user를 받아 아래로 전달
+<Layout user={user} />
+
+// ✅ 상위에서 완성한 JSX를 children으로 전달
+<Layout><Avatar user={user} /></Layout>
+```
+
+두 번째 형태에서 `Layout`은 `user`를 몰라도 됩니다. `Avatar`가 App에서 만들어져 그대로 꽂히기 때문입니다.
+
+| 항목 | Composition | Context |
+|------|-------------|---------|
+| 데이터 흐름 | 코드에서 명시적으로 보임 | 훅을 열어야 보임 |
+| 재렌더링 | 일반 props 규칙 | 소비자 전체가 갱신됨 |
+| 적합한 경우 | 단계가 몇 개이고 구조를 바꿀 수 있다 | 멀리 떨어진 여러 곳이 같은 값을 읽는다 |
+| 대가 | 상위 컴포넌트가 커질 수 있다 | 의존성이 숨고 재사용이 Provider에 묶인다 |
+
+판단 순서는 props, Composition, Context입니다. 컴포넌트 위치를 조금 바꾸면 Provider 없이 풀리는 경우가 많습니다. 테마처럼 트리 전체의 여러 깊이에서 읽는 값은 Context가 맞습니다.
+
+## selector 부재와 대안
+
+selector는 스토어의 상태에서 필요한 조각만 골라 읽는 함수입니다. `useContext`에는 selector가 없어서 `value` 전체를 구독합니다. 필드 하나만 읽는 컴포넌트도 다른 필드가 바뀌면 다시 렌더링됩니다.
+
+대안은 비용이 낮은 순서입니다.
+
+1. Context 분리: 자주 바뀌는 값과 거의 안 바뀌는 값, 상태와 `dispatch`를 나눕니다.
+2. 읽는 곳과 렌더링하는 곳 분리: 바깥 컴포넌트가 Context를 읽고, 필요한 값만 props로 `memo` 자식에게 넘깁니다. 공식 문서가 안내하는 방법입니다.
+
+```jsx
+function Row() {
+  const { theme } = useSettings() // Context 전체를 구독
+  return <MemoRow theme={theme} /> // theme이 같으면 자식은 건너뜀
+}
+const MemoRow = memo(function MemoRow({ theme }) {
+  return <li className={theme}>...</li>
+})
+```
+
+3. 외부 스토어: selector로 필요한 조각만 구독하는 스토어를 씁니다. 스토어를 외부에 두고 React가 구독하게 만드는 기반 API가 `useSyncExternalStore`입니다(자세히는 05편). Zustand 같은 라이브러리가 그 위에 selector를 제공합니다(자세히는 23편, 24편).
+
+Context 자체가 더 빠른 방식으로 바뀌는 것은 아니므로, 구독 범위를 줄여야 하는 상태에는 처음부터 외부 스토어를 고려합니다. 반대로 거의 안 바뀌는 값이면 Context로 충분합니다.
+
+## 핵심 정리
+
+- Context는 바뀌는 빈도·읽는 쪽·도메인이 다른 값끼리 나눕니다. 한 Context에 모든 상태를 넣지 않습니다.
+- 상태와 `dispatch`를 두 Context로 나누면 `dispatch`만 쓰는 컴포넌트는 상태 변경에 갱신되지 않습니다.
+- Provider 컴포넌트가 상태·Reducer 배선을 감싸고, 커스텀 훅이 `useContext`를 감싸서 Provider 누락까지 검사합니다.
+- `value`가 `Object.is`로 달라지면 읽는 모든 컴포넌트가 다시 렌더링되고, `memo`로도 막을 수 없습니다. 객체 `value`는 `useMemo`로 고정합니다.
+- 판단 순서는 props, Composition, Context입니다. 자주 바뀌는 값·서버 데이터는 Context에 맞지 않습니다.
+- `useContext`에는 selector가 없으므로 Context 분리, `memo` 자식 분리, 외부 스토어 순으로 대응합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="State Context와 Dispatch Context를 따로 만드는 이유로 가장 알맞은 것은?"
+  options={['Dispatch를 읽기만 하는 컴포넌트가 상태 변경으로 다시 렌더링되지 않게 하기 위해', 'Context 하나에는 함수를 담을 수 없기 때문에', 'Reducer를 두 번 실행하기 위해', 'Provider를 한 번만 렌더링하기 위해']}
+  correctAnswer={1}
+  explanation="dispatch는 아이덴티티가 안정적이므로 Dispatch Context의 값은 바뀌지 않습니다. dispatch만 쓰는 컴포넌트는 State Context를 구독하지 않아서 상태가 바뀌어도 Context 때문에 다시 렌더링되지 않습니다. Context에는 함수도 담을 수 있고, Reducer 실행 횟수나 Provider 렌더링 횟수와는 무관합니다."
+  optionExplanations={['정답입니다. 상태를 읽는 쪽과 바꾸는 쪽의 구독을 분리합니다.', 'Context 값에는 함수를 포함해 어떤 값이든 담을 수 있습니다.', 'Context를 나눈다고 Reducer가 두 번 실행되지 않습니다.', 'Provider의 렌더링 횟수는 Context 분리와 관계없이 Provider의 상태 변화에 따릅니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="Provider의 value에 렌더링마다 새 객체를 넘기고 소비자를 memo로 감쌌을 때 일어나는 일은?"
+  options={['memo 덕분에 소비자는 다시 렌더링되지 않는다', 'Object.is 비교가 달라져 소비자가 다시 렌더링된다', 'React가 오류를 던진다', 'Provider만 다시 렌더링되고 소비자는 이전 값을 유지한다']}
+  correctAnswer={2}
+  explanation="Context의 이전 value와 다음 value는 Object.is로 비교합니다. 렌더링마다 새 객체이면 항상 다르다고 판단해 읽는 모든 컴포넌트를 다시 렌더링합니다. memo는 부모가 넘기는 props만 비교하므로 Context 변경을 막지 못합니다. 객체는 useMemo로 고정해야 합니다."
+  optionExplanations={['memo는 props 비교에만 관여하며 Context 변경으로 인한 갱신은 막지 못합니다.', '정답입니다. 새 객체는 Object.is 기준으로 이전 값과 다릅니다.', '새 객체를 넘기는 것은 오류가 아니라 불필요한 재렌더링을 만드는 코드입니다.', '소비자는 새 value를 받아 다시 렌더링됩니다. 이전 값을 유지하지 않습니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="Context를 쓰기 전에 공식 문서가 먼저 시도하라고 안내하는 방법은?"
+  options={['모든 상태를 전역 Context에 올린다', 'props로 직접 전달하거나, 컴포넌트를 추출해 JSX를 children으로 넘긴다', 'useEffect로 값을 동기화한다', 'Context 기본값을 객체로 바꾼다']}
+  correctAnswer={2}
+  explanation="공식 문서는 Context를 쓰기 전에 props 전달과 컴포넌트 추출 후 children으로 JSX 전달을 먼저 고려하라고 안내합니다. props는 데이터 흐름이 코드에 드러나고, Composition은 중간 컴포넌트가 데이터를 몰라도 되게 해 줍니다."
+  optionExplanations={['전역 Context는 오히려 남용의 전형이며, 자주 바뀌는 값에는 재렌더링 비용이 큽니다.', '정답입니다. props, Composition, Context 순으로 판단합니다.', 'Effect로 상태를 동기화하는 것은 Context 대안이 아니며 불필요한 렌더링을 만들기 쉽습니다.', '기본값은 Provider가 없을 때만 쓰이며 prop drilling 문제와 관계없습니다.']}
+/>
+
+## 참고 자료
+
+- [React — useContext](https://react.dev/reference/react/useContext)
+- [React — createContext](https://react.dev/reference/react/createContext)
+- [React — Passing Data Deeply with Context](https://react.dev/learn/passing-data-deeply-with-context)
+- [React — Scaling Up with Reducer and Context](https://react.dev/learn/scaling-up-with-reducer-and-context)
+- [React — useReducer](https://react.dev/reference/react/useReducer)
+- [React — memo](https://react.dev/reference/react/memo)
+- [React — use](https://react.dev/reference/react/use)

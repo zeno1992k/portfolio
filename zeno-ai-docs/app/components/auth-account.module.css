@@ -1,0 +1,77 @@
+.root {
+  display: inline-flex;
+  align-items: center;
+}
+
+.trigger {
+  position: relative;
+  border-radius: 8px !important;
+}
+
+.onlineDot {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 7px;
+  height: 7px;
+  border: 1.5px solid rgb(var(--nextra-bg));
+  border-radius: 50%;
+  background: #00a86b;
+}
+
+.panel {
+  max-width: min(420px, calc(100vw - 24px));
+  overflow: hidden;
+  border: 1px solid var(--docs-border);
+  border-radius: 8px !important;
+  box-shadow: 0 18px 50px rgb(15 23 42 / 18%);
+}
+
+.panel :global(button) {
+  border-radius: 8px !important;
+}
+
+.content {
+  min-width: 0;
+  padding-bottom: 8px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.intro {
+  display: grid;
+  gap: 6px;
+}
+
+.identity,
+.sync {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.identity {
+  border: 1px solid var(--docs-border);
+  padding: 12px;
+}
+
+.email {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sync {
+  color: var(--zeno-brand-strong);
+}
+
+@media (max-width: 767.98px) {
+  .panel {
+    width: calc(100vw - 16px);
+  }
+}

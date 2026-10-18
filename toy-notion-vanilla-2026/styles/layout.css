@@ -1,0 +1,78 @@
+/* 앱의 큰 구역: 전체 Grid, 사이드바, 본문, 푸터 배치 */
+.app{
+  display:grid;
+  grid-template-columns:240px 1fr;
+  min-block-size:100dvh;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-page);
+  background-color: var(--color-surface);
+}
+
+.sidebar__footer {
+  margin-block-start: auto;
+}
+
+.app__main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+  padding: var(--space-page);
+}
+
+@media ( width <= 768px){
+  .app{
+    grid-template-columns:1fr;
+  }
+}
+/*
+뷰포트(viewport)
+- 브라우저에서 웹페이지가 표시되는 영역.
+- 아래 단위에서 1은 기준 길이의 1%, 100은 기준 길이 전체를 뜻한다.
+
+vh (viewport height)
+- 큰 뷰포트 높이의 1%.
+- 현재 정의에서는 lvh와 같다.
+
+svh (small viewport height)
+- 주소창 같은 브라우저 UI가 펼쳐진 상태의 작은 뷰포트 높이의 1%.
+- 주소창이 숨겨져도 이 작은 높이를 기준으로 유지한다.
+
+lvh (large viewport height)
+- 주소창 같은 브라우저 UI가 접힌 상태의 큰 뷰포트 높이의 1%.
+- 주소창이 다시 나타나도 이 큰 높이를 기준으로 유지한다.
+
+dvh (dynamic viewport height)
+- 현재 브라우저 UI 상태를 반영한 동적 뷰포트 높이의 1%.
+- 주소창이 나타나거나 숨겨질 때 기준 높이가 달라질 수 있다.
+- 화면 키보드의 높이가 항상 반영되는 것은 아니다.
+
+※ svh와 lvh도 창 크기 변경이나 기기 회전 때는 다시 계산된다.
+※ 주소창 표시 시 700px, 숨김 시 800px인 예:
+   100svh = 700px
+   100lvh = 100vh = 800px
+   100dvh = 현재 상태에 따라 700px 또는 800px
+
+vmin (viewport minimum)
+- 큰 뷰포트의 너비와 높이 중 작은 쪽의 1%.
+- 예: 400 × 800px 화면이면 1vmin = 4px.
+- 사용 예: 화면의 짧은 변에 맞춰 정사각형 게임판이나 도형 크기를 정할 때.
+
+vmax (viewport maximum)
+- 큰 뷰포트의 너비와 높이 중 큰 쪽의 1%.
+- 예: 400 × 800px 화면이면 1vmax = 8px.
+- 사용 예: 화면의 긴 변에 맞춰 큰 배경 장식이나 원의 크기를 정할 때.
+
+vi (viewport inline)
+- 큰 뷰포트에서 글자가 한 줄 안에서 이어지는 방향의 길이 1%.
+- 일반적인 가로쓰기에서는 너비, 세로쓰기에서는 높이 기준.
+- 사용 예: 가로쓰기와 세로쓰기를 모두 지원하는 컴포넌트의 크기를 정할 때.
+
+vb (viewport block)
+- 큰 뷰포트에서 글줄들이 쌓이는 방향의 길이 1%.
+- 일반적인 가로쓰기에서는 높이, 세로쓰기에서는 너비 기준.
+- 사용 예: 글쓰기 방향에 맞춰 컴포넌트의 크기를 정할 때.
+*/

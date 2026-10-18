@@ -1,0 +1,508 @@
+---
+title: '01. JavaScript 기초 문법'
+description: '코딩테스트 풀이에 필요한 변수, 자료형, 연산자, 함수, 스코프, 구조 분해, 복사, 값과 참조, 옵셔널 체이닝, 클래스의 규칙과 함정을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 코딩테스트 풀이에 쓰는 JavaScript 기본 문법의 규칙을 정확히 알고, 형변환·스코프·참조 공유에서 생기는 실수를 피할 수 있습니다.
+</Callout>
+
+이 문서의 코드는 Node.js 24 기준입니다. ES2020 이전 문법은 연도를 적지 않고, 그 뒤 기능만 연도를 적습니다.
+
+## 변수와 상수
+
+`let`은 다시 대입할 수 있는 변수를, `const`는 다시 대입할 수 없는 상수를 선언합니다. `var`는 ES5 이전 방식이라 쓰지 않습니다.
+
+```js
+let count = 0
+count += 1       // 1
+const LIMIT = 100
+LIMIT = 200      // TypeError
+```
+
+`const`가 고정하는 것은 변수와 값의 연결(바인딩)일 뿐 값의 내용이 아닙니다. 배열과 객체의 내용은 바꿀 수 있습니다.
+
+```js
+const list = []
+list.push(1)     // [1] (허용)
+list = [2]       // TypeError
+```
+
+- 기본은 `const`로 선언하고 다시 대입해야 하는 변수만 `let`으로 선언합니다. DP 배열처럼 내용만 바꾸는 배열은 `const`입니다.
+- `const`는 선언과 동시에 초기화해야 합니다.
+- 같은 범위에서 `let`·`const` 이름을 두 번 선언하면 SyntaxError입니다.
+- 선언 전에 읽으면 `let`·`const`는 ReferenceError이고 `var`는 `undefined`입니다(아래 "스코프").
+- 선언 없이 `x = 5`로 대입하면 비엄격 모드에서는 전역 변수가 생기고, 엄격 모드(`'use strict'`)에서는 ReferenceError입니다. 오타가 조용히 새 변수가 되므로 항상 선언합니다.
+
+## 자료형
+
+JavaScript의 값은 원시 값 7종과 객체로 나뉩니다.
+
+| 종류 | 예 | `typeof` 결과 |
+|------|----|---------------|
+| undefined | `undefined` | `'undefined'` |
+| null | `null` | `'object'` (역사적 오류) |
+| boolean | `true` | `'boolean'` |
+| number | `3`, `3.5`, `NaN` | `'number'` |
+| bigint | `10n` | `'bigint'` |
+| string | `'abc'` | `'string'` |
+| symbol | `Symbol()` | `'symbol'` |
+| 객체 | `{}`, `[]`, `new Date()` | `'object'` |
+| 함수 | `() => 1`, `class {}` | `'function'` |
+
+- 정수와 실수가 따로 없고 `number` 하나가 64비트 부동소수점입니다. 큰 정수가 필요하면 `bigint`를 씁니다(자세히는 02편).
+- 배열은 `typeof`가 `'object'`라서 `Array.isArray(x)`로 판별합니다.
+- 문자열은 불변입니다. `s[0] = 'x'`는 비엄격 모드에서 무시되고 엄격 모드에서는 TypeError입니다(자세히는 06편).
+- `null`은 값이 없음을 직접 표시한 것이고 `undefined`는 값이 정해지지 않은 상태입니다. 초기화하지 않은 변수, 없는 프로퍼티, 범위 밖 인덱스, `return` 없는 함수의 결과가 `undefined`입니다.
+- 선언하지 않은 이름에 `typeof`를 쓰면 에러 없이 `'undefined'`입니다.
+
+```js
+typeof null       // 'object'
+typeof []         // 'object'
+Array.isArray([]) // true
+typeof NaN        // 'number'
+```
+
+## 형변환
+
+JavaScript는 연산에 맞춰 값을 자동으로 바꿉니다(암시적 변환). `Number()`, `String()`, `Boolean()`으로 직접 바꾸는 것이 명시적 변환입니다.
+
+`Number()`의 변환 결과입니다.
+
+| 값 | 결과 |
+|----|------|
+| `'12'` | 12 |
+| `''`, `' '` (빈 문자열·공백) | 0 |
+| `'12px'` | NaN |
+| `null` | 0 |
+| `undefined` | NaN |
+| `true` / `false` | 1 / 0 |
+| `[]` | 0 |
+| `[5]` | 5 |
+| `[1, 2]`, `{}` | NaN |
+
+`+`는 피연산자 중 하나라도 문자열이면 이어 붙이고, 그 밖의 산술 연산자는 숫자로 바꿉니다.
+
+```js
+'5' + 3      // '53'
+'5' - 3      // 2
+'5' * '2'    // 10
+true + 1     // 2
+1 + undefined // NaN
+```
+
+- 문자열을 숫자로 바꾸는 가장 안전한 방법은 `Number(s)`입니다. 빈 문자열이 0이 되는 점에 주의합니다(`parseInt`와의 차이는 02편).
+- 불리언으로 바뀔 때 거짓이 되는 값(falsy)은 `false`, `0`, `-0`, `0n`, `''`, `null`, `undefined`, `NaN` 여덟 가지뿐입니다. 나머지는 모두 참(truthy)입니다. `[]`, `{}`, `'0'`, `'false'`도 참입니다.
+- 비교는 `===`(엄격 비교)를 씁니다. `==`는 형을 바꿔 비교해서 `0 == ''`, `0 == '0'`, `'0' == false`가 모두 `true`입니다. 예외로 `x == null`은 `null`과 `undefined`를 한 번에 거릅니다.
+- `NaN`은 자기 자신과도 같지 않아서 `NaN === NaN`이 `false`입니다. 확인은 `Number.isNaN(x)`나 `Object.is(x, NaN)`으로 합니다.
+
+**흔한 실수:** 입력으로 받은 문자열을 숫자로 바꾸지 않고 `+`로 더하는 것입니다. `'1' + '2'`는 `'12'`입니다.
+
+## 연산자
+
+- 산술: `+`, `-`, `*`, `/`, `%`, `**`(거듭제곱). `/`는 실수 나눗셈입니다.
+- 증감: `++`, `--`. 앞에 붙이면 먼저, 뒤에 붙이면 나중에 증감합니다.
+- 비교: `<`, `<=`, `>`, `>=`, `===`, `!==`. 문자열끼리는 사전순(코드 유닛 순)입니다.
+- 논리: `&&`, `||`, `!`. 불리언이 아니라 피연산자 값을 그대로 반환합니다(단축 평가).
+- 복합 대입: `+=`, `-=`, `*=`, `/=`, `%=`, `**=`. 논리형 `||=`, `&&=`, `??=`는 ES2021입니다.
+- 비트: `&`, `|`, `^`, `~`, `<<`, `>>`, `>>>`. 32비트 정수로 계산합니다(자세히는 02편, 24편).
+
+- `7 / 2`는 `3.5`입니다. 정수 몫이 필요하면 `Math.floor(7 / 2)`를 씁니다(자세히는 02편).
+- `%`의 부호는 왼쪽 피연산자를 따릅니다. `-7 % 3`은 `-1`이고 `7 % -3`은 `1`입니다.
+- `**`는 오른쪽 결합입니다. `2 ** 3 ** 2`는 `2 ** (3 ** 2)`인 `512`입니다. 단항 `-`를 바로 앞에 쓰면 SyntaxError라서 `(-2) ** 2`로 씁니다.
+- `a && b`는 `a`가 거짓이면 `a`를, 아니면 `b`를 반환합니다. OR은 반대로 `a`가 참이면 `a`를, 아니면 `b`를 반환합니다. 왼쪽만으로 결과가 정해지면 오른쪽은 실행하지 않습니다.
+
+```js
+const a = 0
+a && 'x'    // 0
+a || 'x'    // 'x'
+a ?? 'x'    // 0 (아래 "?.와 ??" 참고)
+let n = 0
+n ||= 5     // 5
+```
+
+- `++`·`--`는 값을 바꾸는 연산이라 식 안에 섞으면 읽기 어렵습니다. 한 줄에 하나만 씁니다.
+- 연산자 우선순위가 헷갈리면 괄호를 씁니다. `typeof a + 'x'`는 `(typeof a) + 'x'`입니다.
+
+## 조건문
+
+`if`·`else if`·`else`는 조건식을 불리언으로 바꿔 판단합니다. 숫자 0, 빈 문자열, `null`, `undefined`, `NaN`이 거짓이라서 `if (n)`은 0도 거릅니다.
+
+```js
+if (score >= 90) grade = 'A'
+else if (score >= 80) grade = 'B'
+else grade = 'C'
+```
+
+`switch`는 값을 `===`로 비교해 일치하는 `case`부터 실행합니다. `break`가 없으면 다음 `case`까지 계속 실행됩니다(fall-through).
+
+```js
+switch (cmd) {
+  case 'L':
+  case 'R':        // L, R 둘 다 이 줄 아래를 실행
+    turn(cmd)
+    break
+  default:
+    move()
+}
+```
+
+- `case` 값은 `===`로 비교해서 `'1'`과 `1`은 다릅니다.
+- `if (x = 1)`처럼 `=`을 쓰면 비교가 아니라 대입이라서 항상 참(또는 대입값)이 됩니다. 비교는 `===`입니다.
+- 한 값에 대한 분기가 많으면 `switch`나 객체 조회 테이블을, 조건이 서로 다른 변수에 걸치면 `if`를 씁니다.
+- 삼항 연산자와 조기 반환은 03편에서 다룹니다.
+
+## 반복문
+
+| 문 | 쓰임 |
+|----|------|
+| `for (초기; 조건; 증감)` | 횟수가 정해진 반복, 인덱스가 필요할 때 |
+| `while (조건)` | 횟수를 모르고 조건이 참인 동안 반복 |
+| `do ... while (조건)` | 본문을 먼저 한 번 실행하고 조건 검사 |
+| `for (const x of iterable)` | 배열·문자열·Set·Map의 값을 순서대로 순회 |
+| `for (const k in obj)` | 객체의 열거 가능한 키(문자열) 순회 |
+
+```js
+for (let i = 0; i < 3; i++) { /* 0 1 2 */ }
+for (const ch of 'ab') { /* 'a' 'b' */ }
+for (const [i, v] of ['x', 'y'].entries()) {
+  // 0 'x' / 1 'y'
+}
+```
+
+- `for (let i ...)`는 반복마다 새 변수 `i`를 만듭니다. 그래서 반복 안에서 만든 함수가 그 회차의 `i`를 기억합니다(아래 "스코프").
+- `break`는 반복을 끝내고 `continue`는 다음 반복으로 건너뜁니다(자세히는 03편).
+- `for...in`은 키를 문자열로 돌려줍니다. 배열에 쓰면 `'0'`, `'1'`이 나와서 `i + 1`이 `'01'`이 됩니다. 배열은 `for`나 `for...of`로 순회합니다.
+- `for...of`는 일반 객체에 쓰면 TypeError입니다. 일반 객체는 이터러블이 아닙니다(순회 방법은 09편).
+- 배열의 `forEach`, `map`은 `break`로 멈출 수 없습니다(자세히는 05편).
+
+## 함수
+
+함수를 만드는 방법은 세 가지입니다.
+
+```js
+function add(a, b) { return a + b }     // 선언문
+const sub = function (a, b) { return a - b } // 표현식
+const mul = (a, b) => a * b             // 화살표 함수
+```
+
+- 선언문은 선언된 범위 맨 위로 끌어올려져(호이스팅) 위치와 상관없이 호출할 수 있습니다. 함수 표현식과 화살표 함수는 `const`로 선언하면 선언 전에 호출할 수 없습니다.
+- `return`이 없거나 값 없이 `return`하면 결과는 `undefined`입니다.
+- 인수 개수가 달라도 에러가 나지 않습니다. 모자란 매개변수는 `undefined`, 남는 인수는 무시됩니다.
+- 기본 매개변수는 인수가 `undefined`일 때만 적용됩니다.
+- 화살표 함수는 자신의 `this`와 `arguments`가 없습니다. 몸통이 식 하나면 `{}`와 `return`을 생략합니다. 객체를 바로 반환하려면 `() => ({ a: 1 })`처럼 괄호로 감쌉니다.
+- 함수는 값이라서 변수에 담고, 인수로 넘기고, 반환할 수 있습니다. `arr.map(fn)`의 `fn`이 그 예입니다(자세히는 05편).
+- 함수가 자기 자신을 호출하는 재귀는 22편에서 다룹니다. 입력을 받아 `solution` 함수로 감싸는 형식은 08편에서 다룹니다.
+
+```js
+function pow(base, exp = 2) { return base ** exp }
+pow(3)        // 9
+pow(3, 3)     // 27
+pow(3, undefined) // 9 (기본값 적용)
+pow(3, null)  // 1 (null은 기본값을 쓰지 않음)
+```
+
+## 스코프
+
+스코프는 변수를 볼 수 있는 범위입니다.
+
+| 선언 | 범위 |
+|------|------|
+| `let`, `const`, `class` | 가장 가까운 블록(`{}`) |
+| `var` | 가장 가까운 함수(블록 무시) |
+| 함수 선언 | 선언된 범위 |
+
+- 안쪽 범위에서 이름을 찾지 못하면 바깥쪽으로 한 단계씩 올라갑니다(스코프 체인). 범위는 코드를 쓴 위치로 정해집니다(렉시컬 스코프).
+- 안쪽에 같은 이름을 선언하면 바깥 변수를 가립니다(섀도잉).
+- 함수는 자신이 만들어진 범위의 변수를 계속 기억합니다. 이것이 클로저입니다.
+- `let`·`const`는 선언된 줄 전까지 접근할 수 없는 구간(TDZ, 일시적 사각지대)이 있어서 그 사이에 읽으면 ReferenceError입니다. `var`는 선언이 범위 맨 위로 올라가고 값은 `undefined`입니다.
+
+```js
+function f() {
+  console.log(a)  // undefined (var 호이스팅)
+  var a = 1
+  console.log(b)  // ReferenceError (TDZ)
+  let b = 2
+}
+```
+
+**흔한 실수:** `var`로 반복 변수를 만들고 그 안에서 함수를 만드는 것입니다. `var`는 반복 전체에서 변수가 하나라서 모든 함수가 마지막 값을 봅니다.
+
+```js
+const fs = []
+for (var i = 0; i < 3; i++) fs.push(() => i)
+fs.map((f) => f())  // [3, 3, 3]
+// var를 let으로 바꾸면 [0, 1, 2]
+```
+
+## 구조 분해 할당
+
+배열이나 객체에서 값을 꺼내 변수에 한 번에 담는 문법입니다.
+
+```js
+const [a, b] = [1, 2]            // a 1, b 2
+const [x, , z] = [1, 2, 3]       // x 1, z 3 (2는 건너뜀)
+const { name, age } = { name: 'K', age: 20 }
+const { name: n } = { name: 'K' } // 이름 변경: n 'K'
+```
+
+- 배열은 위치로, 객체는 키 이름으로 꺼냅니다.
+- 기본값은 꺼낸 값이 `undefined`일 때만 적용됩니다. `null`에는 적용되지 않습니다.
+
+```js
+const [p, q = 5, r = 7] = [1, undefined, null]
+// p 1, q 5, r null
+```
+
+- 변수 값 교환은 임시 변수 없이 합니다. 앞 줄이 세미콜론 없이 끝나 있으면 이어서 해석되므로, 세미콜론 없는 스타일에서는 줄 앞에 `;`를 붙입니다.
+
+```js
+let a = 1, b = 2
+;[a, b] = [b, a]   // a 2, b 1
+```
+
+- 중첩 구조도 분해할 수 있고 함수 매개변수 자리에서도 쓸 수 있습니다. `for (const [k, v] of map)`처럼 순회 변수에 쓰는 것이 가장 흔합니다.
+- `null`이나 `undefined`를 분해하면 TypeError입니다.
+- 나머지를 모으는 `...`은 다음 절의 Rest입니다.
+
+## Spread와 Rest
+
+`...`은 자리에 따라 두 가지로 쓰입니다. 값을 쓰는 자리의 `...`은 펼치는 스프레드이고, 받는 자리의 `...`은 모으는 Rest입니다.
+
+```js
+const a = [1, 2]
+const b = [0, ...a, 3]        // [0, 1, 2, 3] (스프레드)
+const o = { ...{ x: 1 }, y: 2 } // { x: 1, y: 2 }
+Math.max(...a)                // 2 (호출 인수로 펼침)
+function sum(...nums) { return nums.length } // Rest
+const [head, ...tail] = [1, 2, 3] // head 1, tail [2, 3]
+```
+
+- 스프레드는 호출 인수, 배열 리터럴, 객체 리터럴에서 씁니다. 호출과 배열에서는 이터러블만 펼칠 수 있습니다.
+- Rest는 함수 매개변수와 구조 분해 패턴에서 쓰고 항상 마지막에 한 번만 옵니다.
+- `[...set]`, `[...'abc']`로 Set이나 문자열을 배열로 바꿉니다.
+- 호출 인수로 펼칠 때는 엔진별 개수 한계가 있습니다. Node.js 24에서 실험하면 `Math.max(...arr)`가 원소 120000개에서는 통과하고 150000개에서는 RangeError였습니다. 한계는 환경마다 다르므로 입력이 클 수 있으면 반복문이나 `reduce`로 구합니다.
+
+```js
+const big = new Array(500_000).fill(1)
+Math.max(...big)  // RangeError
+let max = -Infinity
+for (const v of big) if (v > max) max = v // 1
+```
+
+- 스프레드의 세부 규칙은 ECMAscript 과목의 스프레드 문법 편에서 다룹니다.
+
+## 얕은 복사와 깊은 복사
+
+**얕은 복사**는 최상위 한 단계만 새로 만들고 안쪽 객체는 같은 것을 가리킵니다. **깊은 복사**는 안쪽까지 모두 새로 만듭니다.
+
+얕은 복사 방법입니다.
+
+| 대상 | 방법 |
+|------|------|
+| 배열 | `[...a]`, `a.slice()`, `Array.from(a)` |
+| 객체 | `{ ...o }`, `Object.assign({}, o)` |
+
+```js
+const a = [[1], [2]]
+const b = [...a]
+b[0].push(9)
+a[0]       // [1, 9] (안쪽 배열은 공유)
+b[1] = [7]
+a[1]       // [2] (바깥 배열은 별개)
+```
+
+깊은 복사는 `structuredClone(value)`로 합니다. Node.js 24에서는 전역 함수로 쓸 수 있고 순환 참조도 복사합니다.
+
+```js
+const src = { a: [1, 2], d: new Date(0), m: new Map() }
+const dst = structuredClone(src)
+dst.a.push(3)
+src.a                  // [1, 2]
+dst.m instanceof Map   // true
+```
+
+`structuredClone`의 한계입니다(MDN의 구조화된 복제 알고리즘 문서 기준).
+
+- 함수와 심벌은 복제하지 못하고 `DataCloneError`가 납니다.
+- 프로토타입 체인을 복사하지 않습니다. 클래스 인스턴스는 일반 객체가 되어 `instanceof`와 메서드를 잃습니다. private 필드도 복사되지 않습니다.
+- getter·setter와 프로퍼티 속성(읽기 전용 등)은 값만 남고 사라집니다.
+
+옛 방식인 `JSON.parse(JSON.stringify(v))`는 한계가 더 많습니다.
+
+```js
+const v = { u: undefined, n: NaN, d: new Date(0) }
+JSON.parse(JSON.stringify(v))
+// { n: null, d: '1970-01-01T00:00:00.000Z' }
+// u는 사라지고 NaN은 null, Date는 문자열이 됨
+```
+
+- Map과 Set은 빈 객체가 되고, BigInt와 순환 참조는 TypeError입니다.
+- 순수한 숫자·문자열·배열·객체만 담긴 데이터가 아니면 `structuredClone`을 씁니다.
+
+코딩테스트에서의 쓰임입니다.
+
+- 2차원 배열은 행마다 복사해야 합니다: `grid.map((row) => [...row])`. `[...grid]`는 행을 공유합니다.
+- 숫자만 든 1차원 배열은 `[...a]`나 `a.slice()`로 충분합니다. 깊은 복사는 비용이 크므로 재귀·시뮬레이션에서 매번 복사하면 시간 초과의 원인이 됩니다(자세히는 14편, 23편).
+
+## 값과 참조
+
+원시 값은 변수에 값 자체가 들어가고, 객체(배열·함수 포함)는 변수에 객체를 가리키는 참조가 들어갑니다. 대입과 인수 전달은 그 내용을 복사합니다. 객체는 참조가 복사되므로 두 변수가 같은 객체를 가리킵니다.
+
+```js
+let x = 1
+let y = x
+y = 2          // x는 그대로 1
+const a = [1]
+const b = a
+b.push(2)      // a도 [1, 2] (같은 배열)
+```
+
+- `===`는 원시 값이면 값을, 객체이면 참조를 비교합니다. 내용이 같아도 다른 배열이면 `false`입니다. `[1] === [1]`은 `false`입니다.
+- 배열의 내용을 비교하려면 길이를 비교한 뒤 원소를 순회하거나, 원소가 원시 값일 때만 `join`으로 문자열을 만들어 비교합니다.
+- 함수에 객체를 넘기면 참조가 복사되어 전달됩니다. 함수 안에서 내용을 바꾸면 밖에도 반영되고, 매개변수에 새 객체를 대입하면 밖에는 반영되지 않습니다.
+
+```js
+function change(obj, num) {
+  obj.a = 9    // 내용 변경: 밖에 반영
+  obj = { a: 7 } // 재대입: 밖에 반영 안 됨
+  num = 9      // 원시 값: 밖에 반영 안 됨
+}
+const o = { a: 1 }
+let n = 1
+change(o, n)   // o는 { a: 9 }, n은 1
+```
+
+**흔한 실수:** 같은 객체를 여러 칸에 넣는 것입니다. `Array(3).fill([])`는 같은 빈 배열 하나를 세 번 넣어서 한 칸에 `push`하면 세 칸이 모두 바뀝니다(자세히는 05편).
+
+## ?.와 ??로 기본값 처리
+
+옵셔널 체이닝 `?.`은 왼쪽이 `null` 또는 `undefined`이면 뒤를 실행하지 않고 `undefined`를 돌려줍니다. 널 병합 `??`는 왼쪽이 `null` 또는 `undefined`일 때만 오른쪽 값을 씁니다. 둘 다 ES2020입니다.
+
+```js
+const obj = { a: { b: 1 } }
+obj.a?.b      // 1
+obj.x?.b      // undefined (에러 없음)
+obj.x?.b.c    // undefined (뒤 전체를 건너뜀)
+obj.fn?.()    // undefined (함수가 없으면 호출 안 함)
+```
+
+세 가지 형태가 있습니다: `obj?.prop`, `obj?.[expr]`, `fn?.(args)`.
+
+- `?.`가 막는 것은 `null`·`undefined`뿐입니다. `0`, `''`, `false`는 정상 값으로 취급합니다.
+- 프로퍼티가 있는데 함수가 아니면 `fn?.()`도 TypeError입니다.
+- 대입의 왼쪽(`obj?.a = 1`)과 `new`에는 쓸 수 없습니다(SyntaxError).
+- 괄호로 감싸면 단락이 끊깁니다. `(obj.x?.a).b`는 TypeError입니다.
+
+`??`와 OR(`||`)의 차이는 0과 빈 문자열을 어떻게 다루느냐입니다.
+
+```js
+const count = 0
+count || 10   // 10 (0은 거짓이라 오른쪽 선택)
+count ?? 10   // 0 (0은 null이 아니므로 그대로)
+```
+
+- `??`를 `||`·`&&`와 괄호 없이 섞으면 SyntaxError입니다. `(a ?? b) || c`처럼 괄호로 묶습니다.
+- `??=`는 왼쪽이 `null`·`undefined`일 때만 대입합니다(ES2021).
+
+코딩테스트에서 자주 쓰는 형태입니다.
+
+```js
+const grid = [[1, 2], [3, 4]]
+grid[5]?.[0]         // undefined (행이 범위 밖이어도 안전)
+grid[5][0]           // TypeError
+const map = new Map()
+map.set('a', (map.get('a') ?? 0) + 1) // 빈도수 +1
+```
+
+격자에서 범위 밖 행을 읽으면 `undefined`가 나오고 그 `undefined`의 `[0]`을 읽으면 TypeError입니다. `grid[r]?.[c]`는 이를 피하지만 범위 검사를 명시하는 편이 더 분명합니다(자세히는 17편).
+
+## 클래스 기초
+
+클래스는 같은 모양의 객체를 만드는 틀입니다. 코딩테스트에서는 연결 리스트의 노드, 큐·덱·힙·유니온 파인드 같은 자료구조를 직접 구현할 때 씁니다.
+
+```js
+class Counter {
+  total = 0                  // 필드: 인스턴스마다 생기는 프로퍼티
+  #step                      // private 필드: 클래스 안에서만 접근
+  constructor(step) {        // 생성자: new 때 한 번 실행
+    this.#step = step
+  }
+  add() { this.total += this.#step }  // 메서드
+  get double() { return this.total * 2 } // getter
+  static zero() { return new Counter(0) } // 정적 메서드
+}
+const c = new Counter(2)
+c.add()
+c.total   // 2
+c.double  // 4
+```
+
+- `new`로 호출하면 새 객체를 만들고 생성자를 실행합니다. 생성자는 클래스에 하나만 둘 수 있습니다.
+- 메서드는 프로토타입에 한 번만 만들어져 모든 인스턴스가 공유합니다. 필드는 인스턴스마다 만들어집니다. 필드 선언은 ES2022입니다.
+- `#`이 붙은 private 필드는 클래스 밖에서 읽을 수 없고 클래스 본문에 미리 선언해야 합니다(ES2022).
+- `static` 멤버는 인스턴스가 아니라 클래스에 붙습니다. `Counter.zero()`로 호출합니다.
+- 클래스 선언은 `let`처럼 선언 전에 쓰면 ReferenceError입니다(TDZ).
+- `new` 없이 `Counter()`로 호출하면 TypeError입니다.
+- 클래스 본문은 항상 엄격 모드라서, 메서드를 변수에 빼서 호출하면 `this`가 `undefined`입니다. 콜백으로 넘길 때는 화살표 함수로 감싸거나 `bind`를 씁니다.
+
+```js
+class Node {
+  constructor(value) {
+    this.value = value
+    this.next = null    // 연결 리스트의 다음 노드
+  }
+}
+const head = new Node(1)
+head.next = new Node(2)
+head.next.value // 2
+```
+
+클래스가 없어도 객체 리터럴 `{ value, next }`로 같은 구조를 만들 수 있습니다. 노드가 수십만 개일 수 있으면 클래스나 배열 기반 구현을 비교해서 고릅니다(자세히는 21편).
+
+## 핵심 정리
+
+- `const`를 기본으로 쓰고 다시 대입이 필요한 변수만 `let`으로 선언하며, `let`·`const`는 블록 스코프이고 선언 전에 읽으면 ReferenceError입니다.
+- 문자열이 섞인 `+`는 이어 붙이기이므로 입력은 `Number()`로 바꾸고, 비교는 `===`를 쓰며, 거짓 값은 여덟 가지뿐입니다.
+- `%`의 부호는 왼쪽 값을 따르고 `/`는 정수 몫이 아닙니다.
+- 스프레드와 `slice`는 얕은 복사이고, 중첩 데이터의 독립 복사는 `structuredClone`이며 함수와 프로토타입은 복제하지 못합니다.
+- 객체와 배열은 참조로 전달되어 함수 안에서 바꾸면 밖에 반영되고, `fill([])`처럼 같은 객체를 여러 칸에 넣으면 모두 같이 바뀝니다.
+- `?.`는 `null`·`undefined`만 막고 `??`는 `null`·`undefined`일 때만 기본값을 쓰므로 0과 빈 문자열을 지킵니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="다음 중 결과가 true가 아닌 것은?"
+  options={['null == undefined', '0 == false', 'NaN === NaN', '[1] !== [1]']}
+  correctAnswer={3}
+  explanation="NaN은 자기 자신과도 같지 않아서 NaN === NaN은 false입니다. null == undefined는 느슨한 비교에서 true이고, 0 == false도 형변환 후 true입니다. 서로 다른 두 배열 리터럴은 참조가 달라서 === 비교가 false이므로 그 부정은 true입니다."
+  optionExplanations={['느슨한 비교에서 null과 undefined만 서로 같다고 취급되어 true입니다.', '불리언이 숫자 0으로 바뀐 뒤 비교되어 true입니다.', 'NaN은 어떤 값과도 같지 않으므로 false입니다. 확인은 Number.isNaN을 씁니다.', '서로 다른 배열 객체의 참조 비교는 false이고 그 부정은 true입니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="const list = Array(3).fill([]); list[0].push(1); 를 실행한 뒤 list의 값은?"
+  options={['[[1], [], []]', '[[1], [1], [1]]', '[[], [], []]', 'TypeError가 발생한다']}
+  correctAnswer={2}
+  explanation="fill은 같은 빈 배열 하나의 참조를 세 칸에 모두 넣습니다. 한 칸에 push하면 세 칸이 같은 배열을 가리키므로 모두 [1]이 됩니다. 칸마다 새 배열이 필요하면 Array.from이나 map으로 각각 만듭니다."
+  optionExplanations={['각 칸이 별도 배열이라면 이 결과지만 fill은 같은 참조를 넣습니다.', '세 칸이 하나의 배열을 공유하므로 모든 칸에 반영됩니다.', 'push가 실행되었으므로 빈 배열로 남지 않습니다.', 'fill과 push 모두 유효한 호출이라 에러가 없습니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="const n = 0; 에 대해 n || 10 과 n ?? 10 의 결과를 차례로 나열한 것은?"
+  options={['0, 0', '10, 10', '0, 10', '10, 0']}
+  correctAnswer={4}
+  explanation="OR 연산자는 왼쪽이 거짓(0 포함)이면 오른쪽을 선택해 10이 됩니다. 널 병합 연산자는 왼쪽이 null 또는 undefined일 때만 오른쪽을 선택하므로 0이 그대로 남습니다."
+  optionExplanations={['OR은 0을 거짓으로 보고 오른쪽을 선택하므로 첫 결과는 10입니다.', '널 병합은 0을 유효한 값으로 보므로 두 번째 결과는 0입니다.', '두 연산자의 결과가 서로 바뀌었습니다.', 'OR은 10, 널 병합은 0입니다.']}
+/>
+
+## 참고 자료
+
+- [TC39 — Finished Proposals](https://github.com/tc39/proposals/blob/main/finished-proposals.md)
+- [MDN — typeof](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/typeof)
+- [MDN — Optional chaining (?.)](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Optional_chaining)
+- [MDN — Classes](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Classes)
+- [MDN — structuredClone()](https://developer.mozilla.org/en-US/docs/Web/API/Window/structuredClone)
+- [MDN — The structured clone algorithm](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Structured_clone_algorithm)

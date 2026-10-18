@@ -1,0 +1,529 @@
+---
+title: '36. 스프레드 문법'
+description: '호출·배열·객체 리터럴에서 ...이 하는 일, Rest와의 구분, 얕은 복사의 범위와 복사되지 않는 것, 인수 개수 한계를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 스프레드 문법이 세 자리에서 각각 무엇을 펼치는지 구분하고, 복사되는 범위와 복사되지 않는 것을 설명하며, Rest와 위치로 구별할 수 있습니다.
+</Callout>
+
+## 개념
+
+스프레드 문법(spread syntax)은 `...` 뒤의 값을 낱개로 펼쳐, 여러 값이 올 수 있는 자리에 넣는 문법입니다. 원본은 바뀌지 않습니다. 쓸 수 있는 자리는 세 곳입니다.
+
+| 자리 | 펼치는 방식 | 대상 | 도입 |
+|------|-------------|------|------|
+| 호출의 인수 목록 | 이터레이션 프로토콜 | 이터러블만 | ES2015 |
+| 배열 리터럴 | 이터레이션 프로토콜 | 이터러블만 | ES2015 |
+| 객체 리터럴 | 자기 열거 가능 프로퍼티 복사 | 거의 모든 값 | ES2018 |
+
+이터러블은 `Symbol.iterator` 메서드를 가진 값입니다. 배열, 문자열, Set, Map, `arguments`가 해당하고 일반 객체는 해당하지 않습니다(자세히는 35편).
+
+```js
+const a = [1, 2]
+console.log(...a)               // 1 2 (인수 두 개)
+const b = [0, ...a, 3]          // [0, 1, 2, 3]
+const c = { ...{ x: 1 }, y: 2 } // { x: 1, y: 2 }
+```
+
+- 호출과 배열 리터럴에서는 이터레이터가 돌려주는 값을 순서대로 꺼냅니다. 이터러블이 아니면 TypeError입니다.
+- 객체 리터럴에서는 이터러블이 필요 없습니다. 원본의 자기 열거 가능 프로퍼티를 읽어 새 객체에 데이터 프로퍼티로 정의합니다. `null`과 `undefined`는 에러 없이 건너뜁니다.
+- `...`은 연산자가 아니라 문법입니다. 단독으로는 값을 만들지 못해서 위 세 자리 밖에서는 SyntaxError입니다.
+
+```js
+const d = ...a   // SyntaxError
+const e = (...a) // SyntaxError
+```
+
+- 같은 `...` 기호가 Rest 문법에도 쓰입니다. 하는 일은 반대입니다(아래 "스프레드와 Rest의 차이").
+
+## 함수 호출문에서의 스프레드
+
+호출의 인수 목록에 `...iterable`을 쓰면 이터러블의 요소가 인수로 하나씩 전달됩니다.
+
+```js
+const nums = [3, 9, 4]
+Math.max(...nums)          // 9
+Math.max(1, ...nums, 10)   // 10
+Math.max(...nums, ...[20]) // 20
+```
+
+- 일반 인수와 섞어 쓸 수 있고, 몇 번이든 어느 위치에든 쓸 수 있습니다. 인수는 왼쪽에서 오른쪽 순서로 평가되며, 스프레드된 이터러블은 호출 전에 끝까지 순회됩니다.
+- 빈 이터러블은 인수 0개가 됩니다. `Math.max(...[])`는 `-Infinity`이고 `Math.min(...[])`는 `Infinity`입니다.
+- 이터러블이 아니면 TypeError입니다.
+
+```js
+f(...undefined) // TypeError
+f(...123)       // TypeError
+f(...{ a: 1 })  // TypeError
+```
+
+- 호출 끝의 쉼표는 스프레드 뒤에도 허용됩니다. `Math.max(...nums,)`는 유효합니다.
+
+스프레드는 호출 형태를 가리지 않고 쓸 수 있습니다.
+
+| 호출 형태 | 예 |
+|-----------|----|
+| 함수 | `f(...args)` |
+| 메서드(this 유지) | `obj.m(...args)` |
+| 생성자 | `new Date(...[2026, 9, 5])` |
+| 부모 생성자 | `super(...args)` |
+| 옵셔널 호출 | `f?.(...args)` |
+
+ES5에서는 배열을 인수로 펼치려면 `f.apply(null, args)`를 썼습니다. 스프레드는 `apply`를 대체합니다. `apply`로는 `new` 호출을 표현할 수 없었지만 `new F(...args)`는 가능합니다. `this`를 지정해야 하면 `f.call(ctx, ...args)`로 씁니다(자세히는 21편).
+
+```js
+const arr = [1]
+arr.push(...[2, 3])  // arr는 [1, 2, 3]
+String.fromCharCode(...[72, 105]) // 'Hi'
+```
+
+**흔한 실수:** 스프레드를 빼먹는 것입니다.
+
+```js
+Math.max(nums)    // ❌ NaN (배열이 숫자로 변환되지 않음)
+Math.max(...nums) // ✅ 9
+```
+
+원소가 하나뿐인 배열은 `[5]`가 문자열 `'5'`를 거쳐 5로 변환되어 `Math.max([5])`가 우연히 5가 됩니다. 이 때문에 소량의 데이터로 테스트하면 실수를 놓칩니다.
+
+## 배열 리터럴에서의 스프레드
+
+배열 리터럴 안의 `...iterable`은 요소를 그 자리에 하나씩 넣습니다. 결과는 항상 새 배열이고 원본은 바뀌지 않습니다.
+
+### 결합
+
+```js
+const a = [1, 2]
+const b = [3, 4]
+const merged = [...a, ...b]   // [1, 2, 3, 4]
+const pushed = [...a, 'end']  // [1, 2, 'end']
+const front = ['top', ...a]   // ['top', 1, 2]
+```
+
+### 삽입
+
+중간에 끼워 넣을 때는 `slice`로 앞뒤를 나눠 스프레드합니다.
+
+```js
+const list = [1, 2, 3, 4]
+const i = 2
+const next = [...list.slice(0, i), 'x', ...list.slice(i)]
+// [1, 2, 'x', 3, 4]
+```
+
+`list.toSpliced(i, 0, 'x')`도 같은 결과를 냅니다. ES2023에 추가되었고 원본을 바꾸지 않습니다(자세히는 28편).
+
+### 복사
+
+```js
+const src = [1, 2, 3]
+const copy = [...src]
+copy === src // false (다른 배열)
+```
+
+복사는 얕은 복사입니다. 요소가 객체이면 참조가 그대로 복사됩니다(아래 "얕은 복사").
+
+### concat과의 차이
+
+`concat`도 배열을 결합하지만 인수 처리 규칙이 다릅니다.
+
+| 인수 | `[...a, ...x]` | `a.concat(x)` |
+|------|----------------|---------------|
+| 배열 | 요소로 펼침 | 요소로 펼침(한 단계만) |
+| 문자열·Set 같은 배열 아닌 이터러블 | 요소로 펼침 | 값 하나로 추가 |
+| 이터러블이 아닌 값 | TypeError | 값 하나로 추가 |
+| 유사 배열 객체 | TypeError | 객체 하나로 추가 |
+| 빈 칸이 있는 배열 `[1, , 3]` | 빈 칸을 `undefined`로 채움(배열 이터레이터가 그렇게 돌려줌) | 빈 칸 유지 |
+
+`concat`이 인수를 펼칠지는 `Symbol.isConcatSpreadable`로 바꿀 수 있습니다(자세히는 34편). 이름은 비슷하지만 스프레드 문법과 관계없는 별도 기능입니다.
+
+**흔한 실수:**
+
+- 결합하려는데 `[a, b]`로 쓰면 배열 두 개를 요소로 가진 중첩 배열이 됩니다. 펼치려면 `[...a, ...b]`입니다.
+- `reduce` 안에서 `[...acc, v]`로 누적하면 반복할 때마다 `acc` 전체를 복사해서 전체 비용이 요소 수의 제곱에 비례합니다. 변환이면 `map`을, 누적이면 `acc.push(v)` 후 `acc`를 반환합니다.
+- 조건부 요소를 `[...(cond && ['x'])]`로 쓰면 `cond`가 `false`일 때 TypeError입니다. `false`는 이터러블이 아니기 때문입니다. `[...(cond ? ['x'] : [])]`로 씁니다.
+
+## 이터러블을 배열로 변환
+
+`[...iterable]`은 이터러블을 끝까지 순회해 값을 배열에 모읍니다. 이터레이션 프로토콜을 따르는 값이면 무엇이든 배열로 바꿀 수 있습니다.
+
+```js
+const m = new Map([['a', 1], ['b', 2]])
+const s = new Set([1, 1, 2])
+const c1 = [...'abc']      // ['a', 'b', 'c']
+const c2 = [...s]          // [1, 2] (중복 제거)
+const c3 = [...m]          // [['a', 1], ['b', 2]]
+const c4 = [...m.keys()]   // ['a', 'b']
+const c5 = [...m.values()] // [1, 2]
+```
+
+- `arguments`와 제너레이터 객체도 이터러블이라서 `[...arguments]`, `[...gen()]`이 동작합니다.
+- Map을 펼치면 `[키, 값]` 쌍의 배열이 됩니다. `keys()`·`values()`·`entries()`가 돌려주는 이터레이터도 이터러블이므로 펼칠 수 있습니다.
+- 변환 결과는 진짜 배열이라 `map`, `filter` 같은 배열 메서드를 쓸 수 있습니다.
+
+문자열은 UTF-16 코드 유닛이 아니라 코드 포인트 단위로 펼쳐집니다.
+
+```js
+const s = '😀a'
+const units = s.length       // 3 (UTF-16 코드 유닛)
+const points = [...s].length // 2 (코드 포인트)
+```
+
+결합 문자나 이모지 조합은 코드 포인트가 여러 개라서 사용자가 보는 글자 수와 달라질 수 있습니다(자세히는 33편).
+
+이터레이터는 한 번 소비하면 다시 쓸 수 없습니다.
+
+```js
+function* gen() { yield 1; yield 2 }
+const it = gen()
+const first = [...it]  // [1, 2]
+const second = [...it] // []
+```
+
+이터레이터 객체는 자기 자신을 돌려주는 이터러블이라서 첫 스프레드가 끝까지 소비합니다. 무한 이터러블은 순회가 끝나지 않으므로 `take` 같은 헬퍼로 길이를 제한한 뒤 펼칩니다(자세히는 35편). ES2025의 `Iterator.prototype.toArray()`는 이터레이터 객체를 바로 배열로 만듭니다.
+
+`Array.from`과 비교하면 다음과 같습니다.
+
+| 항목 | `[...x]` | `Array.from(x)` |
+|------|----------|-----------------|
+| 이터러블 | 변환 | 변환 |
+| 유사 배열(이터러블 아님) | TypeError | 변환 |
+| 변환 함수 | 없음 | 두 번째 인수로 전달 |
+| 이터러블도 유사 배열도 아님 | TypeError | 빈 배열 |
+
+```js
+const like = { length: 2, 0: 'a', 1: 'b' }
+Array.from(like)      // ['a', 'b']
+Array.from(like, (c) => c + c) // ['aa', 'bb']
+```
+
+**흔한 실수:** 일반 객체를 `[...obj]`로 펼치는 것입니다. 일반 객체는 이터러블이 아니라서 TypeError입니다. 키·값·쌍의 배열이 필요하면 `Object.keys`, `Object.values`, `Object.entries`를 씁니다(자세히는 18편).
+
+## 객체 리터럴에서의 스프레드
+
+객체 리터럴 안의 `...source`는 source의 자기 열거 가능 프로퍼티를 새 객체에 복사합니다(ES2018). 문자열 키와 심벌 키가 모두 대상입니다.
+
+```js
+const a = { x: 1, y: 2 }
+const copy = { ...a }               // { x: 1, y: 2 }
+const merged = { ...a, y: 9, z: 3 } // { x: 1, y: 9, z: 3 }
+```
+
+### 병합과 덮어쓰기
+
+같은 키가 여러 번 나오면 뒤에 쓴 값이 남습니다. 스프레드의 위치가 결과를 정합니다.
+
+```js
+const o1 = { ...{ a: 1, b: 2 }, a: 9 } // { a: 9, b: 2 }
+const o2 = { a: 9, ...{ a: 1, b: 2 } } // { a: 1, b: 2 }
+const o3 = { ...{ a: 1 }, ...{ a: undefined } }
+// { a: undefined }
+```
+
+- 뒤쪽 값이 `undefined`여도 앞의 값을 덮어씁니다. 값이 없는 키를 건너뛰는 규칙은 없습니다.
+- 이미 있는 키는 처음 자리를 유지하고 값만 바뀝니다. `{ ...{ b: 1, a: 2 }, b: 3 }`의 키 순서는 `b`, `a`입니다.
+- 키 순서는 일반 규칙을 따릅니다. 정수 형태의 키가 오름차순으로 먼저 오고, 그다음 문자열 키가 만들어진 순서로 옵니다(자세히는 18편).
+- 기본값과 사용자 옵션을 합칠 때는 기본값을 앞에 둡니다. 순서를 바꾸면 기본값이 옵션을 덮어씁니다.
+
+```js
+const defaults = { theme: 'light', size: 12 }
+const options = { size: 16 }
+const config = { ...defaults, ...options }
+// { theme: 'light', size: 16 }
+```
+
+### 불변 갱신
+
+원본을 바꾸지 않고 일부만 바꾼 새 객체를 만들 때 씁니다. 바꿀 경로의 각 단계를 스프레드합니다.
+
+```js
+const state = { user: { name: 'Kim', age: 20 }, count: 0 }
+const next = {
+  ...state,
+  count: state.count + 1,
+  user: { ...state.user, age: 21 },
+}
+// state는 그대로. next.user는 새 객체
+```
+
+### 조건부 프로퍼티
+
+```js
+const isDev = false
+const opts = {
+  mode: 'prod',
+  ...(isDev && { debug: true }),
+}
+// { mode: 'prod' }
+```
+
+`false`, `0`, `''`, `null`, `undefined`, `NaN`은 펼쳐도 프로퍼티를 만들지 않으므로 `조건 && 객체` 형태가 안전합니다. 배열 리터럴에서는 같은 방식이 통하지 않습니다.
+
+### 펼칠 수 있는 값
+
+| 값 | `{ ...v }`의 결과 |
+|----|-------------------|
+| 일반 객체 | 자기 열거 가능 프로퍼티 |
+| `null`, `undefined` | 빈 객체(에러 아님) |
+| 문자열 | 인덱스 키 객체. `{ ...'ab' }`는 `{ '0': 'a', '1': 'b' }` |
+| 배열 | 인덱스 키 객체. `{ ...[1, 2] }`는 `{ '0': 1, '1': 2 }` |
+| 숫자, 불리언, 심벌, BigInt | 빈 객체 |
+
+값을 객체로 변환한 뒤 읽기 때문입니다. 문자열 래퍼 객체만 열거 가능한 인덱스 프로퍼티를 가집니다.
+
+### Object.assign과의 차이
+
+| 항목 | `{ ...a }` | `Object.assign({}, a)` |
+|------|------------|------------------------|
+| 도입 | ES2018 | ES2015 |
+| 대상 | 항상 새 객체 | 첫 인수 객체를 변경 |
+| 대상에 같은 이름의 setter가 있을 때 | 호출하지 않고 데이터 프로퍼티로 덮어씀 | setter 호출 |
+| `JSON.parse`가 만든 own `'__proto__'` 키 | own 프로퍼티로 정의 | 프로토타입 설정자 호출 |
+
+복사 범위는 같습니다. 자기 열거 가능한 문자열·심벌 키만 복사하고 getter는 호출됩니다(자세히는 17편, 18편).
+
+**흔한 실수:**
+
+- 내장 객체를 스프레드로 복사하는 것입니다. Map, Set, Date는 데이터를 프로퍼티가 아니라 내부 슬롯에 담고 있어서 빈 객체가 됩니다(자세히는 14편). 각 생성자로 복사합니다.
+
+```js
+const m = new Map([[1, 2]])
+const d = new Date(0)
+const bad = { ...m, ...d } // {} (둘 다 빈 객체)
+const m2 = new Map(m)      // Map { 1 => 2 }
+const d2 = new Date(d)     // 같은 시각의 새 Date
+```
+
+- 배열을 `{ ...arr }`로 복사하면 배열이 아니라 인덱스 키 객체가 됩니다. `Array.isArray`가 `false`입니다.
+- 함수를 펼치면 직접 붙인 프로퍼티만 복사되고, 보통은 빈 객체입니다. `name`과 `length`는 열거 불가라서 빠집니다.
+
+## 스프레드와 Rest의 차이
+
+스프레드와 Rest는 같은 `...` 기호를 쓰지만 방향이 반대입니다. 스프레드는 묶음을 낱개로 펼치고, Rest는 낱개를 묶음으로 모읍니다.
+
+| 항목 | 스프레드 | Rest |
+|------|----------|------|
+| 하는 일 | 이터러블·객체를 낱개로 펼침 | 남은 값을 모아 하나로 만듦 |
+| 위치 | 값을 쓰는 자리: 호출 인수, 배열·객체 리터럴 | 받는 자리: 함수 매개변수, 구조 분해 패턴 |
+| 개수와 위치 | 몇 번이든, 어디든 | 한 번만, 항상 마지막 |
+| 결과 | 인수, 요소, 프로퍼티 | 배열(매개변수·배열 패턴) 또는 객체(객체 패턴) |
+
+```js
+function sum(...nums) {        // Rest: 인수를 배열로 모음
+  return nums.reduce((a, b) => a + b, 0)
+}
+const args = [1, 2, 3]
+sum(...args)                   // 6 (스프레드: 인수로 펼침)
+const [head, ...tail] = args   // Rest: head 1, tail [2, 3]
+const { x, ...others } = { x: 1, y: 2 }
+// Rest: others는 { y: 2 }
+```
+
+- 구별 기준은 위치입니다. 함수 매개변수 목록이나 선언·대입 왼쪽의 패턴에 있으면 Rest이고, 값을 만드는 식에 있으면 스프레드입니다.
+- Rest는 마지막이어야 합니다. `function f(...a, b) {}`와 `const [...a, b] = x`는 SyntaxError입니다. Rest 뒤에는 쉼표도 올 수 없어서 `function f(...a,) {}`도 SyntaxError입니다.
+- 객체 Rest는 스프레드와 같은 규칙으로 복사합니다. 이미 꺼낸 키를 뺀 나머지 중 자기 열거 가능 프로퍼티만 담깁니다.
+- Rest 매개변수와 구조 분해는 각각 27편, 37편에서 다룹니다.
+
+**흔한 실수:** 둘을 왕복하는 래퍼에서 헷갈리는 것입니다. 받을 때는 Rest, 넘길 때는 스프레드입니다.
+
+```js
+function wrap(...args) {   // Rest: 받음
+  return target(...args)   // 스프레드: 넘김
+}
+```
+
+## 얕은 복사
+
+스프레드는 최상위 한 단계만 새로 만듭니다. 원시 값은 값이 복사되고, 객체는 참조가 복사되므로 중첩된 객체와 배열은 원본과 복사본이 공유합니다(얕은 복사와 깊은 복사는 10편).
+
+```js
+const user = {
+  name: 'Kim',
+  tags: ['a'],
+  addr: { city: 'Seoul' },
+}
+const copy = { ...user }
+copy.name = 'Lee'        // user.name은 그대로 'Kim'
+copy.tags.push('b')      // user.tags도 ['a', 'b']
+copy.addr.city = 'Busan' // user.addr.city도 'Busan'
+```
+
+배열도 같습니다. `[...users]`는 새 배열이지만 요소인 객체는 공유합니다.
+
+```js
+const users = [{ n: 1 }]
+const cp = [...users]
+cp[0].n = 7
+users[0].n // 7
+```
+
+해결은 바꿀 경로만 단계마다 스프레드로 새로 만드는 것입니다. 바꾸지 않는 부분은 참조를 공유해도 안전합니다.
+
+```js
+const updated = {
+  ...user,
+  addr: { ...user.addr, city: 'Busan' },
+}
+// updated.addr !== user.addr
+// updated.tags === user.tags (공유)
+```
+
+배열 요소 하나만 갱신할 때는 `map`과 함께 씁니다.
+
+```js
+const renamed = users.map((u) =>
+  u.id === 2 ? { ...u, n: 'q' } : u,
+)
+// id가 2인 요소만 새 객체, 나머지는 같은 객체
+```
+
+독립된 복사본이 필요하면 `structuredClone`을 씁니다. 호스트 API이고 함수와 심벌을 복제하지 못합니다(자세히는 10편).
+
+## 객체 스프레드가 복사하지 않는 것
+
+객체 스프레드는 원본의 자기 열거 가능 프로퍼티를 읽고, 그 값을 새 객체의 일반 데이터 프로퍼티로 만듭니다. 값 이외의 정보는 가져오지 않습니다.
+
+| 복사되지 않는 것 | 결과 |
+|------------------|------|
+| 프로토타입 | 복사본의 프로토타입은 `Object.prototype`이다 |
+| 상속받은 프로퍼티 | 빠진다. 클래스 본문의 메서드와 getter가 여기에 해당한다 |
+| 열거 불가 프로퍼티 | 빠진다 |
+| 접근자 프로퍼티 | getter가 호출되고 그 반환값이 데이터 프로퍼티가 된다. setter는 사라진다 |
+| 프로퍼티 어트리뷰트 | writable·enumerable·configurable이 모두 true가 된다. 동결 상태도 풀린다 |
+| private 필드 | 프로퍼티가 아니라서 복사되지 않는다 |
+
+### 프로토타입
+
+클래스 인스턴스를 스프레드하면 일반 객체가 됩니다. 프로토타입에 있던 메서드와 `instanceof` 관계를 잃습니다.
+
+```js
+class Pt {
+  constructor() { this.x = 1 }
+  move() {}
+}
+const p = { ...new Pt() }
+p instanceof Pt // false
+p.move          // undefined
+p               // { x: 1 }
+```
+
+클래스 필드로 만든 화살표 함수는 자기 프로퍼티라서 복사됩니다. 다만 그 함수 안의 `this`는 계속 원본 인스턴스를 가리킵니다(자세히는 24편).
+
+### 접근자
+
+```js
+const src = {
+  _n: 1,
+  get n() { return this._n },
+  set n(v) { this._n = v },
+}
+const cp = { ...src }
+Object.getOwnPropertyDescriptor(cp, 'n')
+// { value: 1, writable: true,
+//   enumerable: true, configurable: true }
+```
+
+- 복사 중에 getter가 실행되고 `this`는 원본입니다. getter가 에러를 던지면 스프레드도 에러를 던집니다.
+- 복사본의 `n`은 데이터 프로퍼티라서 `cp.n = 5`를 해도 `cp._n`은 바뀌지 않습니다.
+
+### 프로퍼티 어트리뷰트와 동결
+
+동결된 객체를 스프레드하면 복사본은 동결되지 않습니다(자세히는 14편).
+
+```js
+const frozen = Object.freeze({ k: 1 })
+const thawed = { ...frozen }
+thawed.k = 2                  // 허용됨
+Object.isFrozen(thawed)       // false
+```
+
+### 어트리뷰트와 프로토타입까지 복제하기
+
+`Object.getOwnPropertyDescriptors`로 디스크립터를 통째로 가져와 같은 프로토타입으로 새로 만듭니다.
+
+```js
+const clone = Object.create(
+  Object.getPrototypeOf(src),
+  Object.getOwnPropertyDescriptors(src),
+)
+// 열거 불가 프로퍼티, getter·setter, 프로토타입 모두 유지
+```
+
+이 방법도 private 필드와 내부 슬롯은 복제하지 못합니다. private 필드가 있는 클래스의 인스턴스를 이렇게 복제하면 `#x`를 읽는 메서드가 TypeError를 던집니다. 그런 객체는 클래스가 직접 복사 메서드를 제공해야 합니다.
+
+## 인수 개수 한계
+
+함수 호출에 넘길 수 있는 인수 개수에는 엔진별 상한이 있습니다. ECMAScript는 상한을 정하지 않고 초과했을 때의 동작도 정하지 않습니다. 대부분의 엔진은 예외를 던집니다.
+
+| 구분 | 한계 |
+|------|------|
+| JavaScriptCore | 65536개로 고정(MDN) |
+| V8 | 호출 스택 크기에 좌우됨. `RangeError: Maximum call stack size exceeded`로 나타남 |
+
+V8에는 고정 수치가 없습니다. Node.js 24 기본 설정에서 직접 실험하면 125,000개는 통과하고 130,000개에서 RangeError가 났습니다. 호출 위치의 스택 사용량에 따라 달라지므로 기준값으로 쓰면 안 됩니다.
+
+- 영향을 받는 코드: 호출의 스프레드 `f(...big)`, `new F(...big)`와 `f.apply(null, big)`.
+- 영향을 받지 않는 코드: 배열·객체 리터럴의 스프레드 `[...big]`, `{ ...big }`는 인수 목록을 만들지 않습니다. `concat`과 반복문도 마찬가지입니다.
+
+```js
+const big = new Array(500_000).fill(1)
+Math.max(...big) // RangeError
+big.reduce((m, v) => (v > m ? v : m), -Infinity) // 1
+```
+
+배열에 대량의 요소를 덧붙일 때는 나눠서 `push`하거나 새 배열 리터럴을 만듭니다.
+
+```js
+const dst = []
+for (let i = 0; i < big.length; i += 10_000) {
+  dst.push(...big.slice(i, i + 10_000))
+}
+// dst.length는 500000. dst.push(...big)은 RangeError
+// 또는 const all = [...dst, ...big]
+```
+
+**흔한 실수:** 크기를 모르는 데이터(서버 응답, 파일 내용)에 `Math.max(...data)`나 `push(...data)`를 쓰는 것입니다. 개발 중 소량으로 통과한 코드가 운영 데이터에서 실패합니다. 에러 메시지가 재귀 호출 오류처럼 보여서 원인을 찾기 어렵습니다.
+
+## 핵심 정리
+
+- 스프레드는 호출의 인수 목록, 배열 리터럴, 객체 리터럴 세 자리에서만 쓰는 문법이며 원본을 바꾸지 않습니다.
+- 호출과 배열 리터럴은 이터러블만 받고(일반 객체는 TypeError), 객체 리터럴은 거의 모든 값을 받으며 `null`과 `undefined`는 빈 객체로 처리합니다.
+- 같은 키는 뒤에 쓴 값이 남고, 뒤쪽 `undefined`도 앞의 값을 덮어씁니다.
+- 스프레드는 얕은 복사이며, 객체 스프레드는 자기 열거 가능 프로퍼티의 값만 가져와 프로토타입, 접근자, 프로퍼티 어트리뷰트를 잃습니다.
+- 매개변수·구조 분해 패턴에서 모으는 `...`은 Rest이고, 값을 쓰는 자리에서 펼치는 `...`은 스프레드입니다.
+- 호출 인수의 스프레드에는 엔진별 개수 한계가 있어서 큰 배열에는 `reduce`나 분할 호출을 씁니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="다음 중 TypeError가 발생하는 코드는?"
+  options={['const a = { ...null }', 'const b = [...new Set([1])]', 'const c = [...{ x: 1 }]', 'const d = Math.max(...[])']}
+  correctAnswer={3}
+  explanation="배열 리터럴의 스프레드는 이터러블만 받는데 일반 객체에는 Symbol.iterator가 없어 TypeError입니다. 객체 리터럴의 스프레드는 null을 빈 객체로 처리하고, Set은 이터러블이며, Math.max에 인수를 0개 넘기면 에러 없이 -Infinity를 반환합니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="const base = { a: 1, b: 2 }; const r = { ...base, b: 9, ...{ c: 3, a: undefined } }; 에서 r의 값은?"
+  options={['{ a: 1, b: 9, c: 3 }', '{ a: undefined, b: 9, c: 3 }', '{ b: 9, c: 3 }', 'TypeError가 발생한다']}
+  correctAnswer={2}
+  explanation="같은 키는 뒤에 쓴 값이 남습니다. b는 명시한 9가 base의 2를 덮어쓰고, a는 마지막 스프레드의 undefined가 base의 1을 덮어씁니다. undefined 값도 건너뛰지 않으므로 프로퍼티 a가 undefined로 남습니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="const a = { n: 1, list: [1] }; const b = { ...a }; b.n = 2; b.list.push(2); 를 실행한 뒤 a의 값은?"
+  options={['{ n: 1, list: [1] }', '{ n: 2, list: [1, 2] }', '{ n: 1, list: [1, 2] }', '{ n: 2, list: [1] }']}
+  correctAnswer={3}
+  explanation="스프레드는 얕은 복사입니다. 원시 값인 n은 값이 복사되어 b.n을 바꿔도 a.n은 1입니다. list는 배열의 참조가 복사되어 a와 b가 같은 배열을 가리키므로 b.list.push(2)가 a.list에도 반영됩니다."
+/>
+
+## 참고 자료
+
+- [MDN — Spread syntax (...)](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Spread_syntax)
+- [MDN — Function.prototype.apply() (인수 개수 한계)](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Function/apply)
+- [MDN — Rest parameters](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Functions/rest_parameters)
+- [ECMA-262 — CopyDataProperties](https://tc39.es/ecma262/#sec-copydataproperties)
+- [MDN — Array.prototype.concat()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/concat)

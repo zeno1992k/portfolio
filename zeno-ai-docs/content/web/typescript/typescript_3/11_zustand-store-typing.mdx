@@ -1,0 +1,67 @@
+---
+title: '11. Zustand 스토어 타이핑'
+description: 'useUiStore를 create의 커링 호출 패턴으로 타이핑하고 persist 미들웨어에서도 타입을 유지한다'
+---
+
+## 개념 정리
+
+지금까지 `store/useUiStore.js`는 자바스크립트로 남아 있었습니다. 10편에서 `DataTable`에 정렬 상태(`sortBy`, `setSort`)를 연결할 때, 스토어가 아직 타입이 없어 편집기가 그 값들의 정확한 모양을 보여주지 못했던 것을 기억할 것입니다.
+
+### `create<State>()(...)`가 두 번 호출되는 이유
+
+일반 함수라면 `create<State>(config)`처럼 한 번만 호출해도 될 것 같지만, Zustand는 미들웨어(`persist`, `devtools` 등)를 조합할 때 `set`·`get`의 타입을 정확히 추론하기 위해 **커링**(curried call) 형태를 씁니다.
+
+```ts
+// State만 먼저 확정하고
+create<UiState>()
+// 그 결과를 실제 스토어 정의(미들웨어 포함)에 적용한다
+(persist((set) => ({ ... }), { name: '...' }))
+```
+
+`create<UiState>()`처럼 빈 괄호로 한 번 호출해 타입 매개변수 `UiState`를 먼저 고정합니다. 그렇게 하지 않고 `create<UiState>(persist(...))`처럼 한 번에 호출하면, TypeScript가 미들웨어 체인 전체의 타입을 한 번에 추론해야 해서 `persist`가 감싼 스토어의 타입이 정확히 맞물리지 않는 경우가 생깁니다.
+
+### selector는 따로 타입을 쓰지 않는다
+
+스토어가 `create<UiState>()(...)`로 만들어지면, `useUiStore`가 반환하는 값의 타입이 이미 `UiState`로 확정됩니다. `useUiStore((state) => state.statusFilter)`라고 쓰면 `state`의 타입이 자동으로 `UiState`가 되고, 반환값의 타입도 `UiState['statusFilter']`로 자동 추론됩니다. selector 함수 매개변수에 타입을 직접 써줄 필요가 없습니다.
+
+### `persist`의 `partialize`도 타입이 맞아야 한다
+
+`partialize` 옵션은 저장소에 실제로 남길 부분 상태를 고릅니다. 반환값의 타입은 전체 상태의 부분집합(`Partial<UiState>`에 해당하는 형태)이어야 하고, 존재하지 않는 필드를 반환하면 오류가 납니다.
+
+## 자주 하는 실수
+
+| 증상 | 원인 | 고치는 법 |
+|---|---|---|
+| `create<UiState>(persist(...))`처럼 한 번만 호출해 `set` 타입이 어긋남 | 커링 호출(`create<UiState>()(...)`)을 빠뜨림 | `persist` 등 미들웨어를 쓸 때는 빈 괄호를 한 번 더 붙인다 |
+| selector 콜백에 `(state: UiState) => ...`처럼 타입을 직접 씀 | `create<UiState>()`로 이미 확정된 타입을 다시 반복함 | 타입 매개변수를 스토어 생성 시점에만 쓰고, selector에서는 추론에 맡긴다 |
+| `partialize`가 반환한 객체 필드에 오타가 있어도 저장은 되는 것처럼 보임 | `partialize`의 반환 타입을 검사하지 않고 넘어감 | 반환 객체의 각 필드가 `UiState`에 실제로 존재하는 이름인지 편집기 경고로 확인한다 |
+
+## 확인 문제
+
+<Quiz
+  questionNumber={1}
+  question={"persist 같은 미들웨어를 쓸 때 create를 create(State)()(...)처럼 두 번 호출하는 이유는"}
+  options={["런타임에서 스토어를 두 번 초기화하기 위해서","상태 타입을 먼저 고정한 뒤 미들웨어를 포함한 스토어 정의의 타입을 정확히 추론하게 하기 위해서","persist 미들웨어가 두 번 호출되는 함수만 허용하기 때문에","리렌더 횟수를 줄이기 위해서"]}
+  correctAnswer={2}
+  explanation={"빈 괄호로 먼저 State 타입 매개변수를 고정하는 커링 호출은, 미들웨어가 감싼 스토어 정의에서 set·get의 타입을 정확히 추론하기 위한 패턴입니다."}
+/>
+
+<Quiz
+  questionNumber={2}
+  question={"useUiStore에 selector 콜백을 넘겨 statusFilter만 꺼낼 때, 그 콜백의 매개변수에 타입을 직접 쓰지 않아도 되는 이유는"}
+  options={["statusFilter가 항상 string이라 타입 검사가 필요 없어서","create의 커링 호출로 스토어를 만든 시점에 매개변수의 타입이 이미 UiState로 확정돼 자동 추론되기 때문에","selector 함수는 타입 검사 대상이 아니기 때문에","Zustand가 모든 값을 any로 취급하기 때문에"]}
+  correctAnswer={2}
+  explanation={"스토어 생성 시점에 State 타입이 확정되므로, 그 스토어에서 파생되는 모든 selector 콜백의 매개변수 타입도 자동으로 추론됩니다."}
+/>
+
+<Quiz
+  questionNumber={3}
+  question={"partialize 옵션에서 UiState에 존재하지 않는 필드 이름을 반환하면 어떤 일이 일어나는가"}
+  options={["해당 필드는 무시되고 나머지만 저장된다","반환 객체의 타입이 UiState의 필드 집합과 맞지 않아 컴파일 타임에 오류가 난다","localStorage에 undefined로 저장된다","persist 미들웨어가 자동으로 필드 이름을 UiState 기준으로 고쳐준다"]}
+  correctAnswer={2}
+  explanation={"partialize의 반환 타입은 UiState를 기준으로 검사되므로, 존재하지 않는 필드를 반환하면 컴파일 타임에 오류로 드러납니다."}
+/>
+
+## 참고 자료
+
+- [Zustand 공식 저장소(README) — TypeScript 사용법](https://github.com/pmndrs/zustand#typescript-usage)

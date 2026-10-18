@@ -1,0 +1,745 @@
+---
+title: '24. 클래스 기초'
+description: '클래스와 생성자 함수의 차이, 클래스 정의와 호이스팅, constructor, 메서드, 접근자, 필드, private 요소, static 멤버, 인스턴스 생성 순서를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 클래스 본문에 쓸 수 있는 요소의 문법과 동작 규칙을 설명하고, `new`로 인스턴스가 만들어지는 순서를 추적할 수 있습니다.
+</Callout>
+
+## 클래스와 생성자 함수의 차이
+
+클래스(class)는 ES2015에 추가된 객체 생성 문법입니다. 클래스는 함수이고, 인스턴스가 프로토타입 체인으로 메서드를 공유하는 방식도 생성자 함수와 같습니다(자세히는 15편, 17편). 다른 점은 호출 방식, 스코프, 열거 가능 여부 같은 기본 동작입니다.
+
+```js
+function PersonFn(name) { this.name = name }
+PersonFn.prototype.hi = function () {}
+
+class PersonClass {
+  constructor(name) { this.name = name }
+  hi() {}
+}
+typeof PersonClass // 'function'
+```
+
+| 항목 | 생성자 함수 | 클래스 |
+|------|-------------|--------|
+| `new` 없이 호출 | 일반 함수로 실행된다 | TypeError |
+| 선언 전 접근 | 함수 선언문은 가능 | ReferenceError (TDZ) |
+| strict mode | 선택 | 본문은 항상 strict |
+| 스크립트 최상위 선언 | `globalThis` 프로퍼티가 된다 | 되지 않는다 |
+| prototype에 단 메서드 | 열거 가능 | 열거 불가 |
+| 메서드를 `new`로 호출 | 함수 표현식이면 가능 | 불가 |
+| `prototype` 프로퍼티 | 쓰기 가능 | 쓰기 불가 |
+| private 요소 | 없음 | `#` 요소 |
+
+`new`를 빼먹고 호출하면 생성자 함수는 일반 함수로 실행됩니다. 비엄격 모드에서는 `this`가 전역 객체여서 전역 프로퍼티를 만들어 버립니다. 클래스는 호출 자체를 막습니다.
+
+```js
+class A {}
+A()         // TypeError
+A.call({})  // TypeError
+```
+
+에러 메시지는 `Class constructor A cannot be invoked without 'new'`입니다. `call`이나 `Reflect.apply`로 호출해도 같습니다. 생성자 함수에서 `new.target`으로 이를 흉내 내는 방법은 15편에서 다룹니다.
+
+내장 객체 상속도 다릅니다. 생성자 함수에서 `Array.prototype`을 이어받은 객체는 `Array.isArray`가 `false`이지만, `class extends Array`로 만든 객체는 `true`입니다(자세히는 25편).
+
+위 차이와 private 요소는 생성자 함수에 prototype을 대입하는 방식으로 재현할 수 없습니다. 클래스를 단순한 문법 설탕으로 보면 안 됩니다.
+
+## 클래스 정의
+
+클래스 선언문은 `class 이름 { 본문 }` 형태입니다. 평가 결과는 함수 객체(생성자)이고, 그 이름이 가리키는 바인딩에 담깁니다.
+
+```js
+class Point {
+  constructor(x, y) { this.x = x; this.y = y }
+  toString() { return `(${this.x}, ${this.y})` }
+}
+const p = new Point(1, 2)
+String(p)                              // '(1, 2)'
+Point.prototype.constructor === Point  // true
+```
+
+본문에 쓸 수 있는 요소는 다음과 같습니다.
+
+| 요소 | 문법 | 붙는 곳 |
+|------|------|---------|
+| constructor | `constructor() {}` | 클래스(함수 객체) 자신의 본체 |
+| 메서드 | `m() {}` | `Class.prototype` |
+| 접근자 | `get x() {}`, `set x(v) {}` | `Class.prototype` |
+| 필드 | `x = 1` | 각 인스턴스 |
+| static 멤버 | `static m() {}`, `static x = 1` | 클래스 자신 |
+| static block | `static {}` | 클래스 정의 때 실행되는 블록 |
+| private 요소 | `#x`, `#m() {}` | 인스턴스(static이면 클래스) |
+
+- 본문에는 이 요소만 올 수 있습니다. 일반 실행문은 static block 안에서만 쓸 수 있습니다.
+- 요소 사이에 쉼표를 쓰면 SyntaxError입니다. 객체 리터럴과 다른 점입니다. 세미콜론은 써도 됩니다.
+- 메서드는 `function` 키워드 없는 축약형으로만 씁니다.
+- 본문은 항상 strict mode입니다(자세히는 19편).
+- 선언문은 이름이 필수입니다. 예외는 `export default class {}`입니다(자세히는 45편).
+- 클래스 선언문은 문이므로 `if (ok) class A {}`처럼 블록 없이 문 자리에 쓰면 SyntaxError입니다.
+- 클래스는 함수 객체이므로 일급 객체입니다. 변수에 담고, 인수로 넘기고, 반환할 수 있습니다(자세히는 16편).
+- 클래스 이름은 관례로 PascalCase를 씁니다.
+
+흔한 실수는 필드 뒤 세미콜론 생략입니다. 다음 줄이 `[`나 `*`로 시작하는 멤버(계산된 이름 메서드, 제너레이터 메서드)이면 앞 줄과 이어서 읽혀 SyntaxError가 납니다(ASI는 04편).
+
+```js
+class A {
+  x = 1
+  [Symbol.iterator]() {} // ❌ 1[...]() 로 읽힌다
+}
+class B {
+  x = 1;
+  [Symbol.iterator]() {} // ✅
+}
+```
+
+## 클래스 호이스팅
+
+클래스 선언문도 호이스팅되지만, let·const처럼 선언문을 평가하기 전까지는 초기화되지 않습니다. 이 구간이 TDZ이고, 접근하면 ReferenceError입니다(자세히는 13편).
+
+```js
+new A()
+// ReferenceError: Cannot access 'A' before initialization
+class A {}
+```
+
+호이스팅된다는 증거는 바깥 변수를 가린다는 점입니다.
+
+```js
+const X = 'outer'
+{
+  typeof X // ReferenceError: 안쪽 class X가 바깥 X를 가린다
+  class X {}
+}
+```
+
+- 클래스 선언문은 블록 스코프입니다. 같은 스코프에서 같은 이름을 다시 선언하면 SyntaxError입니다.
+- 함수 선언문은 선언 전에도 호출할 수 있지만(자세히는 11편) 클래스는 불가능합니다.
+- 스크립트 최상위에서 선언해도 `globalThis`의 프로퍼티가 되지 않습니다. 함수 선언문은 됩니다.
+- 클래스 본문 안에는 클래스 이름의 불변 바인딩이 하나 더 있습니다. 본문 안에서 이름에 재할당하면 TypeError이고, 바깥 바인딩은 `let`처럼 재할당할 수 있습니다.
+
+```js
+class C { static m() { C = 1 } }
+C.m() // TypeError: Assignment to constant variable.
+C = 1 // 에러 없음 (바깥 바인딩)
+```
+
+- `extends` 절과 계산된 멤버 이름은 클래스가 완성되기 전에 평가됩니다. 그 안에서 자기 이름을 쓰면 ReferenceError입니다. `class C extends C {}`가 그 예입니다.
+- 메서드 본문, static 필드, static block에서는 이름이 이미 초기화되어 있어 자기 이름을 쓸 수 있습니다.
+- 클래스 표현식은 변수 선언의 규칙을 따릅니다(자세히는 아래 클래스 표현식 절).
+
+## constructor
+
+constructor는 `new`로 인스턴스를 만들 때 호출되어 인스턴스를 초기화하는 특수 메서드입니다. 이름이 `constructor`여야 하고, 이 정의가 클래스(함수 객체)의 본체가 됩니다.
+
+```js
+class User {
+  constructor(name, age = 0) {
+    this.name = name
+    this.age = age
+  }
+}
+new User('Kim') // User { name: 'Kim', age: 0 }
+```
+
+- 클래스당 하나만 둘 수 있습니다. 둘 이상이면 SyntaxError입니다.
+- getter, setter, 제너레이터, async로 정의할 수 없습니다(SyntaxError). `constructor`라는 이름의 필드와 `#constructor`도 SyntaxError입니다.
+- 생략하면 기본 constructor가 쓰입니다. 기반 클래스는 `constructor() {}`, 파생 클래스는 `constructor(...args) { super(...args) }`와 같습니다(자세히는 25편).
+- 매개변수는 일반 함수와 같아서 기본값, 나머지 매개변수, 구조 분해를 쓸 수 있습니다.
+- 클래스의 `length`는 constructor의 필수 매개변수 개수입니다. 기본값이나 나머지 매개변수가 나오기 전까지만 셉니다. 생략하면 0입니다.
+- `C.prototype.constructor`는 클래스 자신이고 열거되지 않습니다. 인스턴스에서 `obj.constructor`로 읽으면 프로토타입 체인으로 클래스가 나옵니다.
+- constructor를 `new` 없이 직접 호출할 수 없습니다. `C.prototype.constructor()`도 TypeError입니다.
+- `new.target`으로 어느 클래스로 호출됐는지 확인할 수 있습니다(자세히는 15편).
+
+### return 규칙
+
+| 기반 클래스 constructor의 return | `new`의 결과 |
+|----------------------------------|--------------|
+| 생략 또는 `undefined` | `this`(새 인스턴스) |
+| 객체 | 그 객체. `instanceof`가 `false`일 수 있다 |
+| 원시값 | 무시되고 `this` |
+
+```js
+class A { constructor() { return { x: 1 } } }
+new A() instanceof A // false
+```
+
+파생 클래스의 constructor가 `undefined`가 아닌 원시값을 반환하면 TypeError입니다(자세히는 15편, 25편).
+
+흔한 실수는 `this.`를 빼먹는 것입니다. 매개변수에 자기 자신을 대입할 뿐 인스턴스에는 아무것도 생기지 않습니다.
+
+```js
+class B { constructor(x) { x = x } }      // ❌ 인스턴스에 x 없음
+class C { constructor(x) { this.x = x } } // ✅
+```
+
+## 프로토타입 메서드
+
+`static`이 없는 메서드는 `Class.prototype`의 프로퍼티가 되고, 모든 인스턴스가 프로토타입 체인으로 공유합니다.
+
+```js
+class Counter {
+  n = 0
+  inc() { this.n++; return this }
+}
+const a = new Counter()
+const b = new Counter()
+a.inc === b.inc                  // true (같은 함수)
+Object.hasOwn(a, 'inc')          // false
+Object.getPrototypeOf(a) === Counter.prototype // true
+```
+
+- 메서드 종류는 일반 메서드, 제너레이터 `*gen() {}`(42편), async `async load() {}`(43편), async 제너레이터 `async *stream() {}`입니다.
+- 같은 이름의 메서드를 두 번 정의해도 에러가 나지 않고 뒤의 정의가 앞을 덮어씁니다.
+- 메서드는 `[[Construct]]`와 `prototype` 프로퍼티가 없습니다. `new a.inc()`는 TypeError입니다(자세히는 15편).
+- 메서드 안에서 `super.method()`로 부모 메서드를 호출할 수 있습니다(자세히는 25편).
+- 메서드의 `this`는 호출 방식으로 정해집니다(자세히는 21편). 메서드를 변수에 꺼내 호출하면 `this`가 `undefined`입니다.
+
+```js
+const inc = a.inc
+inc() // TypeError: Cannot read properties of undefined
+```
+
+- 클래스를 정의한 뒤에 `Counter.prototype.reset = function () {}`로 메서드를 추가할 수 있습니다. 이렇게 추가한 프로퍼티는 열거 가능합니다(아래 메서드의 열거 불가 절).
+
+## 정적 메서드
+
+`static`을 붙인 메서드는 인스턴스가 아니라 클래스(생성자 함수) 자신의 프로퍼티가 됩니다. `클래스.메서드()`로 호출합니다.
+
+```js
+class Point {
+  constructor(x, y) { this.x = x; this.y = y }
+  static origin() { return new Point(0, 0) }
+}
+Point.origin()            // Point { x: 0, y: 0 }
+new Point(1, 2).origin()  // TypeError
+```
+
+- 인스턴스에서는 호출할 수 없습니다. 인스턴스 쪽에서 쓰려면 `obj.constructor.origin()`으로 클래스를 거칩니다.
+- static 메서드의 `this`는 호출할 때 점 앞의 값, 즉 클래스(또는 서브클래스)입니다. `new this()`로 서브클래스 인스턴스를 만드는 팩토리를 작성할 수 있습니다.
+- static 메서드를 변수에 꺼내 호출하면 `this`가 `undefined`입니다.
+- 인스턴스 상태와 무관한 유틸리티, 팩토리, 변환 함수가 주된 용도입니다. 내장 예는 `Array.isArray`, `Object.keys`, `Promise.resolve`입니다.
+- static 메서드도 열거되지 않고, 쓰기·설정 가능합니다.
+- 서브클래스는 부모의 static 멤버를 프로토타입 체인으로 상속합니다(자세히는 25편).
+- `static prototype`이라는 이름은 SyntaxError입니다. 클래스의 `prototype` 프로퍼티와 충돌하기 때문입니다.
+- 정적 메서드와 프로토타입 메서드의 이름이 같아도 붙는 객체가 달라 충돌하지 않습니다.
+
+## 인스턴스 생성 과정
+
+`new Foo(...args)`는 Foo의 `[[Construct]]`를 호출합니다(자세히는 15편). `extends`가 없는 기반 클래스의 순서는 다음과 같습니다.
+
+1. 빈 객체를 만들고 `[[Prototype]]`을 `new.target.prototype`으로 정합니다. `new.target`은 `new` 뒤에 쓴 클래스입니다.
+2. `this`를 그 객체에 바인딩합니다.
+3. private 메서드와 접근자를 객체에 설치합니다.
+4. 필드 초기화식을 선언 순서대로 실행해 필드를 정의합니다.
+5. constructor 본문을 실행합니다.
+6. 본문이 객체를 반환하지 않았으면 `this`가 결과입니다.
+
+```js
+const log = []
+class Foo {
+  a = log.push('a')
+  constructor() { log.push('ctor') }
+  b = log.push('b')
+}
+new Foo()
+log // ['a', 'b', 'ctor']
+```
+
+- 필드는 constructor 본문보다 먼저 만들어집니다. 본문에서 필드를 읽을 수 있고, 같은 이름을 대입하면 본문의 값이 최종 값입니다.
+- 파생 클래스에서는 1–4단계를 부모 constructor가 `super()` 안에서 수행합니다. 자기 필드는 `super()`가 돌아온 직후에 초기화되고, `super()` 전에 `this`를 쓰면 ReferenceError입니다(자세히는 25편).
+- 인스턴스의 프로토타입은 `new.target.prototype`이므로 서브클래스를 `new`하면 서브클래스의 프로토타입을 가집니다.
+
+코드가 실행되는 시점은 두 가지입니다.
+
+| 시점 | 횟수 | 하는 일 |
+|------|------|---------|
+| 클래스 정의 평가 | 1회 | `extends`와 계산된 이름 평가, 메서드·접근자 정의, static 필드·static block 실행 |
+| `new` 호출 | 호출마다 | 위 1–6단계 |
+
+## 접근자 프로퍼티
+
+접근자 프로퍼티는 읽을 때와 쓸 때 함수가 실행되는 프로퍼티입니다(자세히는 14편). `get`은 읽을 때, `set`은 쓸 때 호출됩니다. 클래스 본문에서도 같은 문법을 씁니다.
+
+```js
+class Circle {
+  #r = 1
+  get area() { return Math.PI * this.#r ** 2 }
+  set radius(v) {
+    if (v <= 0) throw new RangeError('radius > 0')
+    this.#r = v
+  }
+}
+const c = new Circle()
+c.radius = 2
+c.area    // 12.566370614359172
+c.radius  // undefined (setter만 있다)
+```
+
+- getter는 매개변수가 없어야 하고 setter는 정확히 하나여야 합니다. 어기면 SyntaxError입니다.
+- 같은 이름의 `get`과 `set`은 하나의 접근자 프로퍼티를 이룹니다.
+- getter만 있으면 읽기 전용입니다. 대입은 strict mode에서 TypeError이고 비엄격 모드에서는 조용히 무시됩니다. 클래스 본문 안의 코드는 항상 strict이고, 클래스 밖 코드는 그 코드의 모드를 따릅니다.
+- setter만 있으면 읽을 때 `undefined`입니다.
+- 접근자는 `Class.prototype`의 프로퍼티입니다(enumerable `false`, configurable `true`). 인스턴스 자신의 프로퍼티가 아니므로 `Object.keys`, `JSON.stringify`, 객체 스프레드에 나타나지 않습니다. `'area' in c`는 `true`, `Object.hasOwn(c, 'area')`는 `false`입니다.
+- 접근자는 값을 저장하지 않습니다. 저장 공간은 `#r` 같은 private 필드나 `_r` 같은 관례적 이름의 프로퍼티로 따로 둡니다.
+- `static get`과 `static set`은 클래스 자신의 접근자입니다. `get [expr]()`처럼 계산된 이름도 쓸 수 있습니다.
+
+흔한 실수는 세 가지입니다.
+
+```js
+class A { get v() { return this.v } }
+new A().v // RangeError: Maximum call stack size exceeded
+```
+
+- getter 안에서 같은 이름을 읽으면 자기 자신을 다시 호출해 무한 재귀가 됩니다.
+- 서브클래스에서 getter만 다시 정의하면 부모의 setter가 가려져, 대입이 strict mode에서 TypeError가 됩니다. 쌍으로 재정의해야 합니다(자세히는 25편).
+- 같은 이름의 필드를 선언하면 접근자가 가려집니다(다음 절).
+
+## 클래스 필드
+
+클래스 필드는 본문에 `이름 = 초기값`으로 선언하는 인스턴스 프로퍼티입니다. ES2022에서 표준이 되었습니다.
+
+```js
+class Todo {
+  done = false
+  tags = []
+  title
+  constructor(title) { this.title = title }
+}
+Object.keys(new Todo('a')) // ['done', 'tags', 'title']
+```
+
+- 필드는 인스턴스마다 자기 프로퍼티로 만들어집니다. 초기화식은 인스턴스를 만들 때마다 평가되므로 `tags = []`는 인스턴스마다 새 배열입니다. prototype에 둔 프로퍼티와 달리 공유되지 않습니다.
+- 초기화식의 `this`는 새 인스턴스입니다. 앞에 선언한 필드는 참조할 수 있고(`b = this.a + 1`), 뒤에 선언한 필드는 아직 `undefined`입니다.
+- 초기값이 없는 필드(`title`)는 값이 `undefined`인 프로퍼티로 정의됩니다. 선언하지 않은 것과 달라서 `'title' in obj`가 `true`입니다.
+- 필드는 대입이 아니라 정의로 만들어집니다. 그래서 같은 이름의 setter를 호출하지 않고 자기 프로퍼티로 가립니다. 프로퍼티 어트리뷰트는 writable, enumerable, configurable 모두 `true`입니다.
+
+```js
+class A {
+  set v(x) { console.log('set') }
+  v = 1
+}
+new A().v // 1 ('set'은 출력되지 않는다)
+```
+
+- 필드 이름은 식별자, 문자열 리터럴, 숫자 리터럴, 계산된 이름(`[expr] = 1`)을 쓸 수 있습니다. `constructor`는 SyntaxError입니다.
+- 초기화식에서 constructor 매개변수를 참조할 수 없습니다. 같은 이름이 있으면 매개변수가 아니라 바깥 스코프의 변수를 가리킵니다. `arguments`는 SyntaxError입니다.
+
+```js
+const y = 'outer'
+class B {
+  x = y // 매개변수 y가 아니라 바깥 y
+  constructor(y) {}
+}
+new B('p').x // 'outer'
+```
+
+- 필드와 constructor 대입이 같은 이름이면 constructor 본문이 나중이라 본문의 값이 남습니다.
+- 값이 매개변수에 따라 정해지면 constructor에서 대입하고, 고정된 기본값은 필드로 선언합니다.
+- ES2022 이전에는 필드 문법이 없어서 constructor 안에서 `this.x = ...`로 만들었습니다.
+- static 필드는 아래 static 필드 절에서 다룹니다.
+
+## private 필드
+
+private 필드는 이름이 `#`으로 시작하는 필드입니다. 선언한 클래스 본문 안에서만 접근할 수 있고, 이 제한은 언어가 강제합니다. ES2022에서 표준이 되었습니다.
+
+```js
+class Account {
+  #balance = 0
+  deposit(n) { this.#balance += n }
+  get balance() { return this.#balance }
+}
+const acc = new Account()
+acc.deposit(5)
+acc.balance      // 5
+acc.#balance     // SyntaxError (클래스 밖)
+acc['#balance']  // undefined (일반 문자열 키일 뿐)
+```
+
+선언과 접근 규칙은 다음과 같습니다.
+
+- 본문에 선언해야 합니다. 선언하지 않은 `#x`를 쓰면 파싱 단계의 SyntaxError이므로 스크립트 전체가 실행되지 않습니다.
+- 선언 위치와 상관없이 본문 전체에서 보입니다. 선언보다 앞에서 써도 됩니다.
+- 접근할 수 있는 곳은 클래스 본문 안 어디든입니다. 메서드, 화살표 함수, 중첩 함수, 중첩 클래스가 모두 포함됩니다.
+- 이름 `#x`는 `x`와 별개입니다. 필드 `x`와 `#x`를 함께 선언할 수 있습니다.
+- 같은 이름을 두 번 선언하면 SyntaxError입니다. `#constructor`도 SyntaxError이고, `#[expr]` 같은 계산된 이름은 쓸 수 없습니다.
+- `delete this.#x`는 SyntaxError입니다.
+- 초기값이 없으면 `undefined`입니다.
+- `obj?.#x` 옵셔널 체이닝은 쓸 수 있습니다. `obj`가 `null`이면 `undefined`입니다.
+
+`#x`가 없는 객체에 접근하면 `undefined`가 아니라 TypeError입니다. 읽기와 쓰기 모두 마찬가지입니다.
+
+```js
+class X {
+  #a = 1
+  static read(o) { return o.#a }
+}
+X.read(new X()) // 1
+X.read({})      // TypeError
+```
+
+접근 제한은 클래스 단위입니다. 같은 클래스의 다른 인스턴스의 private 필드는 읽을 수 있습니다. 비교 메서드에서 `this.#a === other.#a`를 쓸 수 있는 이유입니다.
+
+private 필드는 프로토타입 체인으로 조회되지 않습니다. 객체 자신에게 부착된 요소입니다.
+
+| 대상 | `#a`를 가지는가 |
+|------|-----------------|
+| `new X()`로 만든 인스턴스 | 가진다 |
+| 서브클래스 인스턴스 | 가진다. 부모 constructor가 설치한다 |
+| `Object.create(인스턴스)`로 만든 객체 | 가지지 않는다. TypeError |
+| `new Proxy(인스턴스, {})` | 가지지 않는다. TypeError |
+
+Proxy를 거친 메서드 호출에서 `this`가 Proxy가 되어 `this.#a`가 TypeError가 나는 것이 대표적인 함정입니다(자세히는 47편).
+
+- private 필드는 `Object.keys`, `Object.getOwnPropertyNames`, `Reflect.ownKeys`, `JSON.stringify`, 객체 스프레드에 나타나지 않습니다. JSON으로 보내려면 `toJSON()`을 직접 정의합니다(자세히는 39편).
+- `Object.freeze`는 private 필드에 영향이 없습니다. 동결된 객체에도 `this.#a = 9`가 됩니다.
+- 클래스를 평가할 때마다 새 private 이름이 만들어집니다. 같은 `#a`라는 이름을 쓰는 두 클래스는 서로의 필드에 접근할 수 없고, 팩토리 함수가 호출마다 만드는 클래스끼리도 마찬가지입니다.
+- ES2022 이전에는 `_name` 관례, WeakMap, 클로저로 흉내 냈습니다. `_name`은 접근을 막지 못하는 표기일 뿐입니다(클로저는 23편, WeakMap은 38편).
+
+## static 필드와 static block
+
+static 필드는 `static 이름 = 값`으로 선언하는 클래스 자신의 프로퍼티입니다. static block은 클래스 정의가 평가될 때 한 번 실행되는 초기화 블록입니다. 둘 다 ES2022에서 표준이 되었습니다.
+
+```js
+class Id {
+  static next = 1
+  id = Id.next++
+}
+new Id().id // 1
+new Id().id // 2
+```
+
+static 필드는 클래스 객체에 하나만 있으므로 카운터, 캐시, 상수처럼 모든 인스턴스가 공유하는 값에 씁니다. 인스턴스에서는 `Id.next`나 `this.constructor.next`로 읽습니다.
+
+- 초기화식의 `this`는 클래스 자신입니다. 이 시점에 클래스 이름 바인딩도 초기화되어 있어 `static inst = new Id()`처럼 이름으로 참조해도 됩니다.
+- 어트리뷰트는 writable, enumerable, configurable 모두 `true`입니다. static 메서드는 enumerable이 `false`인 것과 다릅니다.
+- `static name = 'x'`, `static length = 5`처럼 클래스의 기존 프로퍼티를 덮어쓸 수 있습니다. `static prototype`은 SyntaxError입니다.
+- `static #x`는 private static 필드입니다. 이 클래스 본문 안에서만 접근할 수 있습니다.
+
+### 실행 순서
+
+클래스 정의를 평가할 때 메서드와 접근자가 먼저 정의되고, 그 뒤에 static 필드와 static block이 선언 순서대로 실행됩니다.
+
+```js
+const order = []
+class X {
+  static a = order.push('a')
+  static { order.push('block') }
+  static b = order.push('b')
+}
+order // ['a', 'block', 'b']
+```
+
+- 앞쪽 static 필드의 초기화식에서 static 메서드는 뒤에 선언되어 있어도 호출할 수 있습니다. 메서드가 먼저 정의되기 때문입니다.
+- 앞쪽 초기화식에서 뒤쪽 static 필드를 읽으면 `undefined`입니다.
+
+### static block
+
+static block은 필드 초기화식 하나로 표현하기 어려운 초기화에 씁니다. 여러 문장, `try...catch`, 두 필드를 함께 계산하는 경우가 그렇습니다.
+
+```js
+class Color {
+  static RED
+  static ALL
+  static {
+    this.RED = new Color('red')
+    this.ALL = [this.RED]
+  }
+  constructor(name) { this.name = name }
+}
+Color.ALL.length // 1
+```
+
+- static block은 여러 개 둘 수 있고 다른 static 필드와 섞여 선언 순서대로 실행됩니다.
+- 블록 안의 `this`는 클래스입니다. 블록 안에서 선언한 `var`와 `let`은 블록 안에서만 보입니다.
+- `return`, `await`, `arguments`는 쓸 수 없습니다(SyntaxError).
+- 클래스의 private 요소를 의도적으로 밖에 열어 줄 때도 씁니다.
+
+```js
+let readSecret
+class Vault {
+  #secret = 42
+  static {
+    readSecret = (v) => v.#secret
+  }
+}
+readSecret(new Vault()) // 42
+```
+
+흔한 실수는 상속과 섞는 경우입니다.
+
+```js
+class A { static c = 0 }
+class B extends A {}
+B.c++              // B에 자기 프로퍼티 c가 새로 생긴다
+A.c                // 0
+Object.hasOwn(B, 'c') // true
+```
+
+- 서브클래스에서 읽으면 부모의 static 필드가 보이지만, 대입하면 서브클래스에 새 프로퍼티가 생겨 부모와 갈라집니다(자세히는 25편).
+- `static #x`를 `this.#x`로 읽는 static 메서드를 서브클래스에서 호출하면, `this`가 서브클래스라 `#x`가 없어 TypeError입니다. 클래스 이름으로 `A.#x`라고 써야 합니다.
+
+## private 메서드와 접근자
+
+private 메서드와 접근자는 이름 앞에 `#`을 붙인 메서드, getter, setter입니다. ES2022에서 표준이 되었습니다. `static`, `async`, 제너레이터도 쓸 수 있습니다(`static #m() {}`, `async #load() {}`, `*#gen() {}`).
+
+```js
+class Form {
+  #errors = []
+  get #hasError() { return this.#errors.length > 0 }
+  #validate(v) { if (!v) this.#errors.push('empty') }
+  submit(v) {
+    this.#validate(v)
+    return !this.#hasError
+  }
+}
+new Form().submit('')  // false
+new Form().submit('a') // true
+```
+
+- 접근 규칙은 private 필드와 같습니다. 선언 없이 쓰면 SyntaxError, 없는 객체에서 호출하면 TypeError, 클래스 밖에서는 접근 불가, 프로토타입 체인으로 찾지 않습니다.
+- `Class.prototype`에 있지 않고 인스턴스에 부착됩니다. `Object.getOwnPropertyNames(Class.prototype)`에는 `constructor`만 나옵니다. 함수 객체는 하나이고 모든 인스턴스가 같은 것을 가리킵니다.
+- 인스턴스 생성 때 필드 초기화보다 먼저 설치됩니다. 필드 초기화식에서 private 메서드를 호출할 수 있습니다.
+- 쓸 수 없습니다. `this.#m = fn`은 TypeError이고, setter 없는 private getter에 대입해도 TypeError입니다.
+- private 이름은 필드, 메서드, 접근자가 한 이름 공간을 씁니다. `#a` 필드와 `#a()` 메서드를 함께 선언하면 SyntaxError이고, get·set 쌍만 한 이름을 공유합니다.
+- 메서드의 `name`은 `'#m'`입니다.
+- 서브클래스가 같은 이름의 `#m`을 선언해도 부모의 `#m`을 덮어쓰지 않습니다. 각 클래스의 `#m`은 별개이고, 부모 메서드 안의 `this.#m()`은 항상 부모 것을 호출합니다. private 메서드는 오버라이드할 수 없습니다.
+
+## `#x in obj`
+
+`#x in obj`는 객체가 그 클래스의 private 요소를 가졌는지 검사하는 식입니다. 브랜드 검사(ergonomic brand check)라고 부르며 ES2022에서 표준이 되었습니다.
+
+```js
+class Box {
+  #v
+  static isBox(o) { return #v in o }
+}
+Box.isBox(new Box()) // true
+Box.isBox({})        // false
+Box.isBox(1)         // TypeError
+```
+
+- 클래스 본문 안에서만 쓸 수 있고, 그 클래스에 선언된 `#이름`이어야 합니다. 밖에서 쓰면 SyntaxError입니다.
+- 우변이 원시값이면 TypeError입니다. `null`과 `undefined`도 같습니다. 일반 `in` 연산자와 같은 규칙입니다.
+- 서브클래스 인스턴스는 `true`입니다. `Object.create(인스턴스)`와 Proxy는 `false`입니다.
+- private 메서드에도 쓸 수 있습니다(`#m in o`). 메서드는 인스턴스 생성 때 설치되므로 소속 검사로 충분합니다.
+- 용도는 소속 판별입니다. `instanceof`는 프로토타입 체인을 보기 때문에 `Object.setPrototypeOf({}, Box.prototype)`으로 만든 객체도 `true`지만, `#v in o`는 `false`입니다. 이 식이 생기기 전에는 private 필드를 읽어 보고 TypeError를 `try...catch`로 잡아 판별했습니다.
+
+## 클래스 표현식
+
+클래스 표현식은 클래스를 식으로 쓰는 형태입니다. 값이므로 변수에 담고, 인수로 넘기고, 반환하고, 바로 인스턴스를 만들 수 있습니다.
+
+```js
+const A = class {}               // 익명
+const B = class Inner {          // 기명
+  static me() { return Inner }
+}
+A.name        // 'A' (변수 이름에서 추론)
+B.name        // 'Inner'
+typeof Inner  // 'undefined' (본문 밖에서는 안 보인다)
+B.me() === B  // true
+```
+
+- 기명 클래스 표현식의 이름은 클래스 본문 안에서만 보이는 불변 바인딩입니다. 재할당하면 TypeError입니다.
+- 익명 클래스 표현식을 변수나 프로퍼티에 대입하면 `name`이 그 이름으로 정해집니다. 인수로 바로 넘기거나 `new class {}()`로 쓰면 `name`이 빈 문자열입니다.
+- 호이스팅은 변수 선언의 규칙을 따릅니다. `const`와 `let`은 TDZ이고, `var`는 선언만 올라가 값이 `undefined`여서 선언 전에 `new`하면 `A is not a constructor`라는 TypeError입니다.
+- 메서드, 접근자, 필드, private 요소, static 멤버를 선언문과 똑같이 쓸 수 있습니다.
+
+용도는 세 가지입니다.
+
+- 이름 없는 일회용 객체: 클래스를 정의하자마자 인스턴스 하나만 만듭니다.
+
+```js
+const svc = new class {
+  start() { return 'on' }
+}()
+svc.start()           // 'on'
+svc.constructor.name  // ''
+```
+
+- 클래스를 만드는 함수: 인수에 따라 다른 클래스를 반환합니다. 믹스인이 이 형태입니다(자세히는 25편).
+
+```js
+const make = (v) => class { tag = v }
+const X = make('x')
+new X().tag              // 'x'
+make('x') === make('x')  // false (호출마다 새 클래스)
+```
+
+- 객체나 배열에 클래스를 보관하는 경우에도 씁니다.
+
+## 계산된 멤버 이름
+
+멤버 이름 자리에 `[식]`을 쓰면 식의 결과가 이름이 됩니다. 메서드, getter·setter, 필드, static 멤버 모두 가능합니다.
+
+```js
+const op = 'add'
+class Calc {
+  [op](a, b) { return a + b }
+  static [op + 'All']() { return 'all' }
+  *[Symbol.iterator]() { yield 1; yield 2 }
+}
+new Calc().add(1, 2)    // 3
+Calc.addAll()           // 'all'
+Array.from(new Calc())  // [1, 2]
+```
+
+- 식의 결과는 프로퍼티 키(문자열 또는 심볼)로 변환됩니다.
+- 키 식은 클래스 정의를 평가할 때 선언 순서대로 한 번만 평가됩니다. 인스턴스를 만들 때마다 다시 평가되지 않습니다.
+
+```js
+let n = 0
+class K {
+  ['k' + ++n] = 1
+}
+new K(); new K()
+n                  // 1
+Object.keys(new K()) // ['k1']
+```
+
+- 식 안의 `this`는 클래스가 아니라 클래스를 둘러싼 바깥 스코프의 `this`입니다.
+- 클래스 자신의 이름은 아직 TDZ라서 키 식에서 참조하면 ReferenceError입니다.
+- 대표 용도는 `Symbol.iterator`, `Symbol.asyncIterator`, `Symbol.toPrimitive` 같은 잘 알려진 심볼 키입니다(자세히는 34편, 35편).
+- private 이름은 계산할 수 없습니다. `#[expr]`은 SyntaxError입니다.
+- 계산된 이름 `['constructor']`는 constructor로 취급되지 않습니다. 같은 이름의 일반 메서드가 되어 `prototype.constructor`를 덮어씁니다.
+
+## 메서드의 열거 불가
+
+클래스 본문의 메서드와 접근자는 enumerable이 `false`로 정의됩니다. 그래서 `for...in`, `Object.keys`, 객체 스프레드, `JSON.stringify`에 나타나지 않습니다. 반면 생성자 함수의 `prototype`에 대입한 메서드와 객체 리터럴의 메서드는 열거 가능합니다(자세히는 14편, 18편).
+
+| 대상 | writable | enumerable | configurable |
+|------|----------|------------|--------------|
+| 메서드, static 메서드 | `true` | `false` | `true` |
+| 접근자 | 없음 | `false` | `true` |
+| 필드, static 필드 | `true` | `true` | `true` |
+| 클래스의 `prototype` | `false` | `false` | `false` |
+
+```js
+class A { x = 1; m() {} }
+function F() { this.x = 1 }
+F.prototype.m = function () {}
+
+for (const k in new A()) console.log(k) // x
+for (const k in new F()) console.log(k) // x, m
+Object.keys(A.prototype)                // []
+Object.getOwnPropertyNames(A.prototype)
+// ['constructor', 'm']
+```
+
+- 열거되지 않을 뿐 존재하지 않는 것이 아닙니다. `Object.getOwnPropertyNames`와 `Reflect.ownKeys`에는 나옵니다. `constructor`도 열거되지 않습니다.
+- 필드는 열거 가능하므로 `Object.keys(인스턴스)`와 `JSON.stringify` 결과에 들어갑니다.
+- 클래스를 정의한 뒤 `A.prototype.extra = function () {}`로 추가한 프로퍼티는 일반 대입이라 열거 가능입니다.
+- 메서드의 어트리뷰트는 `Object.defineProperty`로 바꿀 수 있습니다(configurable이 `true`입니다).
+- 클래스의 `prototype`은 쓰기 불가이고 설정 불가입니다. `A.prototype = {}`는 strict mode에서 TypeError입니다. 생성자 함수는 `F.prototype = {}`로 교체할 수 있습니다.
+
+## 필드와 this
+
+필드 초기화식은 인스턴스를 만드는 중에 실행되므로 그 안의 `this`는 새 인스턴스입니다. 화살표 함수를 필드에 넣으면 이 `this`가 고정됩니다. 화살표 함수는 정의된 위치의 `this`를 쓰기 때문입니다(자세히는 21편, 27편).
+
+```js
+class Btn {
+  label = 'ok'
+  onClick = () => this.label
+  onHover() { return this.label }
+}
+const { onClick, onHover } = new Btn()
+onClick()  // 'ok'
+onHover()  // TypeError: Cannot read properties of undefined
+```
+
+메서드는 호출 방식으로 `this`가 정해져서 꺼내 쓰면 `undefined`가 됩니다. 화살표 함수 필드는 꺼내 써도 인스턴스에 묶여 있습니다. 콜백으로 넘길 때 `this`를 잃는 상황과 해결 방법 비교는 21편에 있습니다.
+
+화살표 함수 필드는 프로토타입 메서드와 저장 위치가 다릅니다.
+
+```js
+class A { arrow = () => {}; m() {} }
+const a = new A()
+const b = new A()
+a.arrow === b.arrow  // false (인스턴스마다 새 함수)
+a.m === b.m          // true  (prototype에서 공유)
+Object.keys(a)       // ['arrow']
+```
+
+- 인스턴스마다 함수 객체가 하나씩 만들어집니다. 인스턴스가 많으면 메모리를 더 씁니다.
+- 인스턴스의 열거 가능한 자기 프로퍼티입니다. `Class.prototype`에 없으므로 prototype을 통해 교체하거나 가로챌 수 없습니다.
+- 서브클래스가 같은 이름을 프로토타입 메서드로 오버라이드해도, 부모가 만든 인스턴스 필드가 그 메서드를 가려 부모의 함수가 호출됩니다. 서브클래스에서 `super.이름()`으로 부를 수도 없습니다(자세히는 25편).
+- `this`는 초기화 시점에 고정됩니다. `call`, `apply`, `bind`로 바꿀 수 없습니다.
+- `function` 표현식을 필드에 넣으면(`f = function () {}`) 일반 함수이므로 호출 방식으로 `this`가 정해집니다. 꺼내 호출하면 `undefined`입니다.
+- static 필드의 화살표 함수에서 `this`는 클래스 자신입니다.
+
+## 데코레이터 제안 상태
+
+데코레이터는 클래스와 클래스 멤버를 정의할 때 함수를 적용해 동작을 바꾸거나 기능을 덧붙이는 제안입니다. 대상 앞에 `@이름`을 씁니다. 표준 문법이 아닙니다.
+
+```js
+// 제안 문법. Node.js 24에서는 SyntaxError
+function logged(method, context) {
+  return function (...args) {
+    console.log('call', context.name)
+    return method.apply(this, args)
+  }
+}
+class Api {
+  @logged load(id) { return id }
+}
+```
+
+- 상태: TC39 제안 목록에서 Decorators와 Decorator Metadata가 모두 Stage 2.7입니다(2026년 10월 기준). ES2026까지의 어느 판에도 포함되지 않았습니다.
+- 대상: 클래스, 메서드, getter·setter, 필드, 자동 접근자입니다. 메서드와 필드는 public, private, static 모두 대상입니다.
+- 데코레이터는 `(value, context)`를 받는 함수입니다. `value`는 장식되는 대상이고(필드는 `undefined`), `context`에는 `kind`, `name`, `static`, `private`, `access`, `addInitializer`가 들어 있습니다. `kind`는 `'class'`, `'method'`, `'getter'`, `'setter'`, `'field'`, `'accessor'` 중 하나입니다.
+- 반환값은 같은 종류의 값으로 대상을 교체합니다. 아무것도 반환하지 않으면 원래 값이 유지됩니다.
+- 데코레이터는 인스턴스를 만들 때가 아니라 클래스 정의를 평가할 때 호출됩니다.
+- 자동 접근자: `accessor x = 1`은 private 저장소를 가진 getter·setter 쌍을 만드는 새 클래스 요소입니다. 이 제안에 포함되어 있고 현재 Node.js 24에서는 SyntaxError입니다.
+- 도구: Babel과 TypeScript 같은 도구가 변환해 줍니다. 과거 Stage 2 초안 기반의 legacy 데코레이터와 의미 체계가 달라서 도구 설정으로 어느 쪽을 쓸지 정합니다.
+- 제안이 확정되기 전이므로 프레임워크나 빌드 설정이 정한 방식을 따릅니다. 이 편의 필드, private 요소, static block은 이미 ES2022 표준입니다.
+
+## 핵심 정리
+
+- 클래스는 함수이지만 `new` 없이 호출할 수 없고, 선언은 TDZ를 가지며, 본문은 항상 strict이고, 메서드는 열거되지 않아 생성자 함수와 다릅니다.
+- 메서드와 접근자는 `Class.prototype`에, static 멤버는 클래스 자신에, 필드는 각 인스턴스에 정의됩니다.
+- `new`의 순서는 객체 생성, private 메서드 설치, 필드 초기화, constructor 본문입니다.
+- `#` 요소(ES2022)는 클래스 본문 안에서만 접근되고, 없는 객체에 접근하면 TypeError이며, `#x in obj`로 소속을 검사합니다.
+- static 필드와 static block은 클래스 정의를 평가할 때 한 번, 선언 순서대로 실행됩니다.
+- 데코레이터는 2026년 10월 기준 Stage 2.7이라 표준이 아닙니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="class A {} 선언 뒤에 new 없이 A()를 호출하면 일어나는 일은?"
+  options={['A의 인스턴스가 만들어진다', 'this가 전역 객체인 채로 constructor가 실행된다', 'undefined가 반환된다', 'TypeError가 발생한다']}
+  correctAnswer={4}
+  explanation="클래스는 new 없이 호출할 수 없으며 TypeError가 발생합니다. 생성자 함수는 new 없이 일반 함수로 실행되고 비엄격 모드에서 this가 전역 객체가 되는데, 클래스는 이를 호출 단계에서 막습니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="클래스에 필드 x = 1이 선언되어 있고 constructor 본문에 this.x = 2가 있을 때, new로 만든 인스턴스의 x는?"
+  options={['1', '2', 'undefined', 'SyntaxError']}
+  correctAnswer={2}
+  explanation="필드 초기화는 constructor 본문보다 먼저 실행되므로, 본문의 대입이 나중에 실행되어 값이 2가 됩니다. 같은 이름의 필드와 본문 대입은 에러가 아닙니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="클래스 안에서 private 필드 #a를 선언했다. 이 클래스의 메서드가 #a를 갖지 않는 일반 객체 o에 대해 o.#a를 읽으면?"
+  options={['undefined가 반환된다', 'TypeError가 발생한다', 'SyntaxError가 발생한다', 'null이 반환된다']}
+  correctAnswer={2}
+  explanation="#a는 이 클래스에 선언된 이름이므로 SyntaxError가 아니고, 그 요소가 없는 객체에 접근하면 TypeError가 발생합니다. 일반 프로퍼티처럼 undefined가 반환되지 않습니다. 선언하지 않은 #이름을 쓰는 경우가 파싱 단계의 SyntaxError입니다."
+/>
+
+## 참고 자료
+
+- [ECMA-262 — Class Definitions](https://tc39.es/ecma262/#sec-class-definitions)
+- [MDN — Classes](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Classes)
+- [MDN — constructor](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Classes/constructor)
+- [MDN — Public class fields](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Classes/Public_class_fields)
+- [MDN — Private elements](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Classes/Private_elements)
+- [MDN — static](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Classes/static)
+- [MDN — Static initialization blocks](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Classes/Static_initialization_blocks)
+- [MDN — in operator](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/in)
+- [TC39 Finished Proposals](https://github.com/tc39/proposals/blob/main/finished-proposals.md)
+- [TC39 Active Proposals](https://github.com/tc39/proposals)
+- [TC39 — Decorators proposal](https://github.com/tc39/proposal-decorators)

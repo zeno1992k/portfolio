@@ -1,0 +1,368 @@
+---
+title: '40. 쿠키와 Web Storage'
+description: '쿠키의 동작과 속성·접두사, document.cookie와 Cookie Store API, localStorage·sessionStorage와 storage 이벤트, 용량 한도와 접근 예외 처리를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 쿠키와 Web Storage의 동작 범위와 한도를 구분해 용도에 맞게 고르고, 쿠키 속성의 보안 의미, 저장소의 동기·문자열 제약, 탭 간 동기화, 접근 예외 처리를 설명할 수 있습니다.
+</Callout>
+
+## Cookie
+
+쿠키는 서버가 `Set-Cookie` 응답 헤더로 브라우저에 맡기는 작은 데이터이고, 브라우저는 이후 같은 서버로 가는 요청에 `Cookie` 요청 헤더로 자동 첨부합니다. HTTP에는 상태가 없으므로 로그인 유지, 개인 설정, 사용자 추적 같은 상태를 서버와 브라우저가 공유하는 수단입니다. Cookies는 Baseline 2015로 널리 지원됩니다.
+
+```http
+HTTP/1.1 200 OK
+Set-Cookie: sid=abc123; Max-Age=3600; Secure; HttpOnly
+
+GET /profile HTTP/1.1
+Cookie: sid=abc123; theme=dark
+```
+
+- 브라우저는 요청 URL이 쿠키의 범위(도메인·경로)와 맞을 때만 `Cookie` 헤더에 싣고, 여러 개는 `이름=값`을 `; `로 이어서 보냅니다.
+- 쿠키는 모든 요청에 실려 가므로 크기가 크면 요청마다 부담이 됩니다.
+- 수명에 따라 두 종류입니다. `Expires`나 `Max-Age`가 없으면 세션 쿠키로 브라우저 세션이 끝날 때 삭제됩니다. 둘 중 하나가 있으면 영속 쿠키로 지정한 시점까지 남습니다. 세션 복원 기능이 있는 브라우저는 종료 후에도 세션 쿠키를 되살릴 수 있습니다.
+- `Set-Cookie` 헤더는 자바스크립트가 읽을 수 없는 금지 응답 헤더입니다. 교차 출처 요청에서는 요청에 자격 증명이 포함되어 있어야 브라우저가 응답의 `Set-Cookie`를 반영합니다. fetch의 `credentials: 'include'`가 그 설정입니다(CORS는 62편, fetch 옵션은 36편).
+- 삭제는 같은 이름·도메인·경로로 `Max-Age=0`(또는 과거의 `Expires`)을 설정합니다.
+- 서드파티 쿠키(다른 사이트에 삽입된 콘텐츠가 설정하는 쿠키)는 추적에 쓰여서 대부분의 브라우저가 기본으로 막습니다. 임베드에서 쿠키가 필요할 때의 대안은 62편에서 다룹니다.
+- 서버에 보내야 하는 상태(인증 세션)는 쿠키가 맞고, 서버가 몰라도 되는 클라이언트 상태는 Web Storage가 맞습니다(아래 용량 절의 비교표).
+
+## 쿠키 속성
+
+속성은 `Set-Cookie`에서 이름 뒤에 `;`로 이어 붙입니다. 쿠키가 언제, 어디로, 어떤 코드에 보이는지를 정합니다.
+
+| 속성 | 의미 |
+|------|------|
+| `Domain=example.com` | 쿠키를 받을 호스트. 지정하면 하위 도메인도 포함. 생략하면 설정한 호스트에만 보내는 호스트 전용 쿠키 |
+| `Path=/docs` | 요청 경로가 이 경로(하위 포함)일 때만 전송. 보안 경계가 아님 |
+| `Expires=날짜` | 만료 시각(HTTP 날짜). 생략하면 세션 쿠키 |
+| `Max-Age=초` | 만료까지 남은 초. 0 이하이면 즉시 만료. `Expires`와 같이 있으면 `Max-Age`가 우선 |
+| `Secure` | `https:`로만 전송. http 페이지는 `Secure` 쿠키를 설정할 수 없음 |
+| `HttpOnly` | `document.cookie`로 읽을 수 없음. 요청에는 계속 실림 |
+| `SameSite` | 교차 사이트 요청에 보낼지 여부 |
+| `Partitioned` | 최상위 사이트별로 분리 저장(CHIPS) |
+
+- `Domain`에는 공개 접미사(`com`, `co.uk` 등)를 쓸 수 없고, 서버 자신의 도메인이나 그 상위 도메인만 쓸 수 있습니다. 앞의 점은 무시됩니다.
+- `Path`를 생략하면 요청 URL의 경로가 기본값입니다. `Path=/docs`는 `/docs`, `/docs/Web`에 맞지만 `/docsets`와 `/`에는 맞지 않습니다.
+- 표준(RFC 6265bis)은 브라우저가 쿠키 수명을 400일 이하로 제한하도록 권장합니다. 더 긴 `Expires`와 `Max-Age`는 그 한도로 줄어듭니다.
+- `Secure`는 로컬 개발 편의를 위해 `localhost`에서는 https 요구를 무시합니다(Safari 제외).
+- `HttpOnly`는 XSS 공격이 쿠키 값을 훔치는 것을 막습니다. 세션 쿠키에는 필수에 가깝습니다. 자바스크립트로는 `HttpOnly` 쿠키를 설정할 수도 읽을 수도 없습니다(XSS는 63편).
+
+### SameSite
+
+`SameSite`는 다른 사이트에서 시작된 요청에 쿠키를 실을지 정해 CSRF(사용자 모르게 요청을 보내게 하는 공격)를 막습니다. 사이트(site)는 출처(origin)보다 넓은 개념입니다(구분은 62편).
+
+| 값 | 쿠키를 보내는 요청 |
+|----|--------------------|
+| `Strict` | 같은 사이트의 요청만 |
+| `Lax` | 같은 사이트의 요청과, 다른 사이트에서 오는 안전한 최상위 이동(링크 클릭, GET 폼 제출) |
+| `None` | 모든 요청. `Secure`가 반드시 필요 |
+
+- `SameSite`를 생략하면 대부분의 브라우저가 `Lax`로 취급합니다.
+- 다른 사이트의 iframe이나 API 호출에서도 쿠키가 필요하면 `SameSite=None; Secure`를 명시합니다.
+- `Strict`는 외부 링크로 들어온 첫 이동에도 쿠키가 빠져서 로그인이 풀린 것처럼 보일 수 있습니다. 일반 로그인 세션은 `Lax`가 흔한 선택입니다.
+
+### Partitioned
+
+`Partitioned` 쿠키는 쿠키를 설정한 사이트가 아니라 "그 임베드를 담은 최상위 사이트"별로 따로 저장합니다(CHIPS). 서드파티 컨텍스트에서 쿠키를 쓰되 사이트 간 추적은 막는 방식입니다.
+
+```text
+# Set-Cookie 헤더의 값
+__Host-a=1; Secure; Path=/; SameSite=None; Partitioned
+```
+
+- `Secure`가 필수이고, `__Host-` 접두사와 함께 쓰기를 권장합니다.
+- `Set-Cookie`의 `Partitioned`는 Baseline 2025입니다(Chrome 114, Firefox 141, Safari 26.2). 정확한 동작 차이는 엔진마다 확인합니다.
+
+## 쿠키 접두사
+
+쿠키 이름이 `__Secure-`나 `__Host-`로 시작하면 브라우저가 속성 조건을 강제합니다. 하위 도메인이나 http 페이지가 같은 이름으로 쿠키를 덮어쓰는 공격(세션 고정)을 막는 방어층입니다.
+
+| 접두사 | 조건 |
+|--------|------|
+| `__Secure-` | `Secure` 속성이 있고 https 페이지에서 설정 |
+| `__Host-` | `Secure` + `Domain` 없음 + `Path=/`. 호스트 전용 쿠키 보장 |
+| `__Http-` | `Secure` + `HttpOnly`. 서버가 `Set-Cookie`로 설정했음을 보장 |
+| `__Host-Http-` | `__Host-`와 `__Http-` 조건을 모두 만족 |
+
+```http
+Set-Cookie: __Host-sid=abc; Secure; HttpOnly; Path=/
+```
+
+- 접두사를 지원하지 않는 오래된 브라우저는 조건을 어긴 쿠키도 그냥 받아들이므로, 접두사는 방어의 한 겹일 뿐입니다.
+- 조건을 만족하지 못하는 쿠키는 브라우저가 거부합니다.
+- 로그인 세션 쿠키에는 `__Host-` 접두사에 `Secure`, `HttpOnly`, `SameSite=Lax`를 함께 쓰는 구성이 표준적입니다.
+
+## document.cookie 읽기·쓰기 규칙
+
+`document.cookie`는 현재 문서에서 보이는 쿠키를 읽고 쓰는 접근자 프로퍼티입니다. 읽을 때는 문자열 하나, 쓸 때는 쿠키 하나만 다룹니다.
+
+```js
+document.cookie = 'theme=dark; Max-Age=86400; Path=/'
+document.cookie = 'lang=ko; Max-Age=86400; Path=/'
+console.log(document.cookie)
+// 'theme=dark; lang=ko'  (속성은 보이지 않음)
+```
+
+- 읽기: `이름=값` 쌍을 `; `로 이은 문자열입니다. `HttpOnly` 쿠키는 포함되지 않고, 만료·경로 같은 속성은 읽을 수 없습니다.
+- 쓰기: 대입할 때마다 쿠키 하나가 추가되거나 갱신됩니다. 대입으로 다른 쿠키가 지워지지 않고, 읽은 값과 쓴 값이 달라서 `+=`로 덧붙이면 안 됩니다.
+- 덮어쓰려면 이름, `Domain`, `Path`가 모두 같아야 합니다. 경로가 다르면 같은 이름의 쿠키가 따로 생깁니다.
+- 속성을 문자열 안에 `;`로 이어 씁니다: `domain`, `path`, `expires`, `max-age`, `secure`, `samesite`, `partitioned`. `HttpOnly`는 자바스크립트로 설정할 수 없습니다.
+- 삭제는 같은 이름·경로·도메인에 `max-age=0`을 씁니다.
+- 값에 `;`, `,`, 공백이 들어가면 쿠키가 깨지므로 `encodeURIComponent()`로 인코딩하고 읽을 때 `decodeURIComponent()`합니다.
+- 다른 도메인의 쿠키를 설정하려는 시도는 조용히 실패합니다. 쓴 뒤 읽어서 확인해야 합니다.
+- 동기 API라서 메인 스레드를 막습니다. 샌드박스된 iframe, 웹 워커, 서비스 워커에서는 쓸 수 없습니다.
+
+특정 쿠키 값을 읽는 헬퍼입니다.
+
+```js
+function getCookie(name) {
+  const hit = document.cookie
+    .split('; ')
+    .find((row) => row.startsWith(name + '='))
+  if (!hit) return null
+  return decodeURIComponent(hit.slice(name.length + 1))
+}
+```
+
+- `navigator.cookieEnabled`는 브라우저가 쿠키 쓰기를 받아들이는지 알려 주는 불리언입니다(Baseline 2024). 설정이 막혔는지 감지하는 용도로 쓰되, 실제로 쓰고 읽어서 확인하는 편이 확실합니다.
+
+## Cookie Store API
+
+Cookie Store API(`cookieStore`)는 `document.cookie`를 대체하는 비동기·프라미스 기반 API입니다. 보안 컨텍스트(https)에서만 쓸 수 있고 서비스 워커에서도 쓸 수 있습니다.
+
+```js
+await cookieStore.set('theme', 'dark')
+const c = await cookieStore.get('theme')
+// { name: 'theme', value: 'dark' } 또는 null(없을 때)
+await cookieStore.delete('theme')
+```
+
+| 메서드·이벤트 | 설명 |
+|---------------|------|
+| `get(name)` / `getAll()` | 쿠키 하나 또는 여러 개를 객체로 반환. 없으면 `null` |
+| `set(name, value)` / `set(options)` | 쿠키 설정. 옵션은 `name`, `value`, `domain`, `expires`, `maxAge`, `path`, `sameSite`, `partitioned` |
+| `delete(name)` | 쿠키 삭제 |
+| `change` 이벤트 | 쿠키가 바뀔 때 `changed`와 `deleted` 목록을 가진 이벤트가 발생 |
+
+- `set()`의 기본값은 `path: '/'`, `sameSite: 'strict'`입니다. `expires`는 밀리초 시각이고, `expires`와 `maxAge`를 함께 주면 `TypeError`입니다.
+- 조회 결과의 `HttpOnly` 쿠키는 이 API로도 접근할 수 없습니다.
+- 윈도에서 쓰는 `get`·`getAll`·`set`·`delete`와 `change` 이벤트는 Baseline 2025입니다(Chrome 87, Firefox 140, Safari 18.4). 서비스 워커의 쿠키 구독(`CookieStoreManager`)과 `cookiechange` 이벤트는 Baseline이 아니고, `partitioned` 옵션도 일부 엔진만 지원합니다.
+- 지원이 없는 환경에서는 `document.cookie`로 대신하도록 기능 검사(`'cookieStore' in window`)를 둡니다.
+- 쿠키 변경 감지(`change`)는 쿠키 값을 폴링하는 코드를 대신합니다.
+
+## 쿠키와 Web Storage의 용량 한도
+
+| 항목 | 쿠키 | localStorage | sessionStorage |
+|------|------|--------------|----------------|
+| 서버로 전송 | 요청마다 자동 | 안 함 | 안 함 |
+| 수명 | 세션 또는 만료 시각 | 지우기 전까지 | 탭을 닫을 때까지 |
+| 범위 | 도메인·경로 | 출처 | 출처와 탭 |
+| 자바스크립트 접근 | `HttpOnly` 아니면 가능 | 가능 | 가능 |
+| 동기 API | `document.cookie`는 동기 | 동기 | 동기 |
+| 용량 | 쿠키 하나당 이름+값 4096바이트 이하 | 출처당 약 5MiB | 출처당 약 5MiB |
+| 저장 형식 | 문자열 | 문자열 | 문자열 |
+
+- 쿠키: 표준은 이름과 값 길이의 합이 4096바이트를 넘으면 쿠키를 통째로 무시하도록 정합니다. 브라우저는 최소 도메인당 50개, 전체 3000개 정도를 지원하도록 권장하지만 실제 한도는 구현마다 다르고, 한도를 넘으면 오래된 쿠키부터 지워질 수 있습니다.
+- Web Storage: 한도는 브라우저가 정하며 MDN은 출처당 약 5MiB로 안내합니다. 한도를 넘는 `setItem()`은 `QuotaExceededError`를 던집니다.
+- 용량이 크거나 구조화된 데이터는 IndexedDB를 씁니다(41편). 저장 할당량의 전체 모델은 42편입니다.
+- 인증 정보를 `localStorage`에 두면 XSS가 한 줄로 읽어 갑니다. 세션 식별자는 `HttpOnly` 쿠키가 안전한 선택입니다.
+
+## localStorage
+
+`localStorage`는 출처(origin) 단위로 데이터를 저장하고, 브라우저를 닫아도 남는 키-값 저장소입니다. 같은 출처의 모든 탭과 창이 같은 저장소를 공유합니다. 이름은 `Storage` 인터페이스입니다. localStorage와 sessionStorage는 Baseline 2015입니다.
+
+```js
+localStorage.setItem('theme', 'dark')
+localStorage.getItem('theme')    // 'dark'
+localStorage.getItem('nothing')  // null
+localStorage.removeItem('theme')
+localStorage.length              // 0
+```
+
+| 멤버 | 설명 |
+|------|------|
+| `setItem(key, value)` | 저장. 같은 키는 덮어씀. 한도 초과면 `QuotaExceededError` |
+| `getItem(key)` | 값을 반환. 없으면 `null` |
+| `removeItem(key)` | 삭제. 없으면 아무 일 없음 |
+| `clear()` | 이 출처의 항목을 전부 삭제 |
+| `key(n)` | n번째 키 |
+| `length` | 항목 수 |
+
+- 범위는 출처(스킴, 호스트, 포트)입니다. `http://a.com`과 `https://a.com`은 서로 다른 저장소입니다.
+- `localStorage.theme = 'dark'`처럼 프로퍼티로도 접근되지만 `length` 같은 이름과 충돌하므로 메서드를 씁니다.
+- 만료가 없습니다. 사용자가 사이트 데이터를 지우거나 브라우저가 정리하기 전에는 남으므로, 필요하면 값에 저장 시각이나 버전을 같이 넣어 직접 만료·이전 처리를 합니다.
+- 윈도에만 있는 API라서 웹 워커에서는 쓸 수 없습니다.
+- 용도: 테마, 언어, 접힘 상태 같은 작고 민감하지 않은 설정. 민감한 정보와 인증 토큰은 부적합합니다.
+- 다른 출처가 읽을 수 없는 대신, 같은 출처의 모든 스크립트(서드파티 스크립트 포함)가 읽을 수 있습니다.
+
+## sessionStorage
+
+`sessionStorage`는 출처와 탭(최상위 브라우징 컨텍스트)을 단위로 하는 저장소로, 탭이 열려 있는 동안만 남습니다. API는 `localStorage`와 같습니다.
+
+```js
+sessionStorage.setItem('step', '2')
+// 새로고침해도 유지됨. 탭을 닫으면 삭제됨
+```
+
+- 새로고침과 복원에서는 유지되고, 탭이나 창을 닫으면 지워집니다.
+- 같은 출처의 다른 탭은 다른 `sessionStorage`를 가집니다. 같은 탭 안의 같은 출처 iframe끼리는 공유합니다.
+- 용도: 다단계 폼의 임시 값, 탭 단위 UI 상태처럼 탭마다 달라야 하는 데이터.
+- `file:`·`data:` 같은 불투명 출처에서나 저장이 막힌 설정에서는 접근 자체가 `SecurityError`를 던집니다(예외 절).
+
+### 탭 복제 시 sessionStorage 동작
+
+새 탭이 열릴 때 세션 저장소가 새로 만들어지지만 예외가 있습니다.
+
+- 열어 준 쪽(opener)이 있으면 새 탭의 `sessionStorage`는 처음에 opener의 것을 복사해서 시작합니다. `window.open()`으로 연 창이 해당합니다. 복사 이후에는 서로 독립이며 한쪽 변경이 다른 쪽에 반영되지 않습니다.
+- `noopener`로 열면(`window.open(url, '_blank', 'noopener')`나 링크의 `rel="noopener"`) opener가 없어서 복사되지 않습니다.
+- 브라우저의 "탭 복제" 기능은 표준이 정한 동작이 아닙니다. Chrome과 Edge에서는 현재 탭의 `sessionStorage`가 새 탭으로 복사되는 것이 확인됩니다.
+- 따라서 `sessionStorage`에 탭 고유 식별자를 저장해 두면 복제된 탭과 같은 값을 가질 수 있습니다. 탭 구분용 식별자는 페이지 로드 시 새로 만들거나 복제 가능성을 고려해 검증합니다.
+
+## Web Storage의 동기 I/O와 문자열 저장
+
+Web Storage의 모든 메서드는 동기로 실행되어 끝날 때까지 메인 스레드를 막습니다. 값은 문자열만 저장할 수 있어서 다른 타입은 문자열로 변환되어 저장됩니다.
+
+```js
+localStorage.setItem('n', 42)
+localStorage.getItem('n')  // '42' (문자열)
+localStorage.setItem('o', { a: 1 })
+localStorage.getItem('o')  // '[object Object]' (정보 손실)
+```
+
+객체와 배열은 직접 직렬화합니다.
+
+```js
+const saved = { name: 'Kim' }
+localStorage.setItem('user', JSON.stringify(saved))
+const user = JSON.parse(localStorage.getItem('user'))
+// 읽은 객체는 복사본이라 수정해도 저장소에 반영되지 않음
+```
+
+- 수정하려면 읽고, 바꾸고, 다시 `setItem`으로 씁니다.
+- `JSON.parse(null)`은 `null`을 돌려주고, 손상된 문자열은 `SyntaxError`를 던지므로 읽을 때 `try`/`catch`를 둡니다.
+- `Date`, `Map`, `undefined`, 함수는 JSON으로 온전히 왕복되지 않습니다.
+- 큰 값을 자주 읽고 쓰면 UI가 멈추므로, 크기와 빈도가 큰 데이터는 비동기 저장소인 IndexedDB로 옮깁니다(41편). 같은 값을 반복해서 읽을 때는 메모리 변수에 캐시합니다.
+- 키는 앱 이름이나 도메인 영역을 접두사로 붙여 충돌을 줄이고(`app:v1:theme`), 형식이 바뀔 때를 위해 버전을 포함합니다.
+
+## storage 이벤트
+
+`storage` 이벤트는 같은 출처의 다른 문서가 저장소를 바꿨을 때 발생합니다. 변경을 일으킨 문서 자신에게는 발생하지 않습니다. 탭 사이에 설정 변경이나 로그아웃을 알리는 데 씁니다.
+
+```js
+addEventListener('storage', (e) => {
+  if (e.storageArea !== localStorage) return
+  if (e.key === 'theme') applyTheme(e.newValue)
+  if (e.key === null) resetAll() // clear()가 호출됨
+})
+```
+
+| `StorageEvent` 속성 | 값 |
+|---------------------|----|
+| `key` | 바뀐 키. `clear()`이면 `null` |
+| `oldValue` | 이전 값. 새로 추가되었으면 `null` |
+| `newValue` | 새 값. 삭제되었으면 `null` |
+| `url` | 변경을 일으킨 문서의 URL |
+| `storageArea` | 바뀐 `Storage` 객체(`localStorage` 또는 `sessionStorage`) |
+
+- `localStorage`는 같은 출처의 다른 탭과 창으로 이벤트가 갑니다. `sessionStorage`는 같은 탭 안의 같은 출처 iframe 사이에서만 발생합니다.
+- 값이 이전과 같으면 이벤트가 발생하지 않습니다. 이벤트는 취소할 수 없고 버블링하지 않습니다.
+- 같은 탭 안의 컴포넌트끼리 알리려면 `storage` 이벤트가 오지 않으므로 직접 만든 이벤트나 `BroadcastChannel`을 씁니다(59편).
+- 이벤트는 알림일 뿐 동기화 보증이 아닙니다. 동시에 같은 키를 쓰면 마지막 쓰기가 이기고, 읽고 쓰는 사이의 경쟁을 막는 잠금이 필요하면 Web Locks를 씁니다(42편).
+- 이벤트를 받은 뒤에는 `e.newValue`를 쓰고, 값이 크면 `getItem`으로 다시 읽습니다.
+
+## 저장소 접근 예외 처리
+
+저장소는 항상 쓸 수 있는 것이 아닙니다. 접근하는 코드는 실패해도 앱이 멈추지 않게 설계합니다.
+
+| 상황 | 증상 |
+|------|------|
+| 사용자가 사이트 데이터·쿠키를 차단 | `window.localStorage`를 읽는 순간 `SecurityError` |
+| `file:`·`data:` 등 불투명 출처, 일부 샌드박스 iframe | `SecurityError` |
+| 용량 초과 | `setItem()`이 `QuotaExceededError` |
+| 사생활 보호 모드 | 브라우저에 따라 세션 동안만 유지되거나 쿼터가 0이라 쓰기 실패 |
+| 서드파티 컨텍스트에서 쿠키 차단 | iframe 안에서 접근 실패 |
+
+접근과 쓰기를 한 번 시험해서 사용 가능 여부를 판단합니다.
+
+```js
+function storageAvailable(type) {
+  try {
+    const s = window[type] // 접근 자체가 던질 수 있음
+    s.setItem('__t', '1')
+    s.removeItem('__t')
+    return true
+  } catch {
+    return false
+  }
+}
+```
+
+사용할 수 없을 때는 메모리 저장소로 대신해 같은 인터페이스를 유지합니다.
+
+```js
+const mem = new Map()
+const memoryStorage = {
+  getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+  setItem: (k, v) => void mem.set(k, String(v)),
+  removeItem: (k) => void mem.delete(k),
+}
+```
+
+- 속성 존재 검사(`'localStorage' in window`)만으로는 부족합니다. 속성이 있어도 접근이나 쓰기가 실패할 수 있습니다.
+- 쓰기마다 `try`/`catch`로 감싸고, 실패하면 사용자에게 알리거나 이번 세션은 메모리에만 두는 방식으로 낮춥니다. 저장소가 없어도 앱의 핵심 기능은 동작해야 합니다.
+- `QuotaExceededError`는 쓰려는 값이 크거나 이미 가득 찬 경우에 납니다. 오래된 항목을 지우고 재시도하는 정책을 둡니다.
+- `file:`처럼 개발 중에 접근이 막히는 환경이 있으므로 로컬 서버로 확인합니다.
+
+## 핵심 정리
+
+- 쿠키는 서버가 `Set-Cookie`로 주고 브라우저가 매 요청에 자동으로 보내는 상태 수단이며, 이름과 값 합 4096바이트 이하 같은 작은 한도가 있습니다.
+- 속성이 보안을 정합니다: `HttpOnly`는 JavaScript 읽기 차단, `Secure`는 https만, `SameSite`는 교차 사이트 전송 제한이고, `__Host-` 접두사는 호스트 전용을 강제합니다.
+- `document.cookie`는 동기이며 한 번에 쿠키 하나만 쓰고, 속성은 읽을 수 없으며, `HttpOnly` 쿠키는 보이지 않습니다. 비동기 대안인 Cookie Store API의 윈도 부분은 Baseline 2025입니다.
+- localStorage는 출처 단위로 영속, sessionStorage는 탭 단위로 탭을 닫으면 삭제되며, 둘 다 동기이고 문자열만 저장하므로 객체는 `JSON.stringify`로 직렬화합니다.
+- `storage` 이벤트는 같은 출처의 다른 문서가 바꿨을 때만 발생하고 변경한 문서에는 오지 않습니다.
+- 저장소는 차단·사생활 보호 모드·용량 초과로 실패할 수 있으므로 접근을 `try`/`catch`로 감싸고 대체 경로를 둡니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="로그인 세션 쿠키의 보안 설정으로 가장 알맞은 것은?"
+  options={['Set-Cookie: sid=abc; Path=/ (속성 없이 JavaScript로 읽을 수 있게 한다)', 'Set-Cookie: sid=abc; Domain=com; SameSite=None', 'Set-Cookie: __Host-sid=abc; Domain=example.com; Secure; Path=/', 'Set-Cookie: __Host-sid=abc; Secure; HttpOnly; Path=/; SameSite=Lax']}
+  correctAnswer={4}
+  explanation="__Host- 접두사는 Secure, Path=/ 와 Domain 없음을 요구하고, HttpOnly는 XSS가 값을 읽는 것을 막으며, SameSite=Lax는 교차 사이트 요청에 쿠키가 실리는 것을 줄입니다. 속성 없는 쿠키는 보호가 없고, Domain=com은 공개 접미사라 거부되며, 네 번째는 __Host-인데 Domain 속성이 있어 접두사 조건을 어겨 거부됩니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="탭 A와 탭 B가 같은 출처의 페이지를 열고 있다. 탭 A에서 localStorage.setItem('theme', 'dark') 를 실행했을 때 올바른 설명은?"
+  options={['탭 A와 탭 B 모두에서 storage 이벤트가 발생한다', '탭 B에서만 storage 이벤트가 발생하고, 탭 A에는 발생하지 않는다', '탭 A에서만 storage 이벤트가 발생한다', 'sessionStorage와 달리 localStorage는 storage 이벤트를 발생시키지 않는다']}
+  correctAnswer={2}
+  explanation="storage 이벤트는 변경을 일으킨 문서가 아니라 같은 출처의 다른 문서에서 발생합니다. 따라서 탭 B에서만 발생하고, 탭 A 자신에게는 오지 않습니다. 같은 탭 안의 컴포넌트에 알리려면 별도의 이벤트가 필요하며, localStorage 변경도 이벤트를 발생시킵니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="localStorage에 { count: 1 } 객체를 JSON.stringify 없이 setItem 으로 저장한 뒤 getItem 으로 읽으면 어떤 값이 얻어지는가?"
+  options={['{ count: 1 } 객체가 그대로 반환된다', 'null이 반환된다', '[object Object] 문자열이 반환된다', 'TypeError가 발생한다']}
+  correctAnswer={3}
+  explanation="Web Storage는 문자열만 저장하므로 값이 문자열로 변환되고, 일반 객체의 문자열 표현은 [object Object]입니다. 객체를 그대로 돌려받을 수 없고, 저장은 성공했으므로 null이나 TypeError가 아닙니다. 객체는 JSON.stringify로 직렬화하고 JSON.parse로 복원해야 합니다."
+/>
+
+## 참고 자료
+
+- [MDN — Set-Cookie](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie)
+- [MDN — Using HTTP cookies](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Cookies)
+- [MDN — Document.cookie](https://developer.mozilla.org/en-US/docs/Web/API/Document/cookie)
+- [RFC 6265bis — Cookies](https://httpwg.org/http-extensions/draft-ietf-httpbis-rfc6265bis.html)
+- [MDN — Cookie Store API](https://developer.mozilla.org/en-US/docs/Web/API/Cookie_Store_API)
+- [MDN — CookieStore.set()](https://developer.mozilla.org/en-US/docs/Web/API/CookieStore/set)
+- [MDN — CookieStore.get()](https://developer.mozilla.org/en-US/docs/Web/API/CookieStore/get)
+- [MDN — Web Storage API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Storage_API)
+- [MDN — Using the Web Storage API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Storage_API/Using_the_Web_Storage_API)
+- [MDN — Window.sessionStorage](https://developer.mozilla.org/en-US/docs/Web/API/Window/sessionStorage)
+- [MDN — Storage.setItem()](https://developer.mozilla.org/en-US/docs/Web/API/Storage/setItem)
+- [MDN — storage event](https://developer.mozilla.org/en-US/docs/Web/API/Window/storage_event)
+- [HTML Standard — Web storage](https://html.spec.whatwg.org/multipage/webstorage.html)
+- [mdn/content 이슈 3688 — 탭 복제 시 sessionStorage 복사](https://github.com/mdn/content/issues/3688)
+- [web-features — Baseline 데이터](https://cdn.jsdelivr.net/npm/web-features/data.json)

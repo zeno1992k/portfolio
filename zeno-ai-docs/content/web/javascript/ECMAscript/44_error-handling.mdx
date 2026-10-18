@@ -1,0 +1,751 @@
+---
+title: '44. 에러 처리'
+description: 'try...catch...finally, Error 객체와 내장 에러, throw와 전파, 비동기 에러, 커스텀 에러와 cause, 처리되지 않은 에러, 명시적 자원 관리를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 에러가 던져진 뒤 실행 흐름이 어떻게 움직이는지 설명하고, 어디서 잡고 무엇을 던지고 어떻게 정리할지 규칙에 따라 정할 수 있습니다.
+</Callout>
+
+## 에러 처리의 필요성
+
+에러 처리는 실행 중에 생기는 실패를 감지해서, 프로그램이 의도한 방식으로 계속하거나 멈추게 하는 일입니다. JavaScript는 에러가 던져지면 그 자리에서 실행을 멈추고, 에러를 처리하는 코드를 만날 때까지 호출한 쪽으로 거슬러 올라갑니다. 끝까지 처리되지 않으면 그 작업이 중단됩니다.
+
+```js
+const user = undefined
+console.log(user.name) // TypeError
+console.log('done')    // 실행되지 않는다
+```
+
+실패는 출처에 따라 대응이 다릅니다.
+
+| 출처 | 예 | 대응 |
+|------|----|------|
+| 프로그램 버그 | `undefined`의 프로퍼티 접근, 변수명 오타 | 코드를 고친다. 잡아서 감추지 않는다 |
+| 잘못된 입력 | 사용자가 넣은 깨진 JSON, 범위 밖 숫자 | 검증하고 사용자에게 알린다 |
+| 환경 실패 | 네트워크 끊김, 파일 없음, 권한 거부 | 재시도, 대체 경로, 안내 |
+
+에러를 던지지 않고 틀린 값을 돌려주는 동작도 있습니다(01편의 의미 오류). 이런 동작은 try...catch로 잡을 수 없고 값을 직접 검사해야 합니다.
+
+| 방식 | 예 | 확인하는 법 |
+|------|----|-------------|
+| 에러를 던진다 | `JSON.parse('{')`, `null.a` | try...catch |
+| 특수한 값을 돌려준다 | `Number('x')`는 `NaN`, `'abc'.indexOf('z')`는 `-1` | 값 비교 |
+
+던지는 방식은 호출자가 확인을 잊어도 실패가 조용히 지나가지 않습니다. 반환값으로 실패를 알리는 방식은 호출자가 무시하면 틀린 값으로 계속 진행합니다.
+
+- 같은 스크립트의 구문 오류는 파싱 단계에서 스크립트 전체를 막으므로, 그 스크립트의 try...catch로 잡을 수 없습니다. 실행 중에 문자열을 해석하는 `eval`, `new Function`, `JSON.parse`, `new RegExp`는 실행 시점에 SyntaxError를 던지므로 잡을 수 있습니다.
+- 에러 객체는 만들 때 호출 스택을 기록하므로 비용이 듭니다. "값이 있으면 A, 없으면 B" 같은 정상 분기에 에러를 쓰지 않습니다.
+
+## try...catch...finally
+
+`try...catch...finally`는 에러가 날 수 있는 코드를 `try` 블록에 두고, 에러가 나면 `catch` 블록으로, 결과와 상관없이 마지막에 `finally` 블록으로 넘어가는 문입니다.
+
+```js
+try {
+  // 에러가 날 수 있는 코드
+} catch (error) {
+  // 에러가 났을 때
+} finally {
+  // 에러 여부와 상관없이 마지막에
+}
+```
+
+```js
+function run(fail) {
+  try {
+    console.log('1 try')
+    if (fail) throw new Error('x')
+    console.log('2 try end')
+  } catch (e) {
+    console.log('3 catch')
+  } finally {
+    console.log('4 finally')
+  }
+}
+run(false) // 1 try, 2 try end, 4 finally
+run(true)  // 1 try, 3 catch, 4 finally
+```
+
+| 상황 | try | catch | finally |
+|------|-----|-------|---------|
+| 에러 없음 | 끝까지 실행 | 건너뜀 | 실행 |
+| 에러 발생 | 던진 줄에서 중단 | 실행 | 실행 |
+| catch 없이 에러 발생 | 던진 줄에서 중단 | 없음 | 실행한 뒤 에러가 계속 전파 |
+| catch 안에서 새 에러 | 던진 줄에서 중단 | 중단 | 실행한 뒤 새 에러가 전파 |
+
+규칙은 다음과 같습니다.
+
+- 형태는 `try...catch`, `try...finally`, `try...catch...finally` 세 가지입니다. `try`만 쓰면 SyntaxError입니다.
+- 세 블록 모두 중괄호가 필수입니다. 한 줄 문장도 중괄호 없이 쓸 수 없습니다.
+- 에러가 나면 `try` 블록의 나머지 줄은 건너뜁니다. 이미 실행된 줄의 부수 효과(변수 변경, 요청 전송)는 되돌려지지 않습니다.
+- catch의 매개변수는 `catch` 블록 안에서만 보입니다. `try` 안에서 `let`·`const`로 선언한 변수도 블록 밖에서는 보이지 않으므로, 밖에서 쓸 값은 `try` 앞에서 선언합니다.
+- catch 매개변수에는 구조 분해를 쓸 수 있습니다. `catch ({ name, message })`처럼 씁니다(자세히는 37편).
+- `catch` 안에서 던진 에러는 같은 문의 `catch`가 다시 잡지 않고 위로 전파됩니다. 이때도 `finally`는 실행됩니다.
+- `finally`는 `try`나 `catch`가 `return`, `break`, `continue`, `throw`로 빠져나갈 때도 실행됩니다. 실행되지 않는 경우는 프로세스를 강제로 끝내는 `process.exit()`, 무한 루프, 호스트의 강제 중단입니다.
+
+흔한 실수는 `try`로 너무 많은 코드를 감싸는 것입니다. 어느 줄의 에러인지 알 수 없고, 예상하지 못한 버그까지 같은 `catch`가 삼킵니다. 실패가 예상되는 호출만 감쌉니다.
+
+```js
+let data
+try {
+  data = JSON.parse(text) // 실패가 예상되는 줄만
+} catch (e) {
+  data = null
+}
+```
+
+## Error 객체
+
+Error 객체는 에러의 종류, 메시지, 발생 위치를 담는 표준 객체입니다. `new Error(message, options)`로 만들고, `new` 없이 `Error(message)`로 호출해도 같은 새 객체를 만듭니다. 모든 내장 에러 생성자가 그렇습니다.
+
+| 프로퍼티 | 위치 | 내용 |
+|----------|------|------|
+| `name` | 프로토타입 | 에러 종류 이름. `Error.prototype.name`은 `'Error'` |
+| `message` | 인스턴스 | 생성자에 넘긴 문자열. 생략하면 own 프로퍼티가 없고 프로토타입의 `''`가 보인다 |
+| `cause` | 인스턴스 | `options.cause`로 넘긴 원인(ES2022, 아래 Error cause 절) |
+| `stack` | 인스턴스 | 에러를 만든 시점의 호출 스택 문자열. 명세에 없는 비표준 프로퍼티 |
+
+```js
+const err = new Error('파일을 찾을 수 없습니다')
+err.name     // 'Error'
+err.message  // '파일을 찾을 수 없습니다'
+String(err)  // 'Error: 파일을 찾을 수 없습니다'
+err.stack    // 'Error: 파일을...\n    at ...'
+```
+
+- `toString()`은 `name: message` 형식입니다. `message`가 빈 문자열이면 `name`만 나옵니다.
+- `message`가 문자열이 아니면 문자열로 변환합니다. `new Error(42).message`는 `'42'`입니다.
+- `stack`의 형식은 엔진마다 다릅니다. V8은 `at 함수 (파일:줄:열)`, Firefox와 Safari는 `함수@파일:줄:열` 형태입니다. 파싱하지 않고 기록용으로만 씁니다.
+- `stack`은 던진 시점이 아니라 에러 객체를 만든 시점의 호출 스택입니다. 미리 만들어 둔 에러를 다른 곳에서 던지면 만든 곳이 찍힙니다.
+- `message`와 `stack`은 열거되지 않는 프로퍼티입니다. `JSON.stringify(new Error('x'))`는 `'{}'`이고 `Object.keys`는 `[]`입니다. 직렬화하려면 `{ name: e.name, message: e.message, stack: e.stack }`처럼 직접 꺼냅니다.
+- 에러 객체에도 `err.code = 'ENOENT'`처럼 프로퍼티를 추가할 수 있습니다.
+- Error 인스턴스는 `[[ErrorData]]` 내부 슬롯을 가집니다. 진짜 에러인지 판별하는 `Error.isError`가 이 슬롯을 봅니다(아래 절).
+
+흔한 실수는 만들기만 하고 던지지 않는 것입니다. 에러 객체는 던지기 전까지 평범한 객체입니다.
+
+```js
+function check(value) {
+  if (!value) new Error('required') // ❌ throw 누락. 아무 일도 없다
+  if (!value) throw new Error('required') // ✅
+}
+```
+
+## 내장 에러 종류
+
+ECMAScript는 Error와 그 하위 생성자를 정의하고, 엔진은 규칙 위반을 만나면 알맞은 종류를 던집니다.
+
+| 종류 | 던져지는 경우 | 예 |
+|------|---------------|----|
+| TypeError | 값이 기대한 타입이 아니거나 허용되지 않는 연산 | `null.a`, 함수가 아닌 값 호출, `const` 재할당, 화살표 함수에 `new` |
+| ReferenceError | 없거나 아직 초기화되지 않은 변수 참조 | 선언 없는 식별자 읽기, TDZ 접근 |
+| RangeError | 값이 허용 범위 밖 | `new Array(-1)`, `(1).toFixed(101)`, `'a'.repeat(-1)`, 호출 스택 초과 |
+| SyntaxError | 문법에 맞지 않는 코드나 문자열을 해석 | `JSON.parse('{')`, `new RegExp('(')`, `eval` |
+| URIError | 잘못된 URI 처리 | `decodeURIComponent('%')` |
+| EvalError | 현재 명세의 어떤 연산도 던지지 않음. 하위 호환용으로만 존재 | 없음 |
+| AggregateError | 여러 에러를 하나로 묶음(ES2021) | `Promise.any`가 전부 거부될 때 |
+
+```js
+null.a                  // TypeError
+missing                 // ReferenceError (선언 없는 식별자)
+new Array(-1)           // RangeError
+JSON.parse('{')         // SyntaxError
+decodeURIComponent('%') // URIError
+```
+
+- 모든 내장 에러는 Error를 상속합니다. `new TypeError() instanceof Error`는 `true`입니다.
+- 생성자 형태는 `(message, options)`로 같습니다. AggregateError만 `(errors, message, options)`입니다.
+- `message` 문구는 엔진마다 다릅니다. 분기는 `message`가 아니라 `name`이나 `instanceof`로 합니다.
+- 호출 스택 초과(`Maximum call stack size exceeded`)도 RangeError라서 잡을 수는 있지만 복구할 방법이 드뭅니다. 재귀를 반복문으로 바꾸는 쪽이 답입니다(스택 한도는 01편, 22편).
+- 브라우저의 `DOMException`(예: `AbortError`)은 ECMAScript가 아니라 호스트가 정의한 에러입니다. `Error.prototype`을 상속하므로 `instanceof Error`가 `true`이고, `name`에 `'AbortError'` 같은 이름이 담깁니다.
+
+헷갈리기 쉬운 두 종류는 대상이 다릅니다.
+
+| 코드 | 에러 | 이유 |
+|------|------|------|
+| `notDeclared` | ReferenceError | 식별자 자체가 없다 |
+| `obj.missing.x` | TypeError | 식별자는 있고 `undefined`의 프로퍼티를 읽으려 했다 |
+
+`typeof`는 선언되지 않은 식별자에 에러 없이 `'undefined'`를 돌려주지만, TDZ 안의 변수에는 ReferenceError를 던집니다(자세히는 13편).
+
+## throw
+
+`throw` 문은 값을 던져 현재 실행을 즉시 중단하고, 가장 가까운 `catch`로 제어를 넘깁니다.
+
+```js
+throw new Error('실패')
+throw new TypeError('숫자가 필요합니다')
+```
+
+```js
+function sqrt(n) {
+  if (typeof n !== 'number') {
+    throw new TypeError('number 필요')
+  }
+  if (n < 0) throw new RangeError('0 이상이어야 합니다')
+  return Math.sqrt(n)
+}
+sqrt('4') // TypeError
+sqrt(-1)  // RangeError
+```
+
+- `throw`는 식이 아니라 문입니다. 화살표 함수 본문(`() => throw ...`)이나 `a ?? throw ...` 같은 식 자리에서는 SyntaxError입니다. 블록으로 감싸거나 함수 호출로 우회합니다. 식으로 쓰게 하는 throw expressions는 Stage 2 제안이라 아직 표준이 아닙니다.
+- `throw`와 값 사이에는 줄바꿈을 둘 수 없습니다(`Illegal newline after throw`).
+- `throw` 뒤의 같은 블록 코드는 실행되지 않습니다.
+- `catch`는 던진 값을 그대로(같은 참조로) 받습니다. `throw err`로 던진 `err`와 `catch (e)`의 `e`는 `===`입니다.
+- 던지는 값에는 제한이 없지만 Error 객체를 던집니다(아래 에러가 아닌 값 던지기 절).
+- 함수는 자신이 맡은 계약(인수 타입, 상태, 범위)을 어긴 호출을 만났을 때 던집니다. 종류는 타입이 틀리면 TypeError, 범위를 벗어나면 RangeError, 그 밖에는 Error나 커스텀 에러를 고릅니다.
+
+## 에러 전파
+
+에러는 던져진 함수에서 그 함수를 호출한 함수로, 다시 그 호출자로 호출 스택(지금 실행 중인 함수 호출이 쌓인 구조, 자세히는 22편)을 따라 올라가며 `catch`를 찾습니다.
+
+```js
+function c() { throw new Error('boom') }
+function b() {
+  try { c() } finally { console.log('b finally') }
+}
+function a() {
+  try { b() } catch (e) { console.log(e.message) }
+}
+a()
+// b finally
+// boom
+```
+
+- 올라가는 동안 각 호출 프레임이 하나씩 제거됩니다(스택 되감기). 프레임을 지날 때 그 안의 `finally`가 실행됩니다.
+- 가장 가까운 `catch`에서 멈춥니다. 그 위의 호출자는 에러가 있었다는 사실을 알지 못합니다.
+- `catch`에서 다시 `throw`하면 전파가 이어집니다.
+- 끝까지 잡는 곳이 없으면 처리되지 않은 에러가 됩니다(아래 절).
+- 전파되는 동안 에러 객체의 `stack`은 바뀌지 않습니다.
+- 전파는 호출 스택을 따라서만 일어납니다. 타이머 콜백, 이벤트 핸들러, 프로미스 콜백은 나중에 새 호출 스택에서 실행되므로 `try` 바깥으로 전파되지 않습니다(아래 절).
+
+어디서 잡을지는 설계 문제입니다. 낮은 층의 함수는 던지고, 복구할지 사용자에게 알릴지 결정할 수 있는 높은 층이 잡습니다. 중간 층은 정리가 필요할 때만 `finally`를 씁니다.
+
+## 비동기 에러와 try...catch의 한계
+
+`try...catch`는 `try` 블록이 실행되는 동안 호출 스택 안에서 던져진 에러만 잡습니다. 콜백은 나중에 실행되므로 그 시점에는 `try`가 이미 끝나 있습니다(이벤트 루프는 40편).
+
+```js
+try {
+  setTimeout(() => { throw new Error('late') }, 0)
+} catch (e) {
+  console.log('caught') // 실행되지 않는다
+}
+console.log('try 끝')   // 먼저 출력된다
+// 그 뒤 콜백에서 처리되지 않은 에러가 발생한다
+```
+
+| 비동기 방식 | try...catch가 못 잡는 이유 | 처리 방법 |
+|-------------|---------------------------|-----------|
+| 타이머, 이벤트 콜백 | 새 호출 스택에서 실행된다 | 콜백 안에 try...catch |
+| 프로미스 | 에러가 거부(rejection)로 바뀐다 | `.catch()` 또는 `await` 뒤 try...catch |
+| async 함수 | 에러가 반환된 프로미스의 거부가 된다 | 호출 쪽에서 `await` 뒤 try...catch |
+| Node.js 콜백 스타일 | 에러를 던지지 않고 인수로 전달한다 | 첫 인수 `err` 검사 |
+
+프로미스 콜백(executor, `then`, `catch`)이 동기적으로 던진 에러는 프로미스를 거부 상태로 만듭니다(자세히는 41편). 단 executor 안에서 다시 타이머를 거치면 거부로 바뀌지 않습니다.
+
+```js
+new Promise(() => { throw new Error('a') }) // 거부된다
+new Promise(() => {
+  setTimeout(() => { throw new Error('b') }, 0) // ❌ 거부가 아님
+})
+new Promise((_, reject) => {
+  setTimeout(() => reject(new Error('c')), 0)   // ✅
+})
+```
+
+흔한 실수는 세 가지입니다.
+
+`await` 없이 프로미스 반환 함수를 `try`로 감싸는 경우입니다. 거부가 `catch`로 오지 않고 처리되지 않은 거부가 됩니다.
+
+```js
+try {
+  loadUser()               // async 함수, await 없음
+} catch (e) {
+  // 여기로 오지 않는다
+}
+```
+
+`async` 함수 안에서 `await` 없이 프로미스를 `return`하는 경우입니다. 거부가 함수를 벗어난 뒤에 일어나서 같은 `try`의 `catch`가 잡지 못합니다(자세히는 43편).
+
+```js
+async function a() {
+  try { return fail() } catch { return 'caught' }
+}
+async function b() {
+  try { return await fail() } catch { return 'caught' }
+}
+// a()는 거부된다. b()는 'caught'로 이행한다. fail()은 거부하는 async 함수
+```
+
+`forEach`에 `async` 콜백을 넘기는 경우입니다. `forEach`는 콜백이 돌려준 프로미스를 기다리지 않으므로 에러가 `try` 밖으로 새어 나갑니다. `for...of` 안에서 `await`하거나 `await Promise.all(arr.map(async ...))`를 씁니다.
+
+## catch 바인딩 생략
+
+ES2019부터 에러 값이 필요 없으면 `catch (e)`의 괄호와 변수를 통째로 생략하고 `catch { }`로 쓸 수 있습니다(optional catch binding).
+
+```js
+function safeParse(text) {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+safeParse('{') // null
+```
+
+- 괄호까지 생략해야 합니다. 빈 괄호 `catch () { }`는 SyntaxError입니다.
+- 에러 객체에 접근할 방법이 없으므로, 원인을 기록하거나 종류를 구분해야 하면 쓰지 않습니다.
+- 모든 종류의 에러를 같은 방식으로 삼킵니다. 실패 원인이 하나로 정해진 호출(`JSON.parse`)에 씁니다.
+- 흔한 실수는 `try`에 다른 코드까지 넣어서 오타로 생긴 ReferenceError 같은 버그를 함께 가리는 것입니다.
+
+## 커스텀 에러 클래스
+
+커스텀 에러 클래스는 Error를 상속해서 종류별 분기와 부가 데이터를 담는 클래스입니다(class와 extends는 24편, 25편).
+
+```js
+class ValidationError extends Error {
+  constructor(message, field, options) {
+    super(message, options)
+    this.name = 'ValidationError'
+    this.field = field
+  }
+}
+const e = new ValidationError('나이 오류', 'age')
+e instanceof ValidationError // true
+e instanceof Error           // true
+e.name                       // 'ValidationError'
+```
+
+- `super(message, options)`를 가장 먼저 호출합니다. 호출 전에 `this`를 쓰면 ReferenceError입니다.
+- `options`를 `super`에 넘겨야 `cause`가 동작합니다.
+- 상속만 하면 `name`은 프로토타입 체인의 `'Error'`입니다. 설정하지 않으면 `String(e)`와 콘솔에 `Error: ...`로 보입니다. 설정 방법은 셋입니다.
+
+| 방법 | 코드 | 특징 |
+|------|------|------|
+| 생성자에서 대입 | `this.name = 'ValidationError'` | 가장 흔하다. 열거되는 own 프로퍼티가 생겨 `Object.keys`와 `JSON.stringify`에 나온다 |
+| 클래스 필드 | `name = 'ValidationError'` | 대입과 같은 own 프로퍼티 |
+| 프로토타입에 정의 | `ValidationError.prototype.name = '...'` | own 프로퍼티가 없고 열거되지 않는다 |
+
+- `this.name = new.target.name`으로 쓰면 하위 클래스가 자기 이름을 자동으로 가집니다(new.target은 15편).
+- `message`는 열거되지 않으므로, `JSON.stringify(e)` 결과에는 `name`과 `field`만 나옵니다. 필요하면 `toJSON()` 메서드를 정의합니다.
+- 부가 데이터(`code`, `status`, `field`)는 필드로 둡니다.
+- 계층을 만들면 `instanceof`로 넓은 종류와 좁은 종류를 모두 구분할 수 있습니다.
+
+```js
+class AppError extends Error {}
+class NotFoundError extends AppError {}
+
+if (e instanceof NotFoundError) { /* 404 응답 */ }
+else if (e instanceof AppError) { /* 일반 앱 에러 */ }
+else throw e
+```
+
+- `Error.captureStackTrace(this, this.constructor)`는 스택에서 생성자 프레임을 빼는 V8 계열의 비표준 기능입니다. 지원은 엔진마다 다릅니다.
+- 호출자가 다르게 처리할 때만 새 종류를 만듭니다. 구분할 일이 없는 에러까지 클래스로 나누지 않습니다.
+- 에러 종류는 `message` 문자열 비교가 아니라 클래스나 `code` 값으로 구분합니다.
+
+## Error cause
+
+`cause`는 이 에러를 일으킨 원래 에러(원인)를 보존하는 프로퍼티입니다. ES2022에서 `new Error(message, { cause })`로 설정합니다.
+
+```js
+try {
+  JSON.parse(text)
+} catch (err) {
+  throw new Error('설정 파일을 읽지 못했습니다', { cause: err })
+}
+// 잡은 쪽: e.message는 '설정 파일을...', e.cause는 SyntaxError
+```
+
+- 모든 내장 에러 생성자가 `options`를 받습니다. 위치는 `(message, options)`이고, AggregateError는 세 번째 인수입니다.
+- `options`에 `cause` 키가 있을 때만 own 프로퍼티가 생깁니다. 값이 `undefined`여도 키가 있으면 생기고, `{}`이면 생기지 않습니다.
+- `cause`는 열거되지 않는 own 데이터 프로퍼티입니다.
+- 값은 어떤 타입이든 됩니다. Error라고 가정하지 말고 `e.cause instanceof Error`로 확인합니다.
+- 커스텀 클래스는 `super(message, options)`로 넘겨야 `cause`가 설정됩니다.
+- Node.js는 에러를 콘솔에 출력할 때 `[cause]:` 아래에 원인 체인을 함께 보여 줍니다.
+
+원인 체인은 반복문으로 따라갑니다. 에러가 서로를 `cause`로 가리키면 순환하므로 무한 반복에 주의합니다.
+
+```js
+for (let e = err; e; e = e.cause) {
+  console.log(e.name, e.message)
+}
+```
+
+감싸는 목적은 원래 에러에 맥락(어느 파일, 어느 사용자)을 더하는 것입니다. 더할 맥락이 없으면 감싸지 않고 그대로 전파합니다. `cause` 없이 새 에러를 던지거나 `err.message`를 문자열로 이어 붙이면 원래 에러의 종류와 `stack`이 사라집니다.
+
+여러 실패를 표현하는 도구는 용도가 다릅니다.
+
+| 상황 | 쓰는 것 |
+|------|---------|
+| 하나의 실패에 맥락을 더해 감싼다 | `cause` |
+| 같은 작업에서 독립된 여러 실패를 모은다 | AggregateError(아래 절) |
+| 본문 에러가 진행 중인데 정리 단계에서도 실패했다 | SuppressedError(명시적 자원 관리 절) |
+
+## finally와 return
+
+`finally`는 `try`나 `catch`가 `return`, `throw`, `break`, `continue`로 빠져나가려 할 때도 그 직전에 실행됩니다. 반환값이 걸려 있을 때의 규칙이 세 가지입니다.
+
+첫째, 반환값은 `finally`가 실행되기 전에 이미 계산되어 있습니다. `finally`가 변수를 바꿔도 반환값은 그대로입니다. 객체를 반환했다면 같은 참조이므로 프로퍼티 수정은 보입니다.
+
+```js
+function f() {
+  let x = 1
+  try { return x } finally { x = 2 }
+}
+f() // 1
+function g() {
+  const o = { n: 1 }
+  try { return o } finally { o.n = 2 }
+}
+g() // { n: 2 }
+```
+
+둘째, `finally`가 정상적으로 끝나면 원래의 `return`이나 `throw`가 그대로 이어집니다.
+
+```js
+function h() {
+  try { return 'try' } finally { console.log('cleanup') }
+}
+h() // cleanup 출력 후 'try' 반환
+```
+
+셋째, `finally` 안의 `return`, `throw`, `break`, `continue`는 원래의 완료를 덮어씁니다.
+
+| finally 안에서 | try나 catch의 원래 결과 | 최종 결과 |
+|----------------|-------------------------|-----------|
+| `return 'f'` | return 또는 throw | finally의 return. 원래 에러였다면 에러가 사라진다 |
+| `throw` | return 또는 throw | 새 에러. 원래 반환값과 에러가 사라진다 |
+| `break`, `continue` | return 또는 throw | 루프 제어가 이긴다. 원래 return이 취소된다 |
+
+```js
+function lost() {
+  try { throw new Error('lost') }
+  finally { return 'finally' }
+}
+lost() // 'finally'. 에러가 사라진다
+
+function cancel() {
+  for (const i of [1, 2]) {
+    try { return i } finally { continue }
+  }
+  return 'end'
+}
+cancel() // 'end'. 첫 return이 취소된다
+```
+
+- `finally` 안에서는 `return`, `throw`, `break`, `continue`를 쓰지 않습니다. ESLint는 `no-unsafe-finally` 규칙으로 막습니다.
+- `async` 함수에서도 같은 규칙이고, `finally` 안에서 `await`를 쓸 수 있습니다.
+- 프로미스의 `.finally()`는 이름만 같은 별도 메서드입니다(자세히는 41편).
+- 제너레이터를 `for...of`의 `break`나 `return()`으로 중간에 끝내면, `try` 안에서 멈춰 있던 제너레이터의 `finally`가 실행됩니다(자세히는 42편).
+
+## 처리되지 않은 에러
+
+처리되지 않은 에러는 어떤 `catch`에도 잡히지 않고 호출 스택 끝까지 올라간 에러, 또는 처리기가 붙지 않은 채 거부된 프로미스입니다. 이때의 동작은 ECMAScript가 아니라 호스트가 정합니다. 명세는 거부된 프로미스를 호스트에 알리는 훅만 정의합니다.
+
+| 호스트 | 처리되지 않은 에러 | 처리되지 않은 거부 |
+|--------|--------------------|--------------------|
+| 브라우저 | 콘솔에 `Uncaught` 표시, 그 작업만 중단. `window`의 `error` 이벤트 | 콘솔에 `Uncaught (in promise)` 표시. `unhandledrejection` 이벤트 |
+| Node.js | 스택을 출력하고 종료 코드 1로 프로세스 종료. `uncaughtException` 이벤트 | Node.js 15부터 기본 동작이 같다(종료 코드 1). `unhandledRejection` 이벤트 |
+
+브라우저에서는 에러가 난 작업만 멈추고 페이지의 다른 코드는 계속 동작합니다. Node.js는 프로세스가 끝납니다.
+
+```js
+// 브라우저
+window.addEventListener('error', (event) => {
+  report(event.error)
+})
+window.addEventListener('unhandledrejection', (event) => {
+  report(event.reason)
+})
+```
+
+```js
+// Node.js
+process.on('uncaughtException', (err) => {
+  report(err)
+  process.exit(1)
+})
+process.on('unhandledRejection', (reason) => report(reason))
+```
+
+- 전역 핸들러는 마지막 보루입니다. 기록과 보고용이지 복구용이 아닙니다.
+- Node.js 문서는 `uncaughtException` 뒤에 정상 실행을 이어 가는 것이 안전하지 않다고 명시합니다. 동기적 정리를 한 뒤 프로세스를 끝내는 것이 올바른 용도입니다.
+- `unhandledRejection` 핸들러를 등록하면 Node.js는 그 거부를 uncaught 에러로 올리지 않습니다. 그래서 핸들러 안에서 직접 종료할지 정해야 합니다.
+- 거부된 프로미스에 나중에 `.catch()`를 붙이면, 그 사이에 이미 처리되지 않은 거부로 보고될 수 있습니다. 프로미스를 만든 같은 동기 코드 안에서 처리기를 붙입니다.
+
+흔한 실수는 `async` 함수를 `await`도 `.catch()`도 없이 호출하는 것입니다. 거부되는 순간 처리되지 않은 거부가 되고, Node.js에서는 프로세스가 끝납니다.
+
+```js
+saveLog(data)                // ❌ 거부되면 처리되지 않은 거부
+saveLog(data).catch(report)  // ✅
+```
+
+## 처리·기록·다시 던지기
+
+`catch`에 들어온 에러에는 세 가지 행동이 있고, 한 에러에는 보통 하나를 고릅니다.
+
+| 행동 | 의미 | 예 |
+|------|------|----|
+| 처리 | 실패를 복구하고 정상 흐름으로 돌아간다 | 기본값 사용, 재시도, 사용자에게 안내 |
+| 기록 | 원인을 로그나 모니터링에 남긴다 | `console.error`, 서버로 전송 |
+| 다시 던지기 | 이 층에서는 해결할 수 없어 위로 넘긴다 | `throw e`, 감싸서 던짐 |
+
+처리할 수 있는 에러만 잡고, 나머지는 그대로 다시 던집니다.
+
+```js
+try {
+  save(form)
+} catch (e) {
+  if (!(e instanceof ValidationError)) throw e // 처리 대상 아님
+  showFieldError(e.field, e.message)
+}
+```
+
+- `throw e`는 원본 객체를 그대로 던지므로 `stack`이 바뀌지 않습니다. 맥락을 더하려면 `new Error(msg, { cause: e })`로 감쌉니다.
+- 기록은 한 곳에서 합니다. 각 층에서 기록하고 다시 던지면 같은 에러가 여러 번 남습니다. 에러가 최종 처리되는 경계(최상위 핸들러, 요청 처리 지점)에서 한 번 기록합니다.
+- 기록할 때는 에러 객체 자체를 넘깁니다. `console.error(err)`는 `stack`과 `cause`까지 출력하지만, `console.log(err.message)`나 `'오류: ' + err`는 둘 다 잃습니다. `console`은 호스트 API입니다.
+- 빈 `catch`(`catch (e) { }`)는 실패를 숨깁니다. 무시가 의도라면 `catch { }`로 쓰고 이유를 주석으로 남깁니다.
+- `catch` 안에서 정리 작업이 실패해 새 에러가 나면 원래 에러가 사라집니다. `cause`로 연결하거나 정리 부분을 별도의 `try`로 감쌉니다.
+
+처리(재시도)와 다시 던지기를 함께 쓰는 패턴입니다.
+
+```js
+async function retry(fn, times) {
+  let lastError
+  for (let i = 0; i < times; i++) {
+    try { return await fn() }
+    catch (e) { lastError = e }
+  }
+  throw lastError // 모든 시도가 실패하면 마지막 에러를 던진다
+}
+```
+
+## AggregateError
+
+AggregateError는 서로 독립된 여러 에러를 하나의 에러 객체로 묶습니다(ES2021). `new AggregateError(errors, message, options)`로 만듭니다.
+
+```js
+const err = new AggregateError(
+  [new TypeError('a'), new RangeError('b')],
+  '검증 실패 2건'
+)
+err.name          // 'AggregateError'
+err.message       // '검증 실패 2건'
+err.errors.length // 2
+```
+
+- 첫 인수는 이터러블(자세히는 35편)이고, 순회한 결과를 새 배열로 만들어 `errors`에 저장합니다. 요소가 Error가 아니어도 됩니다.
+- `errors`는 열거되지 않는 own 프로퍼티입니다.
+- `message`와 `options`(`cause`)는 선택입니다. Error를 상속하므로 `instanceof Error`가 `true`입니다.
+- `Promise.any`는 모든 프로미스가 거부되면 AggregateError로 거부하고, `errors`에 거부 이유가 입력 순서대로 담깁니다. 빈 이터러블을 넘겨도 AggregateError로 거부됩니다(자세히는 41편).
+- `Promise.allSettled`는 던지지 않고 결과 배열로 알려 주고, `Promise.all`은 첫 거부 하나로 거부합니다. 둘 다 AggregateError를 쓰지 않습니다.
+
+```js
+Promise.any([Promise.reject(1), Promise.reject(2)])
+  .catch((e) => e.errors) // [1, 2]
+```
+
+직접 쓰는 곳은 여러 필드의 검증 실패를 한 번에 보고하는 경우처럼, 첫 실패에서 멈추지 않고 전부 모아 던질 때입니다.
+
+## Error.isError (ES2026)
+
+`Error.isError(value)`는 값이 진짜 에러 객체인지 판별하는 정적 메서드입니다. Stage 4에 오른 제안(2025년 5월)이며 ES2026 판에 포함됩니다.
+
+```js
+Error.isError(new TypeError())                // true
+Error.isError({ name: 'Error', message: '' }) // false
+Error.isError(Object.create(Error.prototype)) // false
+Object.create(Error.prototype) instanceof Error // true
+```
+
+판별 기준은 프로토타입 체인이 아니라 에러 생성자가 만든 `[[ErrorData]]` 내부 슬롯입니다. 모든 내장 에러, `Error`를 `extends`한 클래스의 인스턴스, AggregateError, SuppressedError, `DOMException`이 `true`입니다.
+
+`instanceof Error`는 두 방향으로 틀립니다.
+
+| 경우 | `instanceof Error` | `Error.isError` |
+|------|--------------------|-----------------|
+| 다른 realm(iframe, Node.js `vm` 컨텍스트)에서 만든 진짜 에러 | `false` | `true` |
+| `Error.prototype`만 프로토타입으로 가진 일반 객체 | `true` | `false` |
+
+realm은 `Error`, `Array` 같은 내장 객체 세트를 따로 가진 실행 영역입니다(자세히는 22편). 다른 realm의 에러는 그쪽의 `Error`로 만들어졌으므로 이쪽의 `Error`로는 `instanceof`가 실패합니다.
+
+- `name`과 `message`가 있는지 보는 덕 타이핑은 일반 객체를 에러로 오인합니다. 이 메서드가 그 대안입니다.
+- 모든 환경에서 쓸 수 있는 것은 아닙니다(MDN 기준 Baseline 아님). Node.js 24에서는 동작합니다. 쓰기 전에 대상 환경의 지원 표를 확인하고, 지원하지 않는 환경에서는 `instanceof Error`로 대체합니다.
+
+## 에러가 아닌 값 던지기
+
+`throw`는 문자열, 숫자, 객체, `null`, `undefined` 등 모든 값을 던질 수 있습니다. 에러가 아닌 값은 `stack`, `name`, `message`가 없어서 원인을 추적하고 종류를 구분하기 어렵습니다.
+
+```js
+try { throw 'failed' } catch (e) {
+  typeof e // 'string'
+  e.stack  // undefined
+}
+```
+
+- `throw undefined`나 `throw null`을 잡으면 `e`가 `undefined`나 `null`이라서, `if (e)`로 에러가 있었는지 판단할 수 없습니다.
+- 처리되지 않으면 Node.js는 원인 위치를 알려 주는 스택 없이 값만 출력합니다.
+- 프로미스 거부도 같습니다. `Promise.reject('x')`와 `reject('x')`에도 Error를 넘깁니다. ESLint는 `no-throw-literal`, `prefer-promise-reject-errors` 규칙으로 두 경우를 막습니다.
+- `catch`의 `e`는 어떤 값이든 올 수 있다고 가정해야 합니다. 제3자 코드나 라이브러리가 문자열이나 일반 객체를 던질 수 있습니다. 경계에서 Error로 정규화합니다.
+
+```js
+function toError(value) {
+  return value instanceof Error
+    ? value
+    : new Error(String(value), { cause: value })
+}
+toError('oops').message // 'oops'
+toError('oops').cause   // 'oops'
+```
+
+다른 realm의 에러까지 Error로 인정하려면 `instanceof Error` 대신 `Error.isError`를 씁니다.
+
+## 명시적 자원 관리 (ES2027 예정)
+
+명시적 자원 관리는 파일, 연결, 락 같은 자원을 스코프가 끝날 때 자동으로 해제하는 문법(`using`)과 내장 객체(`DisposableStack`, `SuppressedError`)의 묶음입니다. Stage 4에 올랐고(2025년 5월) ES2027 판에 포함될 예정입니다. 엔진 지원은 환경마다 다르며 MDN 기준 Baseline이 아닙니다. 아래 코드는 Node.js 24에서 동작을 확인했습니다.
+
+`try...finally`로 직접 쓰던 해제 코드를 대체합니다.
+
+```js
+const file = open('a.txt')
+try {
+  read(file)
+} finally {
+  file.close() // 해제를 직접 써야 한다
+}
+```
+
+```js
+{
+  using file = open('a.txt')
+  read(file)
+} // 블록이 끝나면 file[Symbol.dispose]()가 자동 호출된다
+```
+
+### using 선언
+
+`using x = expr`는 `const`처럼 블록 스코프이고 재할당할 수 없습니다. 스코프가 끝나면 `x[Symbol.dispose]()`가 호출됩니다. `Symbol.dispose`와 `Symbol.asyncDispose`는 이 제안이 추가하는 well-known 심벌입니다(심벌은 34편).
+
+```js
+function open(name) {
+  console.log('open', name)
+  return {
+    [Symbol.dispose]() { console.log('close', name) },
+  }
+}
+{
+  using a = open('A')
+  using b = open('B')
+  console.log('work')
+}
+// open A, open B, work, close B, close A
+```
+
+- 값은 `null`, `undefined`, 또는 `[Symbol.dispose]()` 메서드를 가진 객체여야 합니다. 그 밖의 값은 TypeError입니다. `null`과 `undefined`는 해제하지 않고 지나갑니다.
+- 정상 종료, `return`, `break`, `throw` 어느 경로로 스코프를 나가도 해제됩니다.
+- 여러 선언은 선언의 역순으로 해제합니다. 뒤 자원이 앞 자원에 의존할 수 있기 때문입니다.
+- 한 자원의 해제가 에러를 던져도 나머지 해제는 계속 실행됩니다.
+- `await using x = expr`는 `[Symbol.asyncDispose]()`를 `await`합니다. `async` 함수나 모듈 최상위에서만 쓸 수 있습니다. `asyncDispose`가 없으면 `Symbol.dispose`를 대신 호출합니다.
+- 쓸 수 있는 위치는 블록, 함수 본문, 클래스 static 초기화 블록, 모듈 최상위, `for`·`for...of` 헤더입니다. 스크립트(비모듈) 최상위, `switch` 최상위, `for...in` 헤더에서는 쓸 수 없습니다.
+
+### DisposableStack
+
+`DisposableStack`은 여러 해제 동작을 모아 한 번에 해제하는 컨테이너입니다. 자원 개수가 조건에 따라 달라지거나 `[Symbol.dispose]`가 없는 값을 다룰 때 씁니다. 비동기 해제용은 `AsyncDisposableStack`이고 `disposeAsync()`로 해제합니다.
+
+| 멤버 | 하는 일 |
+|------|---------|
+| `use(value)` | 해제 가능한 객체를 등록하고 그 객체를 반환한다 |
+| `adopt(value, onDispose)` | 해제 메서드가 없는 값에 해제 함수를 붙여 등록하고 값을 반환한다 |
+| `defer(fn)` | 해제 때 실행할 함수를 등록한다 |
+| `move()` | 등록한 내용을 새 스택으로 옮기고, 현재 스택은 해제된 상태가 된다 |
+| `dispose()` | 등록의 역순으로 모두 해제한다. 두 번 호출해도 한 번만 해제된다 |
+| `disposed` | 해제 여부를 나타내는 프로퍼티 |
+
+```js
+{
+  using stack = new DisposableStack()
+  stack.use(open('S1'))
+  stack.defer(() => console.log('deferred'))
+  console.log('work')
+}
+// work, deferred, close S1
+```
+
+`move()`는 초기화가 끝까지 성공했을 때만 소유권을 바깥으로 넘기는 용도입니다. 중간에 실패하면 스택이 해제되면서 이미 확보한 자원이 정리됩니다.
+
+### SuppressedError
+
+SuppressedError는 에러가 진행 중인 상태에서 해제 중에도 에러가 났을 때, 둘을 잃지 않으려고 묶어 던지는 에러입니다. `new SuppressedError(error, suppressed, message)`로 만들며 Error를 상속합니다.
+
+- `error`는 나중에 발생한 에러, `suppressed`는 그 시점까지 진행 중이던 에러입니다.
+- 두 프로퍼티는 열거되지 않는 own 프로퍼티입니다.
+
+```js
+try {
+  using r = {
+    [Symbol.dispose]() { throw new Error('dispose') },
+  }
+  throw new Error('body')
+} catch (e) {
+  e.name               // 'SuppressedError'
+  e.error.message      // 'dispose'
+  e.suppressed.message // 'body'
+}
+```
+
+- 에러가 해제 중에만 났다면 SuppressedError로 감싸지 않고 그 에러가 그대로 던져집니다.
+- 해제 에러가 여러 개이면 겹겹이 중첩됩니다. 해제는 선언의 역순이라, 에러가 날 때마다 이전 상태를 `suppressed`에 넣고 새 SuppressedError로 감쌉니다. 마지막에 해제되는(가장 먼저 선언한) 자원의 에러가 가장 바깥의 `error`가 됩니다.
+- `try...finally`에서 `finally` 안의 `throw`가 원래 에러를 덮어쓰던 문제(위 finally와 return 절)를 이 방식이 해결합니다.
+
+## 핵심 정리
+
+- 에러는 던져진 곳에서 호출 스택을 따라 가장 가까운 `catch`까지 올라가고, 지나는 `finally`는 모두 실행됩니다. 타이머·프로미스 콜백은 새 호출 스택이라 `try` 바깥으로 전파되지 않습니다.
+- Error 객체는 `name`, `message`, 비표준 `stack`, 원인 `cause`를 가집니다. `message`와 `stack`은 열거되지 않아 `JSON.stringify`가 `{}`를 냅니다.
+- Error만 던지고, 처리할 수 있는 에러만 잡고, 나머지는 `throw e`나 `cause`로 감싸 다시 던집니다. 기록은 경계 한 곳에서만 합니다.
+- `finally` 안의 `return`, `throw`, `break`, `continue`는 try·catch의 결과를 덮어씁니다. 반환값은 `finally` 실행 전에 이미 계산됩니다.
+- 처리되지 않은 에러의 동작은 호스트가 정합니다. Node.js는 종료 코드 1로 끝나고, 브라우저는 그 작업만 중단합니다.
+- `Error.isError`(ES2026)는 realm을 넘어 진짜 에러를 판별하고, `using`·`DisposableStack`·SuppressedError(ES2027 예정)는 자원 해제를 자동화합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="함수 f가 try 블록에서 return 1을, finally 블록에서 return 2를 실행한다. f()의 결과는?"
+  options={['1', '2', 'undefined', 'SyntaxError']}
+  correctAnswer={2}
+  explanation="finally 안의 return은 try의 return을 덮어씁니다. try의 return 1은 이미 평가됐지만 finally가 정상 종료하지 않고 return 2로 빠져나가므로 최종 결과는 2입니다. 같은 이유로 finally 안의 return은 try에서 던진 에러도 지웁니다. finally에서 return을 쓸 수 있으므로 SyntaxError도 아닙니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="다음 중 둘러싼 try...catch의 catch로 에러가 전달되는 경우는?"
+  options={['try 안의 setTimeout에 넘긴 콜백이 던진 에러', 'try 안에서 await 없이 호출한 async 함수가 거부된 경우', 'try 안에서 await로 기다린 프로미스가 거부된 경우', 'try 안의 forEach에 넘긴 async 콜백이 던진 에러']}
+  correctAnswer={3}
+  explanation="await는 거부된 프로미스를 그 자리에서 throw로 바꿔 주므로 같은 try의 catch가 잡습니다. 타이머 콜백은 try가 끝난 뒤 새 호출 스택에서 실행되고, await 없이 호출한 async 함수의 거부와 forEach의 async 콜백이 만든 거부는 try 바깥의 처리되지 않은 거부가 됩니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="using으로 a, b를 차례로 선언한 블록에서 본문이 에러를 던졌고 b의 해제 중에도 에러가 났다. catch가 받는 값은?"
+  options={['SuppressedError. error는 b의 해제 에러, suppressed는 본문 에러', '본문 에러가 그대로 전달되고 해제 에러는 버려진다', 'b의 해제 에러가 그대로 전달되고 본문 에러는 버려진다', 'AggregateError. errors에 두 에러가 담긴다']}
+  correctAnswer={1}
+  explanation="진행 중이던 본문 에러가 있는 상태에서 해제 에러가 나면 두 에러를 SuppressedError로 묶습니다. error에는 나중에 발생한 해제 에러가, suppressed에는 그 전에 진행 중이던 본문 에러가 담깁니다. 한쪽을 버리는 방식은 try...finally에서 finally의 throw가 원래 에러를 덮어쓰는 문제이고, 이를 막으려고 만든 것이 SuppressedError입니다. AggregateError는 독립된 여러 실패를 모을 때 씁니다."
+/>
+
+## 참고 자료
+
+- [ECMA-262 — Error Objects](https://tc39.es/ecma262/#sec-error-objects)
+- [ECMA-262 — The try Statement](https://tc39.es/ecma262/#sec-try-statement)
+- [MDN — Control flow and error handling](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Control_flow_and_error_handling)
+- [MDN — Error](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error)
+- [MDN — Error: cause](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error/cause)
+- [MDN — Error.isError()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error/isError)
+- [MDN — AggregateError](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AggregateError)
+- [MDN — using](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/using)
+- [Node.js — process 'uncaughtException'와 'unhandledRejection'](https://nodejs.org/api/process.html)
+- [TC39 — Finished Proposals](https://github.com/tc39/proposals/blob/main/finished-proposals.md)
+- [TC39 — Throw expressions 제안](https://github.com/tc39/proposal-throw-expressions)

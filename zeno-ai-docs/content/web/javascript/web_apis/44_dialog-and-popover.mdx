@@ -1,0 +1,384 @@
+---
+title: '44. dialog와 Popover API'
+description: 'dialog 요소의 모달·비모달 열기와 닫기, returnValue와 이벤트, Popover API와 Top Layer, inert, Invoker Commands, 기본 대화상자의 한계를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** `dialog`와 Popover를 열고 닫는 API, 이벤트 순서, 닫는 방법 제어를 구분하고 모달과 비모달, Top Layer, `inert`의 관계를 근거로 오버레이 요소를 고를 수 있습니다.
+</Callout>
+
+## dialog 요소
+
+`dialog`는 모달 또는 비모달 대화상자를 나타내는 HTML 요소입니다. Baseline 2022부터 널리 지원됩니다. 닫혀 있을 때는 화면에 나타나지 않고, 열리면 `open` 속성이 붙습니다.
+
+```html
+<dialog id="dlg">
+  <h2>제목</h2>
+  <p>내용</p>
+  <button type="button" id="ok">확인</button>
+</dialog>
+```
+
+```js
+const dlg = document.querySelector('#dlg')
+dlg.showModal()    // 열기(모달)
+dlg.open           // true
+dlg.close()        // 닫기
+```
+
+- `open` 속성을 직접 붙여도 열리지만 비모달로 열려 Top Layer와 `inert` 처리가 없습니다. MDN은 `show()`나 `showModal()` 사용을 권장합니다.
+- 역할은 암묵적으로 `dialog`입니다. 경고 성격이면 `role="alertdialog"`를 씁니다. `dialog`에 `tabindex`를 주지 않습니다.
+- 닫는 수단을 항상 제공합니다. 키보드 사용자가 Esc를 쓰지 못하는 상황을 고려해 닫기 버튼을 둡니다.
+- 이름은 제목 요소와 `aria-labelledby`로 연결합니다(자세히는 27편).
+
+## showModal / close
+
+`showModal()`은 모달로, `show()`는 비모달로 엽니다. `close()`는 닫으며 문자열 인수를 주면 `returnValue`가 됩니다.
+
+| 메서드 | 동작 |
+|--------|------|
+| `showModal()` | 모달로 열기. 나머지 페이지가 `inert`가 되고 Top Layer에 올라감 |
+| `show()` | 비모달로 열기. 나머지 페이지는 그대로 상호작용 가능 |
+| `close(value?)` | 닫기. 값이 있으면 `returnValue`에 저장 |
+| `requestClose(value?)` | 닫기를 요청. 먼저 `cancel` 이벤트가 발생(아래 참조) |
+
+- 모달로 열면 안의 첫 포커스 가능 요소로 포커스가 이동합니다. 시작 포커스를 지정하려면 그 요소에 `autofocus`를 줍니다.
+- `close()`와 Esc 처리는 같은 상태 변경이지만 이벤트 경로가 다릅니다(아래 `cancel`·`close` 이벤트).
+- 선언형으로 열려면 Invoker Commands의 `command="show-modal"`을 씁니다(아래 참조).
+
+## returnValue와 form method="dialog"
+
+`returnValue`는 대화상자가 닫힐 때 어떤 선택이 있었는지를 담는 문자열입니다. `close('값')`으로 넣거나 `form method="dialog"`의 제출 버튼 `value`로 정해집니다.
+
+```html
+<dialog id="dlg">
+  <form method="dialog">
+    <p>삭제할까요?</p>
+    <button value="cancel" formnovalidate>취소</button>
+    <button value="ok" autofocus>삭제</button>
+  </form>
+</dialog>
+```
+
+```js
+dlg.addEventListener('close', () => {
+  console.log(dlg.returnValue) // 'ok' 또는 'cancel'
+})
+```
+
+- `method="dialog"`인 폼을 제출하면 서버로 전송하지 않고 대화상자가 닫힙니다. 폼의 상태는 저장되며 제출한 버튼의 `value`가 `returnValue`가 됩니다.
+- 취소 버튼에는 `formnovalidate`를 주어 필수 입력 검증 없이 닫히게 합니다. 이 속성이 없으면 검증 실패로 닫히지 않습니다(자세히는 12편).
+- 닫힌 뒤에 `returnValue`를 읽어 결과를 처리하고, 다시 열기 전에 초기화가 필요하면 직접 `returnValue = ''`로 비웁니다.
+
+## cancel·close 이벤트
+
+| 이벤트 | 발생 시점 | 취소 |
+|--------|-----------|------|
+| `cancel` | 닫기 요청이 있을 때(Esc, `requestClose()`, 닫기 요청 기능) | `preventDefault()`로 취소 가능 |
+| `close` | 대화상자가 실제로 닫힌 뒤 | 취소 불가 |
+
+```js
+dlg.addEventListener('cancel', (e) => {
+  if (hasUnsavedChanges()) e.preventDefault() // 닫지 않음
+})
+dlg.addEventListener('close', () => cleanup())
+```
+
+- `close()`를 직접 호출하면 `cancel`이 발생하지 않고 바로 닫히며 `close` 이벤트만 발생합니다. 닫기를 막을 수 있는 경로가 필요하면 `requestClose()`를 씁니다.
+- `cancel`은 닫기 직전에 작업 확인을 거는 자리입니다. `close`는 정리 작업(포커스 복원, 상태 초기화)을 하는 자리입니다.
+- `toggle`과 `beforetoggle`도 `dialog`에서 발생합니다. 이벤트 객체는 아래 ToggleEvent 절에서 설명합니다.
+
+## requestClose()와 closedby
+
+`requestClose()`는 닫기 요청을 브라우저의 닫기 감시자(close watcher)와 같은 경로로 처리합니다. `cancel` 이벤트를 먼저 발생시키고 막지 않으면 `close`로 이어집니다. Baseline 2025입니다(MDN 기준 2025년 5월).
+
+```js
+dlg.addEventListener('cancel', (e) => {
+  if (dirty) e.preventDefault()
+})
+dlg.requestClose('cancelled') // cancel -> close
+```
+
+`closedby` 속성은 사용자 동작으로 대화상자를 닫을 수 있는 방법을 정합니다. 미Baseline이므로 지원을 확인해야 합니다.
+
+| 값 | 닫는 방법 |
+|----|-----------|
+| `any` | 바깥 클릭(라이트 디스미스), Esc, 코드 |
+| `closerequest` | Esc 같은 닫기 요청, 코드 |
+| `none` | 코드로만 |
+
+- 속성이 없거나 값이 올바르지 않으면 열린 방식에 따라 정해집니다. `showModal()`로 열면 `closerequest`처럼, `show()`나 `open` 속성으로 열면 `none`처럼 동작합니다.
+- JavaScript에서는 `dlg.closedBy`로 읽고 씁니다.
+- 지원하지 않는 브라우저를 위해 바깥 클릭으로 닫기는 `click` 이벤트로 직접 구현하고, 시작 포커스와 닫은 뒤의 포커스 복원은 코드로 확인합니다(자세히는 45편).
+
+## Modal / Non-modal 구분
+
+| 항목 | 모달(`showModal()`) | 비모달(`show()`) |
+|------|---------------------|------------------|
+| 나머지 페이지 | `inert`. 클릭·포커스·읽기 모두 차단 | 그대로 사용 가능 |
+| Top Layer | 올라감 | 올라가지 않음 |
+| `::backdrop` | 있음 | 없음 |
+| Esc | 기본으로 닫음 | 기본으로 닫지 않음 |
+| 암묵적 `aria-modal` | `true` | `false` |
+| 포커스 | 안의 첫 요소로 이동 | 이동하지 않음 |
+
+- 모달은 사용자가 반드시 응답해야 하는 확인·입력에, 비모달은 작업을 방해하지 않는 보조 패널에 씁니다.
+- 비모달 `dialog`는 Top Layer에 올라가지 않아서 다른 요소에 가려질 수 있습니다. 항상 위에 두려면 `popover` 속성을 함께 쓰는 하이브리드(`dialog popover`)를 씁니다.
+- 선택 기준: 응답을 강제하면 모달 `dialog`, 가볍게 열었다가 바깥 클릭으로 닫는 UI면 Popover, 위치가 요소에 붙는 메뉴·툴팁이면 Popover입니다.
+
+## inert
+
+`inert`는 요소와 모든 후손을 상호작용할 수 없는 상태로 만드는 전역 속성입니다. Baseline 2023입니다(MDN 기준 2023년 4월).
+
+```html
+<main inert>
+  <button>눌러도 반응 없음</button>
+</main>
+```
+
+- 포커스가 가지 않고, 클릭 이벤트가 발생하지 않으며, 접근성 트리에서 제거되고, 텍스트 선택과 페이지 내 검색 대상에서도 빠집니다. 입력 요소와 `contenteditable`도 편집할 수 없습니다.
+- `aria-hidden`은 접근성 트리에서만 제거하고 포커스와 클릭은 막지 않는 반면, `inert`는 모두 막습니다.
+- 부모가 `inert`이면 자손이 `inert=false`로 되돌릴 수 없습니다. 예외는 `showModal()`로 연 모달 `dialog`로, 조상의 `inert`를 물려받지 않습니다.
+- DOM 속성은 `el.inert = true`입니다. 모달이 열린 동안 나머지 페이지가 `inert`가 되는 것이 `showModal()`의 핵심 효과입니다.
+- `inert`만으로 비활성을 표현하지 않습니다. 사용자가 비활성임을 알 수 있도록 시각적 표시를 함께 주고, 개별 폼 컨트롤에는 `disabled`를 씁니다.
+
+## Top Layer
+
+Top Layer는 뷰포트 전체를 덮으며 다른 모든 콘텐츠 위에 그려지는 브라우저 내부 렌더링 계층입니다. `z-index`, `overflow`, 일반 쌓임 맥락과 관계없이 항상 위에 나타납니다.
+
+| 요소 | Top Layer 진입 |
+|------|----------------|
+| `showModal()`로 연 `dialog` | 예 |
+| `showPopover()`로 연 popover | 예 |
+| `requestFullscreen()`한 요소 | 예 |
+| `show()`로 연 비모달 `dialog` | 아니오 |
+
+- 같은 계층 안에서는 나중에 들어간 요소가 위에 놓입니다.
+- 계층에 들어간 요소와 그 `::backdrop`은 각각 새 쌓임 맥락을 만듭니다.
+- 부모에 `overflow: hidden`이나 `z-index`가 있어도 잘리거나 가려지지 않으므로, 이전에 쓰던 `body` 끝에 오버레이를 붙이는 우회 구조가 필요 없습니다.
+- 계층 자체를 직접 다룰 수는 없고 개별 요소를 대상으로 스타일합니다.
+
+**흔한 실수:** 비모달 `dialog`에 높은 `z-index`를 주면 해결된다고 생각하는 것입니다. 비모달은 Top Layer에 올라가지 않아 쌓임 맥락의 제약을 그대로 받습니다.
+
+## ::backdrop
+
+`::backdrop`은 Top Layer에 올라간 요소 바로 뒤에 그려지는 가상 요소로, 뒷배경을 어둡게 하는 데 씁니다. Top Layer에 올라간 요소(모달 `dialog`, popover)에 생기고 비모달 `dialog`에는 없습니다. backdrop은 자신만의 쌓임 맥락을 만듭니다.
+
+```css
+dialog::backdrop {
+  background: rgb(0 0 0 / 0.5);
+}
+[popover]::backdrop {
+  background: transparent;
+}
+```
+
+
+## Popover API
+
+Popover API는 다른 콘텐츠 위에 비모달 오버레이를 표시하는 표준 방법입니다. `popover` 속성이 있는 어느 요소든 popover가 되고 Top Layer에 올라갑니다. `showPopover()`는 Baseline 2024입니다.
+
+```html
+<button popovertarget="tip">도움말</button>
+<div id="tip" popover>도움말 내용</div>
+```
+
+- JavaScript 없이 `popovertarget`이 가리키는 id의 popover를 여닫습니다. 이때 popover는 안에서 포커스를 가두지 않고, 열릴 때 포커스를 자동으로 옮기지도 않습니다(`autofocus`를 주면 이동).
+- 닫히면 포커스가 호출한 요소로 돌아갑니다. 호출 버튼에는 `aria-expanded`가, popover에는 호출 요소와의 `aria-details` 관계가 암묵적으로 설정됩니다.
+- popover에는 암묵적 역할이 없는 일반 컨테이너입니다. 메뉴나 툴팁이면 `role`을 직접 줍니다(자세히는 27편).
+- 모달 대화상자가 필요하면 `dialog`를 씁니다. 하이브리드가 필요하면 `dialog popover`로 둘을 합칩니다.
+- 앵커 위치 지정(CSS anchor positioning)과 함께 쓸 수 있고, `popovertarget`으로 연결된 호출 요소는 암묵적 앵커가 됩니다.
+
+### popover 값: auto·manual·hint
+
+| 값 | 라이트 디스미스 | 동시에 열림 | 용도 |
+|----|-----------------|--------------|------|
+| `auto` (값 없이 `popover`만 써도 같음) | 예(바깥 클릭, Esc) | 하나만. 중첩된 것은 예외 | 메뉴, 선택 패널 |
+| `manual` | 아니오 | 여러 개 가능 | 토스트, 직접 닫는 패널 |
+| `hint` | 예 | 다른 `hint`는 닫힘 | 툴팁 |
+
+- `auto`를 열면 연관 없는 다른 `auto`가 닫힙니다. 단, DOM 후손이거나 호출 요소·`anchor`로 연결된 중첩 관계면 함께 열려 있습니다.
+- `hint`는 `auto`를 닫지 않습니다. 브라우저는 `auto` 스택과 `hint` 스택을 따로 관리하며, `manual`은 어느 쪽에도 참여하지 않습니다.
+- `auto` popover는 다른 요소에서 `showModal()`이나 `requestFullscreen()`이 성공하면 닫힙니다.
+- `hint`의 Baseline 지원 상태는 확인하지 못했으므로 `hint`를 쓸 때는 지원을 확인하고 `auto`로 대체할 수 있게 둡니다.
+
+### popovertarget과 popovertargetaction
+
+`popovertarget`은 버튼이 제어할 popover의 id이고 `popovertargetaction`은 동작입니다.
+
+| `popovertargetaction` | 동작 |
+|-----------------------|------|
+| `toggle` (기본) | 열려 있으면 닫고 닫혀 있으면 엶 |
+| `show` | 열기 |
+| `hide` | 닫기 |
+
+```html
+<button popovertarget="menu"
+        popovertargetaction="show">열기</button>
+<div id="menu" popover>
+  <button popovertarget="menu"
+          popovertargetaction="hide">닫기</button>
+</div>
+```
+
+JavaScript에서는 버튼의 `popoverTargetElement`, `popoverTargetAction` 프로퍼티로 같은 값을 읽고 씁니다.
+
+### showPopover()·hidePopover()·togglePopover()
+
+```js
+const pop = document.querySelector('#menu')
+pop.showPopover()          // 열기
+pop.hidePopover()          // 닫기
+pop.togglePopover()        // 상태 반전
+pop.togglePopover(true)    // force: true면 열기, false면 닫기
+```
+
+- `showPopover({ source })`처럼 `source` 옵션에 호출 요소를 넘기면 그 요소가 호출자로 취급되어 키보드 포커스 순서에 위치하고 암묵적 앵커가 됩니다.
+- 이미 열린 popover를 다시 열거나 닫힌 것을 다시 닫으면 `InvalidStateError`입니다. `togglePopover`는 이를 피합니다.
+- `beforetoggle`나 `toggle` 핸들러 안에서 다른 popover를 열고 닫는 도중에 또 호출해도 `InvalidStateError`입니다.
+- `popover` 속성이 없는 요소나 DOM에서 제거된 popover에 호출하면 `NotSupportedError`입니다.
+- `el.popover`로 값('auto', 'manual', 'hint')을 읽고 쓸 수 있습니다. 열려 있는지는 CSS `:popover-open`이나 `matches(':popover-open')`로 확인합니다.
+
+### beforetoggle·toggle 이벤트와 ToggleEvent.source
+
+popover, `dialog`, `details`는 열리고 닫힐 때 두 이벤트가 발생하고, 이벤트 객체는 `ToggleEvent`입니다.
+
+| 이벤트 | 시점 | 취소 |
+|--------|------|------|
+| `beforetoggle` | 상태가 바뀌기 직전 | 열 때만 `preventDefault()`로 취소 가능 |
+| `toggle` | 상태가 바뀐 뒤 | 불가 |
+
+| `ToggleEvent` 필드 | 값 |
+|--------------------|----|
+| `oldState` | 이전 상태 `'open'` 또는 `'closed'` |
+| `newState` | 바뀔 상태 `'open'` 또는 `'closed'` |
+| `source` | 상태를 바꾼 호출 요소. 없으면 `null` |
+
+```js
+pop.addEventListener('beforetoggle', (e) => {
+  if (e.newState === 'open') loadContent() // 열기 전 준비
+})
+pop.addEventListener('toggle', (e) => {
+  console.log(e.oldState, '->', e.newState, e.source)
+})
+```
+
+- `ToggleEvent`는 Baseline 2023부터 지원됩니다. `source`는 Baseline 2026(MDN 기준 2026년 5월 신규)이므로 쓰기 전에 지원을 확인합니다.
+- `source`는 `popovertarget` 같은 호출 버튼으로 연 경우 그 요소를 담고, `togglePopover()` 같은 JavaScript 메서드로 호출하면 `null`입니다(`source` 옵션을 넘긴 경우는 그 요소).
+- 열린 뒤에 해야 할 일(포커스 이동, 데이터 요청)은 `toggle`에서, 열기 자체를 막거나 열기 전 준비는 `beforetoggle`에서 합니다.
+
+## Invoker Commands (command·commandfor)
+
+Invoker Commands는 버튼이 JavaScript 없이 다른 요소의 동작을 호출하게 하는 선언형 API입니다. Baseline 2025입니다. `commandfor`에 대상 요소의 id를, `command`에 동작을 적습니다.
+
+```html
+<button commandfor="dlg" command="show-modal">열기</button>
+<dialog id="dlg">
+  <button commandfor="dlg" command="close">닫기</button>
+</dialog>
+```
+
+| 내장 `command` | 대상 | 동작 |
+|----------------|------|------|
+| `show-modal` | `dialog` | 모달로 열기 |
+| `close` | `dialog` | 닫기 |
+| `request-close` | `dialog` | 닫기 요청(`cancel` 발생) |
+| `show-popover` | popover | 열기 |
+| `hide-popover` | popover | 닫기 |
+| `toggle-popover` | popover | 상태 반전 |
+
+- JavaScript 프로퍼티는 `button.command`, `button.commandForElement`입니다.
+- `--`로 시작하는 이름은 사용자 정의 명령입니다. 대상 요소에 `command` 이벤트가 발생하고 `CommandEvent`의 `command`와 `source`(호출 버튼)로 처리합니다.
+
+```js
+img.addEventListener('command', (e) => {
+  if (e.command === '--rotate-left') {
+    e.source.style.rotate = '-90deg'
+  }
+})
+```
+
+- 내장 명령은 스크립트 로드를 기다리지 않아도 동작하고 키보드(Space, Enter)로 호출됩니다.
+- `popovertarget`과 비교하면 `popovertarget`은 popover 전용이고 `command`는 `dialog`까지 포함하며 사용자 정의 명령을 지원합니다.
+
+## alert·confirm·prompt의 한계
+
+`alert()`, `confirm()`, `prompt()`는 브라우저가 제공하는 기본 대화상자입니다. 쓰기 쉽지만 UI 컴포넌트로는 한계가 뚜렷합니다.
+
+| 함수 | 반환 |
+|------|------|
+| `alert(msg)` | `undefined` |
+| `confirm(msg)` | 확인 `true`, 취소 `false` |
+| `prompt(msg, default)` | 입력한 문자열, 취소하면 `null` |
+
+- 스크립트 실행과 UI 상호작용을 막는 동기 호출입니다. 사용자가 닫을 때까지 아무것도 진행되지 않습니다.
+- 모양과 문구, 버튼 이름을 바꿀 수 없어서 브랜드와 접근성 요구를 맞추지 못합니다. MDN은 더 유연한 스타일링이 필요하면 `dialog` 요소를 쓰라고 안내합니다.
+- 사용자가 탭을 전환하면 표시되지 않거나 기다리지 않을 수 있고, 교차 출처 iframe이나 백그라운드 탭에서는 브라우저가 대화상자를 억제할 수 있습니다.
+- 대화상자가 열려 있는 동안 페이지의 다른 작업이 멈추므로 비동기 흐름과 맞지 않습니다.
+
+대체는 `dialog`를 Promise로 감싸는 방식입니다.
+
+```js
+function confirmDialog(dlg) {
+  return new Promise((resolve) => {
+    dlg.addEventListener('close', () => {
+      resolve(dlg.returnValue === 'ok')
+    }, { once: true })
+    dlg.showModal()
+  })
+}
+```
+
+## 핵심 정리
+
+- `dialog`는 `showModal()`(모달)과 `show()`(비모달)로 열고 `close(value)`로 닫으며, `form method="dialog"`의 버튼 `value`가 `returnValue`가 됩니다.
+- Esc나 `requestClose()`는 취소 가능한 `cancel` 이벤트 뒤에 닫히고, `close()` 직접 호출은 `cancel` 없이 `close`만 발생합니다. `closedby`는 미Baseline입니다.
+- 모달은 나머지 페이지를 `inert`로 만들고 Top Layer와 `::backdrop`을 쓰며, 비모달은 이 셋이 없습니다.
+- `popover` 속성은 `auto`(라이트 디스미스, 하나만)·`manual`(직접 닫음)·`hint`(툴팁)로 나뉘고 `popovertarget`, `showPopover()`, `togglePopover()`로 제어합니다.
+- `beforetoggle`(열 때만 취소 가능)과 `toggle`은 `ToggleEvent`를 받으며 `source`는 Baseline 2026입니다. `command`와 `commandfor`는 JavaScript 없이 `dialog`와 popover를 제어합니다.
+- `alert`·`confirm`·`prompt`는 동기로 UI를 막고 꾸밀 수 없어서 `dialog`로 대체합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="다음 중 dialog를 닫을 때 cancel 이벤트가 발생하지 않고 close 이벤트만 발생하는 경우는?"
+  options={['모달 dialog에서 Esc 키를 누른다', 'requestClose()를 호출한다', 'close()를 직접 호출한다', 'command가 request-close인 버튼을 누른다']}
+  correctAnswer={3}
+  explanation="cancel은 Esc나 requestClose처럼 닫기를 요청하는 경로에서 먼저 발생하며 preventDefault로 막을 수 있습니다. close()를 직접 호출하면 요청 단계 없이 바로 닫히므로 close 이벤트만 발생합니다."
+  optionExplanations={['Esc는 닫기 요청이라 cancel이 먼저 발생합니다.', 'requestClose는 cancel을 발생시킨 뒤 막지 않으면 닫습니다.', '정답입니다. close()는 cancel 없이 바로 닫고 close 이벤트만 발생합니다.', 'request-close 명령은 requestClose와 같아 cancel이 먼저 발생합니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="비모달 dialog(show()로 연 것)에 대한 설명으로 옳은 것은?"
+  options={['나머지 페이지가 inert가 되어 클릭할 수 없다', 'Top Layer에 올라가 z-index와 무관하게 항상 위에 보인다', '나머지 페이지와 계속 상호작용할 수 있고 Esc로 기본 닫히지 않는다', '::backdrop이 자동으로 생성된다']}
+  correctAnswer={3}
+  explanation="show()로 연 비모달 dialog는 나머지 페이지를 막지 않고 Top Layer와 backdrop도 없으며 Esc로 닫히지 않습니다. 이 네 가지는 모달 dialog의 특징입니다. 항상 위에 두려면 popover를 함께 씁니다."
+  optionExplanations={['inert 처리는 showModal로 연 모달의 효과입니다.', 'Top Layer 진입은 모달 dialog나 popover의 특징이며 비모달에는 없습니다.', '정답입니다. 비모달은 뒷페이지가 그대로 동작하고 Esc로 기본 닫히지 않습니다.', 'backdrop은 모달 dialog와 popover에만 있습니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="popover 값 auto와 manual의 차이로 옳은 것은?"
+  options={['auto는 바깥 클릭이나 Esc로 닫히고 manual은 직접 닫아야 한다', 'auto는 여러 개를 동시에 열 수 있고 manual은 하나만 열 수 있다', 'manual만 Top Layer에 올라간다', 'auto는 모달이라 나머지 페이지를 inert로 만든다']}
+  correctAnswer={1}
+  explanation="auto popover는 라이트 디스미스(바깥 클릭, Esc)로 닫히고 연관 없는 다른 auto를 열면 닫힙니다. manual은 자동으로 닫히지 않아 직접 닫아야 하고 여러 개를 동시에 열 수 있습니다. 둘 다 Top Layer에 올라가며 popover는 비모달입니다."
+  optionExplanations={['정답입니다. auto는 라이트 디스미스가 있고 manual은 코드로 닫아야 합니다.', '반대입니다. 여러 개를 동시에 열 수 있는 쪽은 manual입니다.', 'auto와 manual 모두 열리면 Top Layer에 올라갑니다.', 'popover는 비모달이라 나머지 페이지를 inert로 만들지 않습니다.']}
+/>
+
+## 참고 자료
+
+- [MDN — dialog element](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/dialog)
+- [MDN — HTMLDialogElement](https://developer.mozilla.org/en-US/docs/Web/API/HTMLDialogElement)
+- [MDN — HTMLDialogElement: requestClose() method](https://developer.mozilla.org/en-US/docs/Web/API/HTMLDialogElement/requestClose)
+- [MDN — HTMLDialogElement: closedBy property](https://developer.mozilla.org/en-US/docs/Web/API/HTMLDialogElement/closedBy)
+- [MDN — Popover API](https://developer.mozilla.org/en-US/docs/Web/API/Popover_API)
+- [MDN — Using the Popover API](https://developer.mozilla.org/en-US/docs/Web/API/Popover_API/Using)
+- [MDN — HTMLElement: showPopover() method](https://developer.mozilla.org/en-US/docs/Web/API/HTMLElement/showPopover)
+- [MDN — ToggleEvent](https://developer.mozilla.org/en-US/docs/Web/API/ToggleEvent)
+- [MDN — ToggleEvent: source property](https://developer.mozilla.org/en-US/docs/Web/API/ToggleEvent/source)
+- [MDN — Invoker Commands API](https://developer.mozilla.org/en-US/docs/Web/API/Invoker_Commands_API)
+- [MDN — inert global attribute](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Global_attributes/inert)
+- [MDN — Top layer](https://developer.mozilla.org/en-US/docs/Glossary/Top_layer)
+- [MDN — Window: alert() method](https://developer.mozilla.org/en-US/docs/Web/API/Window/alert)

@@ -1,0 +1,325 @@
+---
+title: '03. 코드 흐름 제어'
+description: '중첩 반복문, break·continue, Flag 변수, 조기 반환, 가드 절, 삼항 연산자, 센티널 값, 레이블 문, for와 for...of의 선택 기준을 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 반복과 분기의 흐름을 끊고 건너뛰고 빠져나오는 문법을 정확히 구분해, 중첩된 구조에서도 읽기 쉽고 틀리지 않는 흐름으로 쓸 수 있습니다.
+</Callout>
+
+## 중첩 반복문
+
+반복문 안에 반복문을 두는 구조입니다. 안쪽 반복은 바깥 반복이 한 번 돌 때마다 처음부터 끝까지 실행됩니다. 바깥이 N번, 안쪽이 M번이면 안쪽 본문은 N × M번 실행됩니다.
+
+```js
+function countPairs(a, target) {
+  let count = 0
+  for (let i = 0; i < a.length; i++) {
+    for (let j = i + 1; j < a.length; j++) {
+      if (a[i] + a[j] === target) count++
+    }
+  }
+  return count
+}
+countPairs([1, 2, 3, 4, 5], 5)  // 2 (1+4, 2+3)
+```
+
+- 서로 다른 두 원소의 쌍을 한 번씩만 세려면 안쪽 시작을 `j = i + 1`로 합니다. 순서가 다른 같은 쌍과 자기 자신과의 쌍이 빠집니다. 길이 N이면 쌍의 수는 N(N − 1) / 2입니다.
+- 2차원 배열은 바깥이 행, 안쪽이 열입니다(자세히는 17편).
+- 반복 변수는 층마다 다른 이름을 씁니다(`i`, `j`, `k`). 같은 이름을 안쪽에서 다시 `let`으로 선언하면 바깥 변수를 가려서 바깥 `i`를 읽을 수 없고, `var`로 같은 이름을 쓰면 하나의 변수를 공유해서 바깥 반복이 꼬입니다.
+- 중첩 깊이만큼 실행 횟수가 곱해집니다. 이중 반복은 N², 삼중 반복은 N³이라서 N이 크면 시간 초과입니다(자세히는 13편).
+- 안쪽 반복의 `break`와 `continue`는 안쪽 반복에만 적용됩니다. 바깥까지 빠져나가는 방법은 Flag 변수, 함수 `return`, 레이블 문입니다(아래 각 절).
+
+**흔한 실수:** 안쪽 시작 값을 `0`으로 두어 같은 쌍을 두 번 세거나, 범위를 `<=`로 써서 마지막에 범위 밖을 읽는 것입니다. 인덱스 범위는 `0`부터 `length - 1`입니다(자세히는 15편).
+
+## break와 continue
+
+`break`는 가장 안쪽 반복(또는 `switch`)을 끝내고 그 뒤 문장으로 갑니다. `continue`는 현재 회차의 나머지를 건너뛰고 다음 회차로 갑니다.
+
+```js
+const kept = []
+for (let i = 0; i < 6; i++) {
+  if (i === 1) continue   // 1은 건너뜀
+  if (i === 4) break      // 4에서 반복 종료
+  kept.push(i)
+}
+// kept는 [0, 2, 3]
+```
+
+- `for`에서 `continue`는 증감식으로 이동합니다. `for (let i = 0; i < n; i++)`의 `i++`는 `continue` 뒤에도 실행됩니다.
+- `while`에서 `continue`는 조건식으로 돌아갑니다. 증감을 반복 본문 끝에 쓴 `while`에서 `continue`를 쓰면 증감을 건너뛰어 무한 반복이 됩니다. 증감을 `continue` 앞에 두거나 `for`를 씁니다.
+
+```js
+let i = 0
+while (i < 5) {
+  i++                 // continue보다 먼저 증가
+  if (i === 3) continue
+}
+```
+
+- 반복 밖에서 쓴 `break`와 `continue`는 SyntaxError입니다. 반복 안에 만든 함수 안에서도 마찬가지라서 `forEach` 콜백에서는 `break`와 `continue`를 쓸 수 없습니다. 콜백에서 `return`은 그 회차만 건너뛰는 `continue` 역할을 합니다(자세히는 05편).
+- `switch` 안의 `break`는 `switch`를 벗어납니다. `switch`가 반복 안에 있으면 반복을 끝내는 것이 아니라 `switch`만 빠져나옵니다.
+- 중복 조건을 피하려고 `continue`로 건너뛸 조건을 앞에서 걸러 내면 본문의 들여쓰기가 줄어듭니다. 건너뛰는 조건이 많아지면 가독성이 좋아집니다.
+
+## Flag 변수
+
+Flag 변수는 어떤 일이 일어났는지를 `true`·`false`로 기억해 두는 변수입니다. 반복이 끝난 뒤에 결과를 확인하거나 중첩 반복을 빠져나올 때 씁니다.
+
+```js
+function hasDuplicate(a) {
+  let found = false
+  for (let i = 0; i < a.length && !found; i++) {
+    for (let j = i + 1; j < a.length; j++) {
+      if (a[i] === a[j]) { found = true; break }
+    }
+  }
+  return found
+}
+hasDuplicate([1, 2, 1])  // true
+```
+
+- 안쪽에서 `break`로 안쪽 반복을 끝내고, 바깥 반복의 조건에 `!found`를 넣어 바깥도 끝냅니다. 바깥 반복이 한 번 더 돌고 조건에서 멈춥니다.
+- 변수 이름은 `found`, `isPrime`, `ok`처럼 참일 때 무슨 뜻인지 드러나게 짓습니다. `flag` 같은 이름은 무엇이 참인지 알 수 없습니다.
+- 초기값을 정한 뒤 반복 중에 한 번 바뀌는 방향이 한쪽이어야 읽기 쉽습니다. "처음엔 `true`, 하나라도 어긋나면 `false`"(모두 만족하는지 확인)나 "처음엔 `false`, 하나라도 찾으면 `true`"(존재 확인)입니다.
+- 반복이 끝난 뒤 한 번만 확인하면 되는 상황이 아니고, 찾는 즉시 결과를 돌려줘도 되면 Flag 대신 조기 반환이 더 간단합니다(다음 절).
+- 여러 번 쓰는 Flag는 반복 시작 전에 다시 초기화해야 합니다. 바깥 반복 안에서 안쪽 반복마다 쓰는 Flag를 바깥 밖에서 한 번만 `false`로 두면 앞 회차의 값이 남습니다.
+
+**흔한 실수:** Flag를 반복마다 다시 초기화하지 않는 것입니다. 이전 회차에서 `true`가 된 값이 다음 회차에 남아 결과가 틀립니다.
+
+## Early Return
+
+조기 반환(early return)은 결과가 정해지는 즉시 `return`으로 함수를 끝내는 것입니다. 이후 코드와 모든 중첩 반복이 한 번에 끝납니다.
+
+```js
+function isPrime(n) {
+  if (n < 2) return false
+  for (let i = 2; i * i <= n; i++) {
+    if (n % i === 0) return false   // 약수를 찾는 즉시 종료
+  }
+  return true
+}
+isPrime(17)  // true
+isPrime(15)  // false
+```
+
+- 함수 안의 `return`은 몇 겹의 반복 안에 있어도 함수 전체를 끝냅니다. 중첩 반복을 빠져나오는 가장 간단한 방법이라서, 탐색을 별도 함수로 빼면 레이블이나 Flag가 필요 없습니다.
+- 반복이 끝까지 돌았다는 것은 찾지 못했다는 뜻이므로, 반복 뒤에 "없을 때의 결과"를 `return`합니다. 위 코드에서 마지막 `return true`입니다.
+- `return` 뒤에 줄을 바꾸면 값이 버려집니다. `return` 다음 줄에 식을 쓰면 세미콜론이 자동으로 삽입되어 `undefined`를 반환합니다. 긴 식은 `return (`로 여는 괄호를 같은 줄에 둡니다.
+- 풀이 형식에서 `solution` 함수 하나만 있는 경우, 값을 구한 즉시 `return`하면 됩니다(자세히는 08편).
+- 표준 입력 풀이의 최상위 코드에서는 `return`을 쓸 수 있는지가 환경에 따라 다릅니다. 풀이 전체를 `main` 함수로 감싸면 어디서든 `return`할 수 있습니다.
+
+## Guard Clause
+
+가드 절(guard clause)은 함수 맨 앞에서 처리할 수 없거나 단순한 경우를 먼저 `return`으로 걸러 내는 방식입니다. 본문의 중첩 `if`가 줄어들고 정상 흐름이 들여쓰기 없이 이어집니다.
+
+```js
+// ❌ 중첩 if
+function avg(a) {
+  if (Array.isArray(a)) {
+    if (a.length > 0) {
+      let sum = 0
+      for (const v of a) sum += v
+      return sum / a.length
+    }
+  }
+  return 0
+}
+```
+
+```js
+// ✅ 가드 절
+function avg(a) {
+  if (!Array.isArray(a)) return 0
+  if (a.length === 0) return 0
+  let sum = 0
+  for (const v of a) sum += v
+  return sum / a.length
+}
+```
+
+- 가드 절은 "이 조건이면 더 볼 것 없다"를 앞에 몰아 둡니다. 그 아래는 조건이 모두 통과된 상태를 가정하고 읽습니다.
+- 코딩테스트에서는 입력이 비어 있거나(`n === 0`), 크기가 1이거나, 답이 이미 정해진 경우(`k > n`이면 `-1`)를 가드 절로 처리합니다. 경계 조건을 앞에서 한 번에 처리하면 본문에서 빈 배열 접근 오류가 사라집니다.
+- 반복 안에서는 `continue`가 같은 역할을 합니다. 조건에 맞지 않는 회차를 맨 앞에서 건너뜁니다.
+- 가드 절을 쓰면 `else`가 필요 없습니다. `if (...) return`으로 끝난 뒤 이어지는 코드는 그 조건이 거짓인 경우만 실행되기 때문입니다.
+
+## 삼항 연산자
+
+삼항 연산자 `조건 ? 값1 : 값2`는 조건이 참이면 값1을, 거짓이면 값2를 돌려주는 식(expression)입니다. 값을 만드는 곳(대입, 인수, `return`)에서 `if`-`else` 대신 씁니다.
+
+```js
+const n = 5
+const kind = n % 2 === 0 ? 'even' : 'odd'   // 'odd'
+const abs = n >= 0 ? n : -n                 // 5
+const max = a > b ? a : b
+```
+
+- 조건은 참·거짓으로 판단되고, 두 값은 한 쪽만 평가됩니다.
+- 오른쪽 결합이라서 연결할 수 있습니다. 여러 줄로 나눠 `if`-`else if`처럼 읽히게 씁니다.
+
+```js
+const grade = (s) =>
+  s >= 90 ? 'A'
+  : s >= 80 ? 'B'
+  : s >= 70 ? 'C'
+  : 'F'
+```
+
+- 우선순위가 낮아서 `+` 같은 연산자 뒤에 쓸 때는 괄호가 필요합니다. `'x' + true ? 'a' : 'b'`는 `('x' + true) ? 'a' : 'b'`로 해석되어 `'a'`입니다. 의도한 `'x' + (true ? 'a' : 'b')`와 다릅니다.
+- `:` 뒤로 이어 붙이는 연결은 줄을 나눠 쓰면 읽을 만합니다. 조건이나 값 자리 안에 삼항을 또 넣는 중첩은 읽기 어려우므로 `if`-`else`로 씁니다.
+- 실행할 문장(`push` 호출 등)을 고르는 용도로는 쓰지 않고 값을 고를 때만 씁니다. 부수 효과가 있는 문장은 `if`로 씁니다.
+- 위의 `max`처럼 두 값을 고르는 일은 `Math.max(a, b)`가 간단합니다.
+- 값이 없을 때의 기본값은 `??`나 `||`가 더 짧습니다(자세히는 01편).
+
+## Sentinel 값
+
+센티널(sentinel) 값은 "아직 없음", "찾지 못함", "끝"을 나타내려고 일부러 정해 둔 특별한 값입니다. 정상 결과로 나올 수 없는 값을 골라야 합니다.
+
+```js
+let best = -Infinity           // 어떤 값이 와도 더 작음
+for (const v of [3, -5, 2]) {
+  if (v > best) best = v
+}
+// best는 3
+let low = Infinity             // 최솟값을 구할 때 초기값
+const idx = [5, 6].indexOf(9)  // -1 (찾지 못함)
+```
+
+| 용도 | 센티널 | 이유 |
+|------|--------|------|
+| 최댓값을 구하는 초기값 | `-Infinity` | 모든 수보다 작아 첫 비교에서 교체됨 |
+| 최솟값을 구하는 초기값 | `Infinity` | 모든 수보다 커서 첫 비교에서 교체됨 |
+| 값을 찾지 못함 | `-1` | 인덱스로는 나올 수 없음 |
+| 방문하지 않음·도달 불가 | `-1`, `Infinity`, `null` | 정상 거리·값과 구별됨 |
+| 입력의 끝 | 문제가 정한 값(예: `0`) | 그 값이 나오면 반복 종료(자세히는 08편) |
+
+- 센티널은 정상 값과 겹치지 않아야 합니다. 최댓값 초기값을 `0`으로 두면 모든 값이 음수인 입력에서 틀립니다(`[-3, -1]`의 최댓값이 `0`이 됨).
+- `1e9`나 `Number.MAX_SAFE_INTEGER` 같은 큰 수를 "무한대"로 쓰면 실제 답이 그보다 클 때 틀리거나, 더할 때 안전 범위를 넘습니다. `Infinity`는 어떤 유한한 수보다 크고 `Infinity + 1`도 `Infinity`입니다.
+- `Infinity`끼리 빼면 `NaN`이 되므로 `Infinity - Infinity` 같은 연산이 일어나는지 확인합니다.
+- `Int32Array` 같은 정수 TypedArray에 `Infinity`를 넣으면 `0`이 됩니다. 정수 TypedArray에서는 정수 센티널(`-1`, `2 ** 30`)을 씁니다(자세히는 05편).
+- `-1`은 인덱스 센티널입니다. `if (idx)`로 검사하면 `0`(첫 번째 칸)을 놓치므로 `idx !== -1`로 비교합니다.
+- `null`은 `0`이나 `''`처럼 정상 값일 수 있는 것과 구별해야 할 때 씁니다. 비교는 `=== null`로 합니다.
+
+**배열 끝 센티널:** 배열 맨 끝에 찾는 값을 일부러 넣어 두면 반복의 범위 검사를 생략할 수 있습니다. 고전적인 기법이지만 JavaScript에서는 가독성을 해쳐서 거의 쓰지 않습니다. 대신 `i < a.length`를 명시합니다.
+
+## 레이블 문으로 중첩 반복 탈출
+
+레이블 문(labeled statement)은 문장 앞에 `이름:`을 붙여서 `break 이름`이나 `continue 이름`으로 그 문장을 가리키는 문법입니다. `break`는 바깥 반복까지 한 번에 끝내고, `continue`는 바깥 반복의 다음 회차로 넘어갑니다.
+
+```js
+function find2D(grid, target) {
+  let row = -1, col = -1
+  outer: for (let i = 0; i < grid.length; i++) {
+    for (let j = 0; j < grid[i].length; j++) {
+      if (grid[i][j] === target) {
+        row = i; col = j
+        break outer     // 두 반복 모두 종료
+      }
+    }
+  }
+  return [row, col]
+}
+find2D([[1, 2], [3, 4]], 3)  // [1, 0]
+```
+
+```js
+const pairs = []
+outer: for (let i = 0; i < 3; i++) {
+  for (let j = 0; j < 3; j++) {
+    if (j === 1) continue outer   // 바깥의 다음 회차로
+    pairs.push([i, j])
+  }
+}
+// pairs는 [[0, 0], [1, 0], [2, 0]]
+```
+
+- 레이블은 식별자 뒤에 콜론을 붙이고, 이름은 관례로 소문자(`outer`)나 대문자를 씁니다.
+- `break 레이블`은 반복이 아닌 블록에도 쓸 수 있습니다. `continue 레이블`은 반복문에만 쓸 수 있고, 반복이 아닌 문장의 레이블을 쓰면 SyntaxError입니다.
+- `break`와 `continue`는 레이블이 붙은 문장 안에 있어야 합니다. 함수 경계는 넘지 못합니다.
+- MDN은 레이블이 코드를 읽기 어렵게 만들 수 있으니 함수로 나누거나 Flag를 쓰는 대안을 먼저 고려하라고 권합니다. 탈출 로직이 한 군데면 레이블이 가장 짧고, 여러 군데면 함수로 빼서 `return`합니다.
+- 반복 안에서 안쪽의 `break`는 안쪽만 끝내므로, 바깥을 끝내려는 의도라면 레이블이나 Flag가 필요합니다.
+
+**흔한 실수:** 레이블 없이 안쪽에서 `break`를 쓰고 바깥도 끝났다고 착각하는 것입니다. 안쪽만 끝나고 바깥은 다음 회차를 이어 갑니다.
+
+## for 문과 for...of의 선택 기준
+
+`for`는 인덱스를 직접 다루고, `for...of`는 이터러블의 값을 순서대로 꺼냅니다. 값만 필요하면 `for...of`, 인덱스가 필요하면 `for`가 기본입니다.
+
+| 상황 | 선택 |
+|------|------|
+| 값만 순서대로 읽음 | `for...of` |
+| 인덱스가 필요함(`i`, `i + 1`, `i - 1`) | `for` |
+| 같은 배열의 인접한 원소를 비교함 | `for` |
+| 배열의 원소를 바꿔서 저장함(`a[i] = ...`) | `for` |
+| 역순, 두 칸씩 건너뛰기, 여러 변수 동시 이동 | `for` |
+| Set, Map, 문자열, 제너레이터 순회 | `for...of` |
+| 값과 인덱스를 함께 읽음 | `for (const [i, v] of a.entries())` 또는 `for` |
+
+```js
+const a = [1, 2, 3]
+for (const v of a) { /* 1 2 3 */ }
+for (let i = a.length - 1; i >= 0; i--) { /* 3 2 1 */ }
+for (const [i, v] of a.entries()) { /* 0 1 / 1 2 / 2 3 */ }
+```
+
+- `for...of`의 변수는 원소의 복사본입니다. 원시 값 원소를 바꿔도 배열은 바뀌지 않습니다.
+
+```js
+const nums = [1, 2, 3]
+for (let v of nums) v *= 2    // nums는 그대로 [1, 2, 3]
+for (let i = 0; i < nums.length; i++) nums[i] *= 2
+// nums는 [2, 4, 6]
+```
+
+- `for...of`에서도 `break`, `continue`, 레이블을 쓸 수 있습니다. `break`하면 이터레이터가 정리됩니다.
+- 문자열에 `for...of`를 쓰면 코드 포인트 단위로 꺼냅니다. `'a😀'`의 `length`는 3이지만 `for...of`는 2번 돕니다. 코드 유닛 단위 접근이 필요하면 `for`와 인덱스를 씁니다(자세히는 06편).
+- 반복 중에 배열을 바꾸면 결과가 달라집니다. `for...of`는 반복 중에 `push`한 원소도 이어서 순회하고, `for`에서 `splice`로 원소를 지우면 한 칸이 건너뛰어집니다(`[2, 2, 3]`에서 2를 지우면 `[2, 3]`이 남음). 순회 중에는 원본을 바꾸지 말고 새 배열에 담거나 역순으로 돕니다.
+- 일반 객체에 `for...of`를 쓰면 TypeError입니다. 키·값 순회는 `Object.entries`를 씁니다(자세히는 09편).
+- `for...in`은 키를 문자열로 돌려주므로 배열에는 쓰지 않습니다(자세히는 01편).
+- 인덱스가 필요 없으면 `for...of`가 `i`의 증감과 범위 실수(off-by-one)를 없애 줍니다. 인덱스가 필요하면 억지로 `entries()`를 쓰기보다 `for`가 더 분명합니다.
+
+## 핵심 정리
+
+- 중첩 반복은 안쪽 본문이 바깥 횟수 × 안쪽 횟수만큼 실행되며, 안쪽의 `break`와 `continue`는 안쪽 반복에만 적용됩니다.
+- `continue`는 `for`에서 증감식으로, `while`에서 조건식으로 이동하므로 `while`은 증감을 `continue` 앞에 둡니다.
+- 중첩 반복을 빠져나오는 방법은 Flag 변수, 조기 `return`(함수로 분리), 레이블 `break`이며, 조기 `return`이 가장 단순합니다.
+- 가드 절로 예외·경계 경우를 함수 앞에서 걸러 내면 중첩 `if`가 사라집니다.
+- 삼항 연산자는 값을 고를 때만 쓰고 연결은 줄을 나눠 쓰며 괄호 속 중첩은 피하고, 센티널은 정상 결과와 겹치지 않는 값(`Infinity`, `-1`)을 고릅니다.
+- 인덱스가 필요하면 `for`, 값만 필요하면 `for...of`이며, 순회 중에 배열을 바꾸지 않습니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="3중 반복 안쪽 반복에서 break를 실행하면 어떻게 되는가?"
+  options={['가장 안쪽 반복만 끝나고 그 바깥 반복은 계속된다', '모든 반복이 끝난다', '함수 전체가 끝난다', '바로 바깥 반복의 다음 회차로 넘어간다']}
+  correctAnswer={1}
+  explanation="break는 가장 안쪽 반복(또는 switch)만 끝냅니다. 바깥 반복은 다음 회차를 이어 갑니다. 모든 반복을 끝내려면 레이블 break, Flag 변수, 함수 return이 필요하고, 바깥의 다음 회차로 넘어가는 동작은 continue의 역할입니다."
+  optionExplanations={['break는 가장 안쪽 반복만 끝냅니다.', '모든 반복을 끝내려면 레이블 break나 Flag, return이 필요합니다.', '함수를 끝내는 것은 return의 역할입니다.', '다음 회차로 넘어가는 것은 continue의 동작입니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="최댓값을 구하려고 let best = 0 으로 시작해 모든 원소와 비교했다. 입력이 [-3, -1] 일 때 결과는?"
+  options={['-1', '-3', '0', 'undefined']}
+  correctAnswer={3}
+  explanation="초기값 0이 어떤 원소보다 크기 때문에 -3과 -1 모두 교체되지 않고 0이 남습니다. 0은 정상 결과가 될 수 없는 값이어야 하므로 최댓값의 초기값은 -Infinity처럼 모든 값보다 작은 값을 써야 합니다."
+  optionExplanations={['-1이 되려면 초기값이 -Infinity처럼 더 작아야 합니다.', '-3은 최댓값이 아닙니다.', '0이 -3, -1보다 커서 교체되지 않고 그대로 남습니다.', '초기값이 0으로 정해져 있으므로 undefined가 되지 않습니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="const a = [1, 2, 3]; for (let v of a) v *= 2; 를 실행한 뒤 a의 값은?"
+  options={['[2, 4, 6]', '[1, 2, 3]', '[1, 4, 9]', 'TypeError가 발생한다']}
+  correctAnswer={2}
+  explanation="for...of의 변수 v는 원소 값의 복사본입니다. 원시 값인 숫자 원소를 v에서 바꿔도 배열 안의 값은 바뀌지 않습니다. 원소를 바꾸려면 for 문에서 a[i] = ... 로 인덱스를 통해 저장해야 합니다."
+  optionExplanations={['원소를 바꾸려면 a[i]에 직접 대입해야 합니다.', '변수 v만 바뀌고 배열은 그대로입니다.', '제곱이 아니라 2배이며 배열은 바뀌지 않습니다.', '배열은 이터러블이라 for...of를 쓸 수 있고 에러가 나지 않습니다.']}
+/>
+
+## 참고 자료
+
+- [MDN — break](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/break)
+- [MDN — continue](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/continue)
+- [MDN — Labeled statement](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/label)
+- [MDN — return](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/return)
+- [MDN — Conditional (ternary) operator](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Conditional_operator)
+- [MDN — for...of](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/for...of)

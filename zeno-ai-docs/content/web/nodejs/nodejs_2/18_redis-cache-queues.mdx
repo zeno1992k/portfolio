@@ -1,0 +1,378 @@
+---
+title: '18. Redis·캐시·작업 큐'
+description: 'Redis 자료형과 node-redis, 캐시 패턴(cache-aside·TTL·무효화), 세션 저장소, rate limit, 분산 락, Pub/Sub, BullMQ 작업 큐, 메시지 브로커와 MongoDB·Mongoose 개요를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** Redis를 캐시·세션·카운터·메시지 전달·작업 큐로 쓰는 방법과 각 용도의 한계를 설명하고, 다른 브로커와 MongoDB가 어떤 자리에 쓰이는지 구분할 수 있습니다.
+</Callout>
+
+## Redis 자료형
+
+Redis는 메모리에 키와 값을 저장하는 자료구조 서버입니다. 공식 문서는 Redis를 "data structure server"라고 소개하고, 캐시부터 큐, 이벤트 처리까지 내장 자료형으로 푼다고 설명합니다. 값은 단순한 문자열이 아니라 자료형이 정해져 있고, 자료형마다 전용 명령이 있습니다.
+
+| 자료형 | 설명 | 주 용도 |
+|--------|------|---------|
+| String | 바이트 열. 숫자면 `INCR`로 원자적으로 증가 | 캐시 값, 세션, 카운터, 락 |
+| Hash | 필드와 값의 쌍으로 이뤄진 레코드 | 세션 객체, 사용자 프로필 |
+| List | 삽입 순서를 유지하는 문자열 목록 | 간단한 큐, 최근 목록 |
+| Set | 중복 없는 문자열 집합. 추가·삭제·존재 확인이 O(1) | 태그, 접속자 집합 |
+| Sorted set | 점수 순으로 정렬되는 고유 문자열 집합 | 랭킹, 지연 작업 |
+| Stream | 추가만 되는 로그 | 이벤트 기록과 소비 |
+| 그 밖의 것 | Bitmap, HyperLogLog, Geospatial, JSON 등 | 출석 체크, 고유 방문자 추정, 반경 검색 |
+
+- 자료형이 다른 키에 맞지 않는 명령을 보내면 에러가 납니다. `INCR`은 정수로 해석되는 문자열에만 동작합니다.
+- 키마다 만료 시간(TTL)을 붙일 수 있습니다. `SET`은 값을 덮어쓰면 기존 TTL을 지웁니다(`KEEPTTL` 옵션으로 유지).
+
+Node용 클라이언트는 공식 문서가 권장하는 `node-redis`(npm 패키지명 `redis`)입니다. 문서는 이전 클라이언트인 `ioredis`도 계속 지원합니다. BullMQ는 기본으로 ioredis를 씁니다.
+
+```js
+import { createClient } from 'redis'
+
+const client = createClient({ url: process.env.REDIS_URL })
+client.on('error', (err) => console.error('redis', err))
+await client.connect()
+
+await client.set('greeting', 'hello', { EX: 10 }) // 10초 TTL
+await client.get('greeting')                      // 'hello'
+await client.hSet('user:1', { name: 'Kim', age: 29 })
+await client.hGetAll('user:1') // { name: 'Kim', age: '29' }
+await client.quit()
+```
+
+- 값은 문자열로 저장되어 나옵니다. 숫자 `29`가 `'29'`로 돌아오므로 변환은 코드가 합니다.
+- 공식 문서는 `error` 이벤트 리스너를 반드시 등록하라고 강조합니다. 없으면 연결 에러가 처리되지 않아 프로세스가 죽습니다.
+- `client.isReady`는 명령을 보낼 수 있는 상태인지를 알려 줍니다. 종료할 때는 `client.quit()`으로 닫습니다(종료 절차는 25편).
+
+**흔한 실수:**
+
+- 큰 JSON 하나를 문자열로 통째로 넣고 필드 하나만 바꾸려고 전부 읽고 쓰는 것입니다. 필드를 따로 다룰 값이면 Hash를 씁니다.
+- Redis를 유일한 저장소로 믿는 것입니다. 메모리 저장소이고 한도를 넘으면 설정에 따라 키가 지워지므로 원본 데이터는 DB에 둡니다(16편).
+
+## 캐시 패턴
+
+캐시는 느린 저장소(DB, 외부 API)의 결과를 빠른 저장소에 복사해 두고 재사용하는 방식입니다. 가장 흔한 형태는 cache-aside입니다. 앱이 캐시를 먼저 보고, 없으면(miss) 원본에서 읽어 캐시에 채웁니다.
+
+```js
+async function getUser(id) {
+  const key = `user:${id}`
+  const cached = await client.get(key)
+  if (cached) return JSON.parse(cached)       // hit
+
+  const user = await db.findUser(id)          // miss: 원본 조회
+  if (user) {
+    await client.set(key, JSON.stringify(user), { EX: 300 })
+  }
+  return user
+}
+```
+
+| 패턴 | 읽기 | 쓰기 |
+|------|------|------|
+| cache-aside | 앱이 캐시 확인 후 miss면 DB 조회·채움 | DB에 쓰고 캐시를 지움 |
+| write-through | 캐시에서 읽음 | 캐시와 DB에 함께 씀 |
+| write-behind | 캐시에서 읽음 | 캐시에 쓰고 DB 반영은 나중에 비동기 |
+
+실무에서는 구현이 단순한 cache-aside가 기본입니다.
+
+### TTL
+
+- 모든 캐시 키에 TTL을 붙입니다. 무효화를 놓쳐도 TTL이 지나면 사라지므로 오래된 값이 영원히 남지 않습니다.
+- `SET key value EX 300`처럼 값과 TTL을 한 번에 설정합니다. 값을 쓰고 `EXPIRE`를 따로 부르면 그 사이에 프로세스가 죽을 때 TTL 없는 키가 남습니다.
+- 만료는 두 방식으로 일어납니다. 접근할 때 만료를 확인하는 방식과 Redis가 주기적으로 만료 키를 무작위로 골라 지우는 방식입니다. 만료된 키가 즉시 사라지는 것은 아니지만 읽으면 없는 키로 취급됩니다.
+- 같은 TTL을 가진 키가 한꺼번에 만료되면 DB로 요청이 몰립니다. TTL에 무작위 값을 더해 만료 시점을 흩뜨립니다.
+
+### 무효화
+
+원본이 바뀌면 캐시를 지워야 합니다.
+
+- 수정·삭제 때 `DEL user:1`로 지웁니다. 다음 읽기가 miss가 되어 새 값이 채워집니다. 캐시 값을 직접 갱신하는 것보다 지우는 편이 순서 경합에 강합니다.
+- 키 이름 규칙(`user:1`, `post:7:comments`)을 정해 두면 무엇을 지울지 코드에서 찾기 쉽습니다.
+- 패턴으로 여러 키를 지울 때 `KEYS`는 전체 키를 훑어 서버를 오래 점유하므로 운영에서 쓰지 않고 `SCAN`으로 나눠 순회합니다.
+- 존재하지 않는 데이터를 반복 조회하는 요청은 매번 miss라 DB를 계속 칩니다. 없음 결과도 짧은 TTL로 캐시합니다.
+- 캐시가 죽어도 서비스가 멈추지 않게 합니다. Redis 호출이 실패하면 DB로 넘어가게 하고 짧은 타임아웃을 줍니다(타임아웃은 16편과 같은 원칙).
+
+### 메모리 한도와 축출
+
+Redis는 `maxmemory`로 메모리 상한을 정합니다. 기본값 0은 제한 없음입니다. 상한에 도달했을 때의 동작은 `maxmemory-policy`가 정합니다.
+
+| 정책 | 동작 |
+|------|------|
+| `noeviction` | 키를 지우지 않고 데이터를 추가하는 명령에 에러를 반환 |
+| `allkeys-lru` | 가장 오래 쓰이지 않은 키부터 지움. 문서가 별다른 이유가 없으면 좋은 기본 선택이라고 설명 |
+| `allkeys-lfu` | 가장 적게 쓰인 키부터 지움 |
+| `volatile-ttl` | TTL이 있는 키 중 남은 시간이 짧은 것부터 지움 |
+
+캐시 전용 Redis는 `allkeys-lru` 계열이 맞습니다. 반대로 BullMQ는 Redis가 키를 지우면 오류가 나므로 `noeviction`을 요구합니다. 한 Redis에 캐시와 큐를 함께 두면 정책이 충돌하므로 인스턴스를 나눕니다.
+
+**흔한 실수:** 캐시에만 있는 값(원본이 없는 값)을 두는 것입니다. 축출되면 복구할 수 없습니다.
+
+## 세션 저장소
+
+세션은 서버가 로그인 상태를 저장하고 쿠키의 세션 ID로 찾아 쓰는 방식입니다(개념은 10편). 세션을 프로세스 메모리에 두면 인스턴스가 둘 이상일 때 다른 인스턴스로 간 요청에서 세션이 없고, 재시작하면 모두 사라집니다. Redis는 모든 인스턴스가 공유하는 저장소가 됩니다.
+
+```js
+import { randomUUID } from 'node:crypto'
+
+const sid = randomUUID()
+const key = `sess:${sid}`
+await client.hSet(key, { userId: '42', role: 'user' })
+await client.expire(key, 60 * 30)    // 30분
+
+// 요청마다: 조회하고 만료 시간을 연장(슬라이딩 만료)
+const sess = await client.hGetAll(key)
+if (sess.userId) await client.expire(key, 60 * 30)
+```
+
+- 쿠키에는 세션 ID만 담고(`HttpOnly`, `Secure`, `SameSite`, 09편), 실제 데이터는 Redis에 둡니다.
+- `EXPIRE`를 부를 때마다 TTL이 갱신됩니다. 활동이 있는 동안 세션이 유지되고 방치되면 만료됩니다.
+- 로그아웃은 `DEL sess:...` 한 번으로 서버에서 즉시 세션을 무효화합니다. 이것이 서버 세션이 JWT보다 유리한 지점입니다(10편).
+- 세션 ID는 추측할 수 없어야 하므로 `randomUUID()`나 `randomBytes` 같은 암호학적 난수를 씁니다(21편).
+- Express에서는 `express-session` 같은 미들웨어에 Redis 저장소를 연결하는 방식으로 쓰고, 이 편에서는 저장 원리만 다룹니다.
+
+**흔한 실수:** Redis를 재시작하거나 축출될 때 세션이 사라지는 것을 고려하지 않는 것입니다. 세션이 사라지면 사용자는 다시 로그인하면 되지만, 장바구니처럼 잃으면 안 되는 데이터는 DB에 둡니다.
+
+## rate limit
+
+rate limit은 일정 시간에 허용하는 요청 수를 제한해 남용을 막는 기법입니다. 초과하면 429 상태 코드로 응답합니다(상태 코드는 8편). 여러 인스턴스가 같은 한도를 공유해야 하므로 카운터를 Redis에 둡니다.
+
+고정 윈도 방식은 `INCR`로 카운트하고 첫 증가에 TTL을 붙입니다.
+
+```js
+async function allow(ip, limit = 100, windowSec = 60) {
+  const key = `rl:${ip}`
+  const [count] = await client
+    .multi()
+    .incr(key)
+    .expire(key, windowSec, 'NX') // TTL이 없을 때만 설정
+    .exec()
+  return count <= limit
+}
+```
+
+- `INCR`은 원자적이어서 동시 요청이 와도 카운트가 어긋나지 않습니다. 키가 없으면 0에서 시작합니다.
+- `INCR`과 `EXPIRE`를 따로 보내면 그 사이에 프로세스가 죽을 때 TTL 없는 카운터가 남아 그 IP가 영영 막힙니다. Redis 공식 문서가 이 경합을 지적하며, 해결로 `MULTI`/`EXEC`나 Lua 스크립트를 제시합니다.
+- `EXPIRE`의 `NX` 옵션(Redis 7.0 이상)은 TTL이 없을 때만 설정하므로 요청마다 윈도가 뒤로 밀리지 않습니다.
+- 고정 윈도는 윈도 경계에서 한도의 두 배가 한꺼번에 통과할 수 있습니다. 더 정밀한 방식(슬라이딩 윈도, 토큰 버킷)은 Sorted set이나 Lua 스크립트로 구현합니다.
+- 키는 IP, 사용자 ID, API 키 중 목적에 맞는 것을 씁니다. 리버스 프록시 뒤에서는 IP를 신뢰할 수 있는 헤더에서 읽어야 합니다(11편).
+- Express에서는 `express-rate-limit` 같은 미들웨어가 이 로직을 감싸 줍니다(13편).
+
+## 분산 락 개념
+
+분산 락은 여러 프로세스가 같은 자원을 동시에 건드리지 못하게 하는 잠금입니다. 한 프로세스 안의 변수로는 다른 인스턴스를 막을 수 없습니다.
+
+Redis로 가장 단순하게 구현하는 방법은 `SET`의 옵션입니다.
+
+```js
+const token = randomUUID()
+const ok = await client.set('lock:report', token, {
+  NX: true,    // 키가 없을 때만
+  PX: 30_000,  // 30초 뒤 자동 해제
+})
+if (ok === 'OK') {
+  try { /* 임계 구역 */ } finally { /* 아래 규칙대로 해제 */ }
+}
+```
+
+- 키가 없을 때만 설정하는 `NX`가 잠금 획득이고 `OK`가 오면 성공, `null`이면 이미 누가 잡은 것입니다.
+- TTL은 필수입니다. 락을 잡은 프로세스가 죽어도 TTL이 지나면 풀려 영구 교착을 막습니다.
+- 값은 요청마다 다른 무작위 토큰입니다. 해제할 때 `DEL`만 보내면 TTL이 지나 다른 프로세스가 잡은 락을 지울 수 있으므로, 값이 내 토큰과 같을 때만 지우는 Lua 스크립트를 씁니다. Redis 8.4부터는 `DELEX key IFEQ token` 명령이 같은 일을 합니다.
+- 락을 잡고 TTL보다 오래 일하면 락이 풀린 채로 임계 구역에 있게 됩니다. 작업 시간에 맞춘 TTL을 쓰거나 연장합니다.
+- Redis 공식 문서는 단일 인스턴스 방식이 한계가 있다고 설명합니다. 복제는 비동기라 마스터가 죽고 복제본이 승격되면 같은 락을 두 클라이언트가 가질 수 있습니다. 여러 독립 인스턴스에 다수결로 거는 Redlock 알고리즘이 제안되어 있지만, 문서도 시계 이동 문제와 펜싱 토큰의 필요를 언급하며 정확성이 중요하면 신중히 검토하라고 경고합니다.
+- 락이 있어도 중복 실행을 완전히 막지는 못합니다. 중요한 쓰기는 DB의 유니크 제약이나 멱등 키로 한 번 더 막습니다.
+
+**흔한 실수:** 락을 쓰기 전에 DB 트랜잭션이나 원자적 `UPDATE`로 풀 수 있는지 먼저 보는 것을 건너뛰는 것입니다. 단일 DB 안의 경합은 DB 기능이 더 안전합니다(17편).
+
+## Pub/Sub
+
+Pub/Sub는 발행자가 채널에 메시지를 보내면 그 채널을 구독 중인 모든 클라이언트가 받는 방식입니다. 발행자와 구독자는 서로를 모릅니다.
+
+```js
+const sub = client.duplicate()   // 구독 전용 연결
+await sub.connect()
+await sub.subscribe('chat', (message, channel) => {
+  console.log(channel, message)  // chat hello
+})
+
+await client.publish('chat', 'hello')
+```
+
+- 구독 중인 연결은 일반 명령을 실행하지 못합니다(RESP2). node-redis는 `duplicate()`로 별도 연결을 만들라고 안내합니다.
+- 전달은 at-most-once입니다. 구독자가 없거나 연결이 끊긴 순간의 메시지는 영영 사라지고 다시 보내지 않습니다. 저장도 하지 않습니다.
+- 패턴 구독 `pSubscribe('news.*')`로 이름이 맞는 여러 채널을 받습니다. 키 공간과 무관하므로 환경별로 채널 이름 앞에 `production:` 같은 접두사를 붙입니다.
+- 보장이 필요하면 영속되고 확인 응답을 지원하는 Redis Streams를 쓰거나 작업 큐를 씁니다(아래 BullMQ).
+- Pub/Sub는 다중 인스턴스 WebSocket 서버가 서로 메시지를 전달하는 데 쓰입니다(20편).
+
+| 기준 | Pub/Sub | List 기반 큐 | Streams |
+|------|---------|--------------|---------|
+| 저장 | 안 함 | 함 | 함 |
+| 구독자가 없을 때 | 메시지 소실 | 쌓임 | 쌓임 |
+| 수신자 수 | 구독자 전원 | 한 소비자 | 소비자 그룹 단위 |
+| 용도 | 실시간 알림, 캐시 무효화 신호 | 단순 작업 전달 | 이벤트 로그 |
+
+## BullMQ 작업 큐
+
+작업 큐는 시간이 걸리는 일을 요청 처리에서 분리해 백그라운드에서 처리하게 하는 구조입니다. 메일 발송, 이미지 변환, 리포트 생성처럼 응답을 기다릴 필요가 없는 일을 큐에 넣고 바로 응답합니다.
+
+BullMQ는 Redis 위에 구현된 Node.js 작업 큐 라이브러리입니다. 지연 실행, 재시도, 동시성 제어, 우선순위, 크론 스케줄을 지원하고 npm의 현재 메이저는 6입니다. 구성 요소는 `Queue`(작업 추가), `Worker`(작업 처리), `QueueEvents`, `FlowProducer`입니다.
+
+```js
+import { Queue, Worker } from 'bullmq'
+
+const connection = { host: '127.0.0.1', port: 6379 }
+const queue = new Queue('mail', { connection })
+await queue.add('welcome', { to: 'kim@example.com' })
+
+const worker = new Worker('mail', async (job) => {
+  await sendMail(job.data.to)   // 예외를 던지면 실패
+}, { connection, concurrency: 5 })
+worker.on('failed', (job, err) => {
+  console.error(job?.id, err)
+})
+```
+
+- 생산자와 소비자는 다른 프로세스일 수 있습니다. API 서버는 `add`만 하고 별도 워커 프로세스가 처리하면 API 응답이 느려지지 않고 워커만 따로 늘릴 수 있습니다.
+- 처리 함수가 반환하면 완료, 예외를 던지면 실패입니다.
+
+### 재시도
+
+```js
+await queue.add('welcome', data, {
+  attempts: 5,
+  backoff: { type: 'exponential', delay: 1000 },
+})
+```
+
+- `attempts`는 총 시도 횟수이고 1을 넘어야 재시도가 일어납니다.
+- `backoff`는 재시도 간격입니다. `fixed`는 항상 `delay`만큼, `exponential`은 `2^(시도 횟수-1) * delay`만큼 기다립니다. `jitter`(0–1)로 무작위 편차를 줘서 동시 재시도 쏠림을 줄입니다.
+- 워커 설정의 `backoffStrategy` 함수로 직접 정의할 수 있고, 0을 반환하면 바로 대기열로, -1을 반환하면 재시도하지 않습니다.
+- 재시도하면 같은 작업이 다시 실행되므로 처리 함수는 여러 번 실행해도 결과가 같게(멱등) 만듭니다. 메일을 두 번 보내지 않도록 완료 기록을 확인합니다.
+
+### 지연
+
+```js
+await queue.add('remind', data, { delay: 60_000 }) // 1분 뒤
+```
+
+- `delay`는 밀리초이고 작업은 그 시간이 지나기 전까지 지연 집합에 있다가 일반 작업처럼 처리됩니다. 실제 시작 시점은 워커가 비어 있는지에 따라 늦어질 수 있습니다.
+
+### 동시성
+
+- 워커의 `concurrency` 옵션은 한 워커가 동시에 처리하는 작업 수이고 기본값은 1입니다. DB·네트워크 호출처럼 비동기 대기가 많은 작업에 유효합니다.
+- CPU를 오래 쓰는 작업은 이벤트 루프를 막으므로 BullMQ의 샌드박스 프로세서나 별도 프로세스로 분리합니다.
+- 워커를 여러 프로세스나 서버에 띄우면 같은 큐를 나눠 처리합니다. 한 작업은 한 워커만 가져갑니다.
+
+### 운영 설정
+
+- 같은 `jobId`로 작업을 추가하면 이미 있는 경우 무시됩니다. 중복 요청을 막는 멱등한 추가에 씁니다. 작업이 삭제되면 그 ID는 다시 쓸 수 있습니다.
+- 완료·실패한 작업은 기본으로 영원히 저장됩니다. `removeOnComplete`, `removeOnFail`에 개수(`1000`)나 나이(`{ age: 3600 }`)를 줘서 Redis 메모리가 차지 않게 합니다.
+- BullMQ용 Redis는 `maxmemory-policy=noeviction`이어야 합니다. 키가 축출되면 오류가 납니다.
+- 워커 연결은 `maxRetriesPerRequest: null`로 무한 재시도하게 하고, 생산자(`Queue`)는 기본값이나 낮은 값을 써서 Redis가 죽었을 때 HTTP 요청이 오래 매달리지 않게 합니다.
+
+**흔한 실수:** 워커의 `failed` 이벤트를 듣지 않아 실패를 모르는 것입니다. 재시도가 모두 소진된 작업은 실패 상태로 남으므로 알림이나 로그로 확인합니다.
+
+## 메시지 브로커 개요
+
+메시지 브로커는 프로세스 사이에서 메시지를 받아 저장하고 전달해 주는 서버입니다. 보내는 쪽과 받는 쪽이 동시에 떠 있지 않아도 되고 서로 직접 호출하지 않습니다. BullMQ(Redis)는 Node 앱 안의 작업 큐에 맞고, 서비스 간 통신이나 대용량 이벤트에는 전용 브로커를 씁니다.
+
+| 항목 | Kafka | RabbitMQ | Amazon SQS |
+|------|-------|----------|------------|
+| 모델 | 이벤트 로그. 토픽과 파티션 | 교환기(exchange)가 규칙으로 큐에 분배 | 관리형 큐 서비스 |
+| 소비 후 | 이벤트는 지우지 않고 보존 기간 설정만큼 유지 | 확인 응답(ack)을 받으면 제거 | 소비자가 삭제해야 제거 |
+| 순서 | 같은 키의 이벤트는 같은 파티션에서 쓴 순서대로 읽힘 | 큐 단위 | FIFO 큐에서 보장 |
+| 전달 보장 | 소비자가 읽은 위치로 재처리 가능 | ack와 재큐 | 표준 큐는 at-least-once, FIFO 큐는 exactly-once 처리 |
+| 어울리는 곳 | 대용량 이벤트 스트림, 재처리 | 라우팅이 다양한 작업 분배 | AWS 위의 단순한 큐, 운영 부담 최소화 |
+
+- Kafka는 이벤트를 소비해도 지우지 않고 토픽별 보존 설정에 따라 유지합니다. 다른 소비자 그룹이 같은 이벤트를 처음부터 다시 읽을 수 있습니다.
+- RabbitMQ는 AMQP 0-9-1 모델이며 교환기 유형은 direct, fanout, topic, headers입니다. 소비자가 성공을 알리는 ack를 보내야 메시지가 처리 완료로 취급됩니다.
+- SQS는 메시지를 받으면 일정 시간(가시성 제한 시간) 동안 다른 소비자에게 보이지 않다가, 소비자가 삭제하지 않으면 다시 보입니다. 보존 기간은 기본 4일이고 최대 14일입니다. 반복 실패하는 메시지는 데드 레터 큐로 옮길 수 있습니다.
+- Node 클라이언트는 Kafka의 `kafkajs`, RabbitMQ의 `amqplib`, SQS의 AWS SDK(`@aws-sdk/client-sqs`)가 대표적입니다.
+- 어느 브로커든 메시지는 최소 한 번 전달되고 중복될 수 있다고 전제하고 소비자를 멱등하게 짭니다. 구축·운영·AWS 연동은 이 과목 범위 밖입니다.
+
+## MongoDB와 Mongoose 개요
+
+MongoDB는 JSON과 비슷한 문서(document)를 컬렉션에 저장하는 NoSQL 데이터베이스입니다. 테이블과 고정된 컬럼 대신 문서마다 필드가 달라도 되는 유연한 구조를 가지고, 관련 데이터를 한 문서 안에 중첩해 담는 설계를 흔히 씁니다(SQL과의 비교는 16편, 17편).
+
+Mongoose는 MongoDB용 ODM(Object-Document Mapper)입니다. 스키마로 문서의 형태와 검증 규칙을 정의하고 모델로 조회·저장합니다. 2026-10 기준 공식 문서의 현재 버전은 9.11.0입니다.
+
+```js
+import mongoose from 'mongoose'
+
+await mongoose.connect(process.env.MONGODB_URL)
+
+const userSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  tags: [String],
+})
+const User = mongoose.model('User', userSchema)
+
+await new User({ name: 'Kim', tags: ['a'] }).save()
+const users = await User.find({ name: 'Kim' })
+```
+
+- `Schema`가 필드 타입과 `required` 같은 검증을 정하고, `model()`이 컬렉션과 연결된 클래스를 만듭니다.
+- 스키마가 없는 MongoDB 자체와 달리 Mongoose는 애플리케이션 쪽에서 구조를 강제합니다. DB는 스키마를 몰라도 되므로 마이그레이션 없이 필드를 추가할 수 있지만, 옛 형태의 문서가 남아 있을 수 있어 코드가 둘 다 받아야 합니다.
+- 선택 기준은 데이터 모양입니다. 관계가 많고 여러 테이블에 걸친 트랜잭션과 조인이 중요하면 SQL, 문서 단위로 읽고 쓰며 구조가 자주 바뀌면 MongoDB가 어울립니다.
+- 채용 공고에서는 PostgreSQL·MySQL과 함께 MongoDB·Redis가 NoSQL 경험으로 자주 요구됩니다. 이 과목은 SQL과 Redis를 중심으로 다루고 MongoDB는 개요만 둡니다.
+
+## 핵심 정리
+
+- Redis는 메모리 자료구조 서버로 String·Hash·List·Set·Sorted set·Stream 등을 쓰며, 원본 데이터는 DB에 두고 `maxmemory-policy`에 따라 키가 축출될 수 있다.
+- cache-aside는 캐시 확인 후 miss면 DB에서 읽어 채우고, 쓰기 때는 지우며, 모든 키에 TTL을 붙이고 만료 시점을 흩뜨린다.
+- 세션은 Redis의 Hash와 TTL로 인스턴스 간에 공유하고, rate limit은 `INCR`과 `EXPIRE`를 원자적으로 묶어 카운트한다.
+- 분산 락은 `SET NX PX`와 무작위 토큰 비교 해제가 기본이며, 단일 인스턴스 락의 한계를 알고 DB 제약으로 한 번 더 막는다.
+- Pub/Sub는 저장 없이 at-most-once로 전달하므로 보장이 필요한 일은 BullMQ 같은 작업 큐를 쓰고, 큐는 `attempts`·`backoff`·`delay`·`concurrency`를 설정하며 `noeviction` Redis와 멱등한 처리가 필요하다.
+- 서비스 간 메시징은 Kafka·RabbitMQ·SQS가 맡고, MongoDB는 Mongoose 스키마로 문서를 다루며 데이터 모양에 따라 SQL과 구분한다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="cache-aside 패턴으로 사용자 조회를 캐시할 때 올바른 흐름은?"
+  options={['캐시에서 읽고 없으면 DB에서 읽어 캐시에 값과 TTL을 채우며, 사용자 정보를 수정하면 캐시 키를 지운다', '항상 DB에서 읽고 읽은 값을 캐시에 쓰기만 한다', '수정할 때마다 캐시 값을 새 값으로 갱신하고 TTL은 붙이지 않는다', 'DB에 쓰기 전에 캐시에만 쓰고 DB 반영은 나중에 한다']}
+  correctAnswer={1}
+  explanation="cache-aside는 앱이 캐시를 먼저 보고 miss일 때 원본에서 읽어 채우는 방식입니다. 쓰기 때는 DB를 바꾸고 캐시를 지워 다음 읽기가 새 값을 채우게 하고, TTL은 무효화를 놓쳐도 오래된 값이 남지 않게 하는 안전장치입니다. 캐시에만 먼저 쓰고 DB를 나중에 반영하는 것은 write-behind입니다."
+  optionExplanations={['정답입니다. 읽기는 캐시 우선, 쓰기는 DB 변경과 캐시 삭제, TTL 부여의 세 가지가 요건입니다.', '캐시를 읽지 않으면 캐시의 이점이 없습니다.', 'TTL이 없으면 무효화를 놓친 값이 영원히 남고, 직접 갱신은 순서 경합에 약합니다.', '캐시에 먼저 쓰고 DB를 나중에 반영하는 것은 write-behind이며 cache-aside가 아닙니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="여러 서버 인스턴스에서 같은 리포트 작업이 동시에 실행되지 않게 Redis로 락을 잡으려고 합니다. 가장 적절한 구현은?"
+  options={['SET lock 1 로 키를 만들고 작업이 끝나면 DEL 한다', 'SET lock 무작위토큰 NX PX 30000 으로 잡고, 해제 때 값이 내 토큰일 때만 지운다', 'GET lock 으로 없는지 확인한 뒤 SET lock 1 로 잡는다', 'Pub/Sub 채널에 시작 메시지를 발행해 다른 인스턴스가 듣고 멈추게 한다']}
+  correctAnswer={2}
+  explanation="NX는 키가 없을 때만 설정해 획득과 확인을 한 명령으로 묶고, PX의 TTL은 프로세스가 죽어도 락이 풀리게 합니다. 값을 무작위 토큰으로 두고 일치할 때만 지워야 TTL이 지난 뒤 다른 프로세스가 잡은 락을 실수로 지우지 않습니다. GET 후 SET은 두 명령 사이에 경합이 있고, Pub/Sub는 저장하지 않아 락이 될 수 없습니다."
+  optionExplanations={['TTL이 없어 프로세스가 죽으면 락이 영원히 남고, 무조건 DEL하면 남의 락을 지울 수 있습니다.', '정답입니다. NX와 PX와 토큰 비교 해제가 단일 인스턴스 락의 기본 구성입니다.', '확인과 설정이 분리되어 두 클라이언트가 동시에 통과할 수 있습니다.', 'Pub/Sub는 메시지를 저장하지 않아 락 상태를 보존하지 못합니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="BullMQ에서 메일 발송 작업이 일시 장애로 실패해도 자동으로 다시 시도되게 하려면?"
+  options={['워커의 concurrency를 5로 올린다', '작업을 추가할 때 attempts를 1보다 크게 하고 backoff를 설정하며, 처리 함수는 여러 번 실행해도 안전하게 만든다', 'Redis의 maxmemory-policy를 allkeys-lru로 바꾼다', '작업 추가 때 jobId를 지정한다']}
+  correctAnswer={2}
+  explanation="재시도는 attempts가 1보다 클 때 일어나고 backoff가 재시도 간격을 정합니다. 같은 작업이 다시 실행되므로 중복 발송을 막도록 처리 함수를 멱등하게 짜야 합니다. concurrency는 동시 처리 수, jobId는 중복 추가 방지, allkeys-lru는 BullMQ가 요구하는 noeviction과 반대로 키를 지울 수 있는 정책입니다."
+  optionExplanations={['concurrency는 동시에 처리하는 작업 수이며 재시도와 무관합니다.', '정답입니다. attempts와 backoff가 재시도를 설정하고 멱등한 처리 함수가 중복 실행을 견딥니다.', 'allkeys-lru는 키를 축출해 BullMQ 오류를 일으킬 수 있습니다. BullMQ는 noeviction을 요구합니다.', 'jobId는 같은 ID의 작업이 중복 추가되는 것을 막는 옵션이며 재시도 설정이 아닙니다.']}
+/>
+
+## 참고 자료
+
+- [Redis — Data types](https://redis.io/docs/latest/develop/data-types/)
+- [Redis — SET](https://redis.io/docs/latest/commands/set/)
+- [Redis — EXPIRE](https://redis.io/docs/latest/commands/expire/)
+- [Redis — INCR (rate limiter 패턴)](https://redis.io/docs/latest/commands/incr/)
+- [Redis — Key eviction](https://redis.io/docs/latest/develop/reference/eviction/)
+- [Redis — Pub/Sub](https://redis.io/docs/latest/develop/pubsub/)
+- [Redis — Distributed Locks](https://redis.io/docs/latest/develop/clients/patterns/distributed-locks/)
+- [Redis — node-redis guide](https://redis.io/docs/latest/develop/clients/nodejs/)
+- [node-redis — README](https://github.com/redis/node-redis/blob/master/README.md)
+- [node-redis — Pub/Sub](https://github.com/redis/node-redis/blob/master/docs/pub-sub.md)
+- [BullMQ — 문서 홈](https://docs.bullmq.io/)
+- [BullMQ — Retrying failing jobs](https://docs.bullmq.io/guide/retrying-failing-jobs)
+- [BullMQ — Concurrency](https://docs.bullmq.io/guide/workers/concurrency)
+- [BullMQ — Delayed jobs](https://docs.bullmq.io/guide/jobs/delayed)
+- [BullMQ — Connections](https://docs.bullmq.io/guide/connections)
+- [BullMQ — Auto removal of jobs](https://docs.bullmq.io/guide/queues/auto-removal-of-jobs)
+- [BullMQ — Job IDs](https://docs.bullmq.io/guide/jobs/job-ids)
+- [Apache Kafka — Introduction](https://kafka.apache.org/intro)
+- [RabbitMQ — AMQP 0-9-1 Model Explained](https://www.rabbitmq.com/tutorials/amqp-concepts)
+- [Amazon SQS — What is Amazon SQS](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/welcome.html)
+- [Mongoose — Getting started](https://mongoosejs.com/docs/index.html)

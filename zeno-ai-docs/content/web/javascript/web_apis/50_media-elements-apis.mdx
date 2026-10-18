@@ -1,0 +1,585 @@
+---
+title: '50. 미디어 요소와 미디어 API'
+description: 'audio·video 요소의 제어와 상태·이벤트, 자동 재생 정책, 자막 트랙, Web Audio, 전체 화면·PiP·Media Session, MSE·EME와 주변 미디어 API의 지원 상태를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** 미디어 요소의 상태 속성과 이벤트로 재생 흐름을 읽고, 자동 재생 정책 아래에서 `play()` 실패를 처리하며, 전체 화면·PiP·Media Session·스트리밍 API가 각각 맡는 일과 지원 상태를 구분할 수 있습니다.
+</Callout>
+
+## audio / video 요소 제어
+
+`audio`와 `video` 요소는 모두 `HTMLMediaElement`를 상속하므로 같은 속성과 메서드로 제어합니다. `video`만 `videoWidth`, `videoHeight`, `poster` 같은 영상 전용 멤버를 추가로 가집니다.
+
+| 분류 | 멤버 | 내용 |
+|------|------|------|
+| 재생 제어 | `play()`, `pause()`, `load()` | 재생, 일시정지, 소스를 다시 선택해 처음부터 불러오기 |
+| 위치 | `currentTime`, `duration` | 현재 위치와 전체 길이(초). 길이를 모르면 `NaN` |
+| 상태 | `paused`, `ended` | 일시정지 여부, 끝까지 재생했는지 |
+| 속도·소리 | `playbackRate`, `volume`, `muted` | 배속, 볼륨(0.0–1.0), 음소거 |
+| 로딩 | `preload` | `none`, `metadata`, `auto` 중 하나로 미리 받을 양을 힌트로 전달 |
+| 소스 | `src`, `srcObject` | 주소, 또는 `MediaStream` 같은 객체(자세히는 51편) |
+| 오류 | `error` | `MediaError` 또는 `null` |
+| 기타 | `canPlayType(type)`, `fastSeek(time)` | 형식 재생 가능성, 정밀도를 낮춘 빠른 이동 |
+
+```js
+const video = document.querySelector('video')
+video.currentTime = 30      // 30초로 이동
+video.playbackRate = 1.5    // 1.5배속
+video.muted = true
+```
+
+- `canPlayType()`은 `'probably'`, `'maybe'`, `''` 중 하나를 돌려줍니다. 확답이 아니라 추정입니다.
+- `preservesPitch`는 배속을 바꿔도 음높이를 유지할지 정합니다.
+- `controls` 속성은 브라우저 기본 컨트롤을 켜고, `loop`는 반복 재생합니다. 같은 이름의 속성은 프로퍼티로도 읽고 씁니다.
+- `crossorigin` 속성은 다른 출처의 미디어를 캔버스나 Web Audio에서 읽을 때 필요합니다(자세히는 62편, 52편).
+- 소스는 `src` 속성이나 자식 `source` 요소로 지정하며, 후자는 브라우저가 위에서부터 재생 가능한 형식을 고릅니다.
+
+## 미디어 상태 속성
+
+미디어 요소는 로딩과 재생 준비 상태를 두 숫자 속성으로 알려 줍니다.
+
+| `readyState` | 상수 | 의미 |
+|--------------|------|------|
+| 0 | `HAVE_NOTHING` | 정보가 없음 |
+| 1 | `HAVE_METADATA` | 길이와 크기를 앎 |
+| 2 | `HAVE_CURRENT_DATA` | 현재 위치의 프레임이 있음 |
+| 3 | `HAVE_FUTURE_DATA` | 조금 더 재생할 데이터가 있음 |
+| 4 | `HAVE_ENOUGH_DATA` | 끊김 없이 재생할 만큼 있음 |
+
+| `networkState` | 상수 | 의미 |
+|----------------|------|------|
+| 0 | `NETWORK_EMPTY` | 아직 데이터 없음 |
+| 1 | `NETWORK_IDLE` | 소스를 골랐고 지금은 받지 않음 |
+| 2 | `NETWORK_LOADING` | 내려받는 중 |
+| 3 | `NETWORK_NO_SOURCE` | 사용할 소스를 찾지 못함 |
+
+`buffered`, `seekable`, `played`는 `TimeRanges` 객체입니다. `length`와 `start(i)`, `end(i)`로 구간을 읽고, 범위 밖 인덱스는 에러를 던집니다.
+
+```js
+const ranges = video.buffered
+for (let i = 0; i < ranges.length; i++) {
+  console.log(ranges.start(i), ranges.end(i)) // 초 단위
+}
+```
+
+- `buffered`는 이미 받아 둔 구간, `seekable`은 `currentTime`을 옮길 수 있는 구간, `played`는 재생한 구간입니다. 라이브 스트림은 `seekable`이 `buffered`와 크게 다를 수 있습니다.
+- 한 번에 받는 구간이 여러 개면 `TimeRanges`에 여러 범위가 들어갑니다. 구간은 정렬되고 서로 겹치거나 맞닿지 않습니다.
+
+## Media Events
+
+미디어 요소의 상태 변화는 이벤트로 통지됩니다.
+
+| 분류 | 이벤트 | 시점 |
+|------|--------|------|
+| 로딩 | `loadstart` | 로딩 시작 |
+| | `loadedmetadata` | 길이·크기를 알게 됨 |
+| | `loadeddata` | 첫 프레임을 로드 |
+| | `progress` | 받는 중 |
+| | `suspend`, `stalled` | 로딩을 멈춤, 데이터가 예상대로 오지 않음 |
+| 재생 가능 | `canplay` | 재생을 시작할 수 있음(중간에 끊길 수 있음) |
+| | `canplaythrough` | 끊김 없이 끝까지 재생할 수 있을 것으로 추정 |
+| 재생 | `playing` | 재생 시작·재개 |
+| | `waiting` | 데이터가 부족해 멈춤 |
+| | `timeupdate` | `currentTime` 갱신 |
+| | `ended` | 재생 종료 |
+| 이동 | `seeking`, `seeked` | 이동 시작, 완료 |
+| 값 변경 | `ratechange`, `volumechange`, `durationchange` | 배속, 볼륨·음소거, 길이 변경 |
+| 오류 | `error`, `abort`, `emptied` | 오류, 로딩 중단, 미디어가 비워짐 |
+
+```js
+video.addEventListener('timeupdate', () => {
+  bar.value = video.currentTime / video.duration
+})
+video.addEventListener('error', () => {
+  console.log(video.error.code) // 1–4
+})
+```
+
+- `timeupdate`는 `currentTime`이 갱신될 때 발생하며 빈도는 시스템 부하에 따라 달라집니다. 대략 15–250ms 간격이라서 프레임 단위 정확도가 필요하면 쓰지 않습니다(아래 "requestVideoFrameCallback()").
+- `timeupdate`는 버블링하지 않고 취소할 수 없습니다. 미디어 이벤트는 요소에서 직접 듣거나 조상에서 캡처 단계로 듣습니다(자세히는 07편).
+- `MediaError.code`는 `1` 중단(`MEDIA_ERR_ABORTED`), `2` 네트워크(`MEDIA_ERR_NETWORK`), `3` 디코딩(`MEDIA_ERR_DECODE`), `4` 소스 부적합(`MEDIA_ERR_SRC_NOT_SUPPORTED`)입니다.
+- 이벤트를 기다리는 대신 `readyState`를 먼저 확인합니다. 리스너를 늦게 붙이면 이미 지나간 `loadedmetadata`를 놓칩니다.
+
+```js
+if (video.readyState >= 1) init()
+else video.addEventListener(
+  'loadedmetadata', init, { once: true })
+```
+
+## play() Promise와 자동 재생 정책
+
+`play()`는 Promise를 반환합니다. 재생이 실제로 시작되면 이행되고, 시작할 수 없으면 거부됩니다.
+
+| 거부 이름 | 원인 |
+|-----------|------|
+| `NotAllowedError` | 브라우저나 OS가 현재 맥락에서 재생을 허용하지 않음(자동 재생 정책, Permissions Policy) |
+| `NotSupportedError` | 미디어 소스가 지원되지 않는 형식 |
+| `AbortError` | Promise가 정해지기 전에 `pause()`나 `load()`가 호출됨 |
+
+```js
+try {
+  await video.play()
+} catch (err) {
+  if (err.name === 'NotAllowedError') showPlayButton()
+}
+```
+
+자동 재생은 다음 중 하나라도 만족해야 허용됩니다.
+
+- 소리가 꺼져 있거나 볼륨이 0입니다.
+- 사용자가 사이트와 상호작용(클릭, 탭, 키 입력)했습니다.
+- 브라우저가 해당 사이트를 허용 목록에 두었습니다(Chrome은 미디어 참여 지표를 사용).
+- `iframe`의 `allow="autoplay"`나 `Permissions-Policy: autoplay`로 허용했습니다.
+
+- `autoplay` 속성은 페이지 로드 시 재생을 시작하라는 힌트이며, 실제 허용은 브라우저 정책과 사용자 설정이 정합니다.
+- 가장 안정적인 조합은 `autoplay muted playsinline`입니다. Safari와 iOS에서는 영상 자동 재생에 `playsinline`이 필요하고 사용자 동작 요구가 더 엄격합니다.
+- 배경 탭에서는 자동 재생이 막히는 경우가 많습니다.
+- Firefox는 설정으로 정책을 바꿀 수 있고 Web Audio를 기본으로 막습니다.
+
+**흔한 실수:** `play()`의 반환값을 무시하는 것입니다. 거부된 Promise가 처리되지 않아 콘솔에 에러가 쌓이고, 재생 버튼 상태가 실제와 어긋납니다. 거부되면 사용자가 누를 수 있는 재생 버튼을 보여 줍니다.
+
+## track 요소와 WebVTT·TextTrack
+
+`track` 요소는 `audio`·`video`의 자식으로 자막이나 챕터 같은 텍스트 트랙을 붙입니다. 파일 형식은 WebVTT(`.vtt`)입니다.
+
+```html
+<video src="a.mp4" controls>
+  <track kind="subtitles" src="ko.vtt"
+         srclang="ko" label="한국어" default>
+</video>
+```
+
+| `kind` | 용도 |
+|--------|------|
+| `subtitles` | 대사의 번역 |
+| `captions` | 대사와 효과음의 문자 표현 |
+| `descriptions` | 시각 내용의 설명 |
+| `chapters` | 챕터 이름(탐색용) |
+| `metadata` | 사용자에게 보이지 않는 스크립트용 데이터 |
+
+- `srclang`은 트랙 언어이고 `kind="subtitles"`에서는 필수입니다. `label`은 플레이어 메뉴에 보이는 이름이며, `default`는 기본 선택 트랙을 지정합니다.
+- WebVTT 파일은 `WEBVTT` 줄로 시작하고, 큐는 시간 줄(`00:00.000 --> 00:02.500`) 아래에 텍스트를 둡니다. 큐 앞에 식별자를 둘 수 있고, 시간 줄 뒤에 위치·정렬 같은 설정을 붙일 수 있으며, `v` 태그로 화자를 표시합니다.
+
+```text
+WEBVTT
+
+00:00.000 --> 00:02.500
+안녕하세요.
+
+00:02.500 --> 00:05.000
+<v 진행자>오늘의 주제입니다.</v>
+```
+
+스크립트에서는 `TextTrack`으로 다룹니다.
+
+| 멤버 | 내용 |
+|------|------|
+| `video.textTracks` | 요소의 `TextTrackList` |
+| `track.mode` | `disabled`(로드하지 않음), `hidden`(로드하지만 표시하지 않음), `showing`(표시) |
+| `track.cues`, `activeCues` | 큐 목록, 지금 활성인 큐 |
+| `cuechange` 이벤트 | 활성 큐가 바뀔 때 `TextTrack`과 `track` 요소에서 발생 |
+| `video.addTextTrack(kind, label, lang)` | 코드로 트랙 추가 |
+
+```js
+const track = video.addTextTrack('captions', '한국어', 'ko')
+track.mode = 'showing'
+track.addCue(new VTTCue(0, 2.5, '안녕하세요.'))
+```
+
+- 트랙의 `mode`가 처음부터 `disabled`이면 VTT 파일을 내려받지 않습니다. 큐를 읽으려면 `hidden`이나 `showing`으로 바꿉니다.
+- 큐 모양은 CSS `::cue` 의사 요소로 꾸밉니다.
+- 지원 상태는 Baseline 널리 지원(2015)입니다.
+
+## Web Audio API 개요
+
+Web Audio API는 오디오를 노드의 그래프로 만들어 처리하는 API입니다. `AudioContext`가 그래프를 담고, 소스 노드에서 효과 노드를 거쳐 `destination`(스피커)으로 연결합니다.
+
+| 역할 | 대표 노드 |
+|------|-----------|
+| 소스 | `OscillatorNode`, `AudioBufferSourceNode`, `MediaElementAudioSourceNode` |
+| 효과 | `GainNode`, `BiquadFilterNode`, `DelayNode`, `ConvolverNode` |
+| 출력 | `AudioDestinationNode` |
+
+```js
+const ctx = new AudioContext()
+const src = ctx.createMediaElementSource(audioEl)
+const gain = ctx.createGain()
+gain.gain.value = 0.5
+src.connect(gain).connect(ctx.destination)
+audioEl.play()
+```
+
+- `AudioContext`는 자동 재생 정책 때문에 `suspended` 상태로 시작할 수 있습니다. 사용자 동작 안에서 `ctx.resume()`을 호출합니다.
+- `AudioBufferSourceNode`는 한 번만 재생할 수 있어서 다시 재생하려면 새 노드를 만듭니다. `decodeAudioData()`로 디코딩한 `AudioBuffer`는 메모리에 올라 있습니다.
+- 효과음을 짧게 여러 번 낼 때는 `audio` 요소보다 `AudioBuffer`가 적합합니다.
+- 지원 상태는 Baseline 널리 지원(2021)입니다.
+
+## AudioWorklet
+
+AudioWorklet은 사용자 코드를 오디오 렌더링 전용 스레드에서 실행해 낮은 지연으로 소리를 처리하는 방법입니다. 보안 컨텍스트에서만 쓸 수 있습니다.
+
+```js
+// processor.js (AudioWorkletGlobalScope)
+class Gain extends AudioWorkletProcessor {
+  process(inputs, outputs) {
+    inputs[0].forEach((ch, c) =>
+      ch.forEach((v, i) => (outputs[0][c][i] = v * 0.5)))
+    return true // 처리기를 유지
+  }
+}
+registerProcessor('gain', Gain)
+```
+
+```js
+// 메인 스레드
+await ctx.audioWorklet.addModule('processor.js')
+const node = new AudioWorkletNode(ctx, 'gain')
+src.connect(node).connect(ctx.destination)
+```
+
+- `process(inputs, outputs, parameters)`는 오디오 블록마다 호출되며 `true`를 반환하면 처리기가 유지되고 `false`면 정리될 수 있습니다.
+- 사용자 지정 매개변수는 `static get parameterDescriptors()`로 선언하고, 노드의 `port`로 메인 스레드와 메시지를 주고받습니다.
+- 무거운 계산이나 할당을 `process()` 안에서 하면 소리가 끊기므로 가볍게 유지합니다. 이 스레드와 Worker의 관계는 55편에서 다룹니다.
+- 지원 상태는 Baseline 널리 지원(2021)입니다.
+
+## 출력 장치 선택(setSinkId)
+
+`setSinkId(sinkId)`는 미디어 요소의 소리를 내보낼 장치를 바꿉니다. 장치 ID는 `navigator.mediaDevices.enumerateDevices()`에서 `kind`가 `audiooutput`인 항목의 `deviceId`이며, 빈 문자열은 기본 장치입니다.
+
+```js
+const list = await navigator.mediaDevices.enumerateDevices()
+const out = list.find((d) => d.kind === 'audiooutput')
+await audioEl.setSinkId(out.deviceId)
+console.log(audioEl.sinkId) // 선택된 장치 ID
+```
+
+- 보안 컨텍스트가 필요하고 `speaker-selection` Permissions Policy의 제한을 받습니다. 기본 장치가 아닌 장치는 `navigator.mediaDevices.selectAudioOutput()`으로 사용자에게 고르게 해야 허용됩니다.
+- 거부 사유는 `NotFoundError`(없는 장치), `NotAllowedError`(정책 차단), `AbortError`(전환 실패)입니다.
+- `AudioContext`에도 같은 이름의 `setSinkId()`가 있습니다.
+- Safari가 지원하지 않아 Baseline이 아닙니다. 지원하지 않는 환경에서는 `'setSinkId' in audioEl`로 확인하고 기본 장치로 재생합니다.
+
+## Fullscreen API
+
+Fullscreen API는 요소를 화면 전체에 표시합니다. 비디오 플레이어는 `video`가 아니라 컨트롤을 포함한 래퍼 요소를 전체 화면으로 만듭니다.
+
+| 멤버 | 내용 |
+|------|------|
+| `element.requestFullscreen(options)` | 전체 화면 요청. Promise 반환 |
+| `document.exitFullscreen()` | 해제. Promise 반환 |
+| `document.fullscreenElement` | 현재 전체 화면 요소 또는 `null` |
+| `document.fullscreenEnabled` | 사용 가능 여부 |
+| `fullscreenchange`, `fullscreenerror` | 상태 변경, 실패 |
+| `:fullscreen`, `::backdrop` | 전체 화면 요소와 뒷배경 스타일 |
+
+```js
+wrapper.addEventListener('dblclick', async () => {
+  if (document.fullscreenElement) {
+    await document.exitFullscreen()
+  } else {
+    await wrapper.requestFullscreen()
+  }
+})
+```
+
+- `requestFullscreen()`은 일시적 사용자 활성화가 있어야 하며, 없으면 거부됩니다.
+- 거부(`TypeError`) 사유는 문서가 활성 상태가 아님, 요소가 문서에 없음, Permissions Policy가 허용하지 않음, 요소가 문서 자신임, 이미 `showPopover()`로 열린 팝오버임입니다.
+- `navigationUI` 옵션은 `hide`, `show`, `auto`(기본)입니다.
+- 사용자는 `Esc`로 언제든 나갈 수 있습니다. 나갔는지는 `fullscreenchange`에서 `fullscreenElement`로 확인합니다.
+- `iframe`에서는 `allowfullscreen`(또는 `allow="fullscreen"`)이 있어야 합니다. 기본 정책은 `self`입니다.
+
+### 지원 상태
+
+Baseline이 아닙니다. Safari가 macOS와 iPadOS에서는 지원하지만 **iPhone Safari는 임의의 요소를 전체 화면으로 만들지 못하기** 때문입니다. iPhone에서는 `video` 요소에 한해 WebKit 전용 `webkitEnterFullscreen()`을 씁니다. 전체 화면을 필수 기능으로 두지 말고 `document.fullscreenEnabled`와 메서드 존재를 확인한 뒤 버튼을 보여 줍니다.
+
+## Picture-in-Picture
+
+Picture-in-Picture(PiP)는 `video`를 다른 창 위에 떠 있는 작은 창으로 띄웁니다.
+
+```js
+pipBtn.disabled = !document.pictureInPictureEnabled
+pipBtn.onclick = async () => {
+  if (document.pictureInPictureElement) {
+    await document.exitPictureInPicture()
+  } else {
+    await video.requestPictureInPicture()
+  }
+}
+```
+
+- `video.requestPictureInPicture()`는 `PictureInPictureWindow`(`width`, `height`, `resize` 이벤트)로 이행되는 Promise를 반환하고, 해제는 `document.exitPictureInPicture()`입니다.
+- `enterpictureinpicture`, `leavepictureinpicture` 이벤트는 요소에서 발생합니다. 단 이 이벤트는 코드가 요청한 경우에 발생하고, 사용자가 브라우저 UI로 직접 들어가는 경우는 Media Session의 `enterpictureinpicture` 액션 핸들러로 알아챕니다.
+- `disablePictureInPicture` 속성은 브라우저가 PiP를 권하지 않게 하는 힌트이며, 스타일은 `:picture-in-picture`로 줍니다.
+- 컨트롤은 브라우저가 그립니다. 사용자 지정 HTML 버튼은 쓸 수 없고, Media Session 액션을 등록하면 해당 컨트롤이 나타납니다.
+- Permissions Policy의 `picture-in-picture` 지시어가 적용됩니다.
+- Baseline이 아닙니다. Chrome 69, Edge 79, Safari 13.1, Firefox 153부터 지원됩니다(web-features 3.40.1 기준).
+
+### Document Picture-in-Picture
+
+Document PiP는 `video`뿐 아니라 임의의 HTML을 넣은 떠 있는 창을 만듭니다. 입구는 `window.documentPictureInPicture`입니다.
+
+```js
+const pip = await documentPictureInPicture.requestWindow()
+pip.document.body.append(playerEl) // DOM 이동
+pip.addEventListener('pagehide', () => {
+  container.append(playerEl) // 닫히면 원래 자리로
+})
+```
+
+- 반환된 창은 같은 출처의 빈 창이며 탐색하거나 위치를 정할 수 없고, 탭당 하나만 열 수 있고 열어 준 창보다 오래 살지 못합니다.
+- 스타일은 새 창의 문서에 직접 복사해야 합니다. 열릴 때는 `enter` 이벤트가 발생하고, 닫힐 때는 PiP 창의 `pagehide`가 발생합니다.
+- 보안 컨텍스트가 필요하고 호출에는 사용자 동작이 필요한 것으로 취급합니다.
+- Baseline이 아닙니다. Chrome·Edge 130, Firefox 151에서 지원되며 Safari에는 없습니다(web-features 3.40.1 기준).
+
+## Media Session
+
+Media Session API는 OS의 미디어 알림, 잠금 화면, 하드웨어 미디어 키에 곡 정보를 표시하고 그 조작을 페이지가 받게 합니다. 페이지가 보이지 않을 때도 쓸 수 있습니다.
+
+```js
+const ms = navigator.mediaSession
+ms.metadata = new MediaMetadata({
+  title: '곡 제목',
+  artist: '아티스트',
+  artwork: [{ src: '/cover.png', sizes: '512x512' }],
+})
+ms.setActionHandler('pause', () => audioEl.pause())
+ms.setActionHandler('seekto', (d) => {
+  audioEl.currentTime = d.seekTime
+})
+```
+
+- `metadata`는 `MediaMetadata`(`title`, `artist`, `album`, `artwork`)이며, `playbackState`로 재생 상태를, `setPositionState()`로 위치·길이를 알립니다.
+- 액션 핸들러는 `play`, `pause`, `seekbackward`, `seekforward`, `previoustrack`, `nexttrack`, `seekto`, `stop`, `enterpictureinpicture` 등입니다. 핸들러를 등록한 액션만 OS 컨트롤에 나타납니다.
+- Baseline이 아닙니다. 지원 여부는 `'mediaSession' in navigator`로 확인합니다.
+
+## Media Source Extensions 개요
+
+Media Source Extensions(MSE)는 `src`에 파일 주소를 주는 대신 JavaScript가 미디어 조각을 직접 공급하는 방식입니다. DASH·HLS 같은 적응형 스트리밍 플레이어가 이 API 위에서 동작합니다.
+
+```js
+const ms = new MediaSource()
+video.src = URL.createObjectURL(ms)
+ms.addEventListener('sourceopen', async () => {
+  const type = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"'
+  const sb = ms.addSourceBuffer(type)
+  sb.appendBuffer(await (await fetch(url)).arrayBuffer())
+  sb.addEventListener('updateend', () => ms.endOfStream())
+})
+```
+
+- `MediaSource`가 컨테이너이고 `SourceBuffer`가 조각을 받는 버퍼입니다. `appendBuffer()`가 끝나면 `updateend`가 발생합니다.
+- `MediaSource.isTypeSupported(type)`으로 형식을 확인합니다. 화질 선택, 버퍼 길이, 오래된 구간 제거(eviction)는 애플리케이션이 책임집니다.
+- 워커에서는 `MediaSource.handle`(`MediaSourceHandle`)을 메인 스레드로 보내 `srcObject`로 연결합니다(Chrome 108 이상).
+- Baseline이 아닙니다. iPhone Safari가 `MediaSource`를 제공하지 않기 때문입니다. iPhone에서는 아래의 `ManagedMediaSource`나 네이티브 HLS를 씁니다.
+
+### ManagedMediaSource
+
+`ManagedMediaSource`는 `MediaSource`를 확장해 브라우저가 버퍼를 직접 관리하게 한 형태입니다. 메모리나 하드웨어 사정에 따라 브라우저가 버퍼 내용을 언제든 제거할 수 있습니다.
+
+- `streaming` 속성과 `startstreaming`·`endstreaming` 이벤트가 언제 데이터를 받아야 하고 언제 멈춰도 되는지 알립니다. `ManagedSourceBuffer`에서는 브라우저의 제거를 포함한 버퍼 변화가 `bufferedchange`로 통지됩니다.
+- Safari에서는 `video.disableRemotePlayback = true`를 지정하거나 HLS `source` 대안을 제공해야 `sourceopen`이 발생합니다.
+- Baseline이 아닙니다. Safari 17(iOS 17.1)에서 지원됩니다.
+
+## Encrypted Media Extensions 개요
+
+Encrypted Media Extensions(EME)는 DRM으로 보호된 미디어를 재생하는 API입니다. 복호화는 브라우저 안의 CDM(Content Decryption Module)이 맡고(Widevine, PlayReady, FairPlay 등), 이 API는 CDM과 메시지를 주고받는 통로만 제공합니다. 라이선스 서버와의 통신은 애플리케이션이 구현합니다.
+
+```js
+const access = await navigator.requestMediaKeySystemAccess(
+  'com.widevine.alpha', config)
+const keys = await access.createMediaKeys()
+await video.setMediaKeys(keys)
+video.addEventListener('encrypted', (e) => {
+  const session = keys.createSession()
+  session.generateRequest(e.initDataType, e.initData)
+})
+```
+
+- 흐름은 키 시스템 접근 요청 → `MediaKeys` 생성 → 요소에 `setMediaKeys()` → 암호화 데이터를 만나면 `encrypted` 이벤트 → `MediaKeySession.generateRequest()`로 라이선스 요청 → 서버 응답을 세션에 전달입니다.
+- 키 시스템 이름과 `config`의 세부 형식은 DRM 시스템마다 다릅니다.
+- 지원 상태는 Baseline 2019입니다.
+
+## Web Speech API
+
+Web Speech API는 음성 합성(텍스트를 소리로)과 음성 인식(소리를 텍스트로) 두 부분으로 나뉘며 지원 상태가 다릅니다.
+
+| 부분 | 핵심 객체 | 지원 상태 |
+|------|-----------|-----------|
+| 음성 합성 | `speechSynthesis`, `SpeechSynthesisUtterance` | Baseline 널리 지원(2018) |
+| 음성 인식 | `SpeechRecognition` | Baseline 아님. 접두어 없는 이름은 Chrome·Edge 139 이상(web-features 3.40.1 기준) |
+
+```js
+const u = new SpeechSynthesisUtterance('안녕하세요')
+u.lang = 'ko-KR'
+speechSynthesis.speak(u)
+```
+
+- 합성에서 `getVoices()`는 목록이 비어 있다가 나중에 채워질 수 있어서 `voiceschanged` 이벤트를 기다립니다. `cancel()`, `pause()`, `resume()`으로 제어합니다.
+
+```js
+const rec = new SpeechRecognition()
+rec.lang = 'ko-KR'
+rec.interimResults = true
+rec.addEventListener('result', (e) => log(e.results))
+rec.start()
+```
+
+- 인식은 `continuous`(연속), `interimResults`(중간 결과), `lang`을 설정하고 `start()`·`stop()`과 `result` 이벤트로 씁니다.
+- Chrome에서 인식의 기본 처리는 서버 쪽(클라우드)이며 기기 안 처리 옵션이 있고 `on-device-speech-recognition` Permissions Policy로 제어합니다..
+
+## Media Capabilities API
+
+Media Capabilities API는 형식 지원 여부뿐 아니라 부드러운 재생과 전력 효율까지 알려 줍니다. `canPlayType()`과 `MediaSource.isTypeSupported()`는 지원 여부만 답합니다.
+
+```js
+const mc = navigator.mediaCapabilities
+const info = await mc.decodingInfo({
+  type: 'file',
+  video: {
+    contentType: 'video/mp4; codecs="avc1.42E01E"',
+    width: 1920, height: 1080,
+    bitrate: 2500000, framerate: 30,
+  },
+})
+// info.supported, info.smooth, info.powerEfficient
+```
+
+- `type`은 `file`, `media-source`, `webrtc`이며 `audio` 또는 `video` 설정을 넣습니다. 녹화·송신 쪽은 `encodingInfo()`를 씁니다.
+- 결과의 `supported`는 지원 여부, `smooth`는 매끄러운 재생 가능성, `powerEfficient`는 하드웨어 디코딩 등 전력 효율이 좋은지입니다.
+- 화질을 고를 때 쓰며, 워커에서도 `WorkerNavigator.mediaCapabilities`로 접근할 수 있습니다.
+- 지원 상태는 Baseline 널리 지원(2022)입니다.
+
+## Remote Playback·Presentation API 개요
+
+두 API 모두 미디어나 화면을 외부 기기(TV, 프로젝터, 스피커)로 보냅니다.
+
+| 항목 | Remote Playback | Presentation |
+|------|-----------------|--------------|
+| 보내는 것 | 미디어 요소의 재생 | 별도의 수신 페이지 |
+| 입구 | `video.remote` | `new PresentationRequest(urls)` |
+| 주요 메서드 | `watchAvailability(cb)`, `prompt()` | `start()`, `reconnect(id)`, `connection.send()` |
+| 지원 | Chrome·Edge 121, Safari 13.1 | Chromium만 |
+
+```js
+video.remote.watchAvailability((ok) => {
+  castBtn.hidden = !ok
+})
+castBtn.onclick = () => video.remote.prompt() // 사용자 동작 필요
+```
+
+- Remote Playback의 `state`는 `disconnected`, `connecting`, `connected`이며 `connecting`, `connect`, `disconnect` 이벤트가 발생합니다. `disableRemotePlayback` 속성으로 해당 요소에서 이 기능을 끕니다.
+- Presentation은 제어하는 페이지와 수신 페이지 두 개로 구성되고, 수신 쪽은 `navigator.presentation.receiver`로 연결 목록을 받아 `PresentationConnection`으로 메시지를 주고받습니다. 보안 컨텍스트가 필요합니다.
+- 둘 다 Baseline이 아닙니다. 기능 확인 후 버튼을 보여 줍니다.
+
+## requestVideoFrameCallback()
+
+`video.requestVideoFrameCallback(callback)`은 새 영상 프레임이 컴포지터에 제출될 때 콜백을 실행합니다. 반환된 번호를 `cancelVideoFrameCallback()`에 넘겨 취소합니다.
+
+```js
+function draw(now, meta) {
+  ctx.drawImage(video, 0, 0)
+  console.log(meta.mediaTime, meta.presentedFrames)
+  video.requestVideoFrameCallback(draw) // 다시 등록
+}
+video.requestVideoFrameCallback(draw)
+```
+
+- 콜백은 한 번만 실행되므로 계속 받으려면 안에서 다시 등록합니다.
+- 호출 빈도는 영상 프레임 속도와 화면 주사율 중 낮은 쪽을 따릅니다. `requestAnimationFrame()`처럼 항상 화면 주사율로 돌지 않습니다(자세히는 08편).
+- `metadata`에는 `mediaTime`(미디어 시간축의 시각), `presentedFrames`(제출된 프레임 수, 누락 감지용), `width`, `height`, `expectedDisplayTime`, `presentationTime`, `processingDuration` 등이 있습니다.
+- 캔버스에 프레임을 그리거나 영상 분석, 프레임 단위 동기화에 씁니다(자세히는 52편).
+- 지원 상태는 Baseline 2024입니다.
+
+## Audio Session API
+
+Audio Session API는 페이지의 소리가 기기의 다른 오디오와 어떻게 섞이거나 서로 끊는지 정합니다. `navigator.audioSession`이 입구입니다.
+
+```js
+if ('audioSession' in navigator) {
+  navigator.audioSession.type = 'play-and-record'
+}
+const as = navigator.audioSession
+as.addEventListener('statechange', () => {
+  if (as.state === 'interrupted') pauseLocal()
+})
+```
+
+| `type` | 용도 |
+|--------|------|
+| `auto` | 기본. 브라우저가 사용 중인 API에 맞춰 선택 |
+| `playback` | 음악·영상 재생. 다른 재생과 섞지 않음 |
+| `transient` | 알림음처럼 짧은 소리. 다른 소리 위에 재생 |
+| `transient-solo` | 음성 안내처럼 다른 소리를 멈추는 독점 재생 |
+| `ambient` | 다른 오디오와 섞임 |
+| `play-and-record` | 재생과 녹음 동시(화상 통화) |
+
+- `state`는 `active`, `interrupted`(전화 수신 같은 플랫폼 중단), `inactive`입니다.
+- Baseline이 아닙니다. Safari(16.4)에서만 지원됩니다.
+
+## 핵심 정리
+
+- 미디어 요소는 `readyState`·`networkState`·`buffered`·`seekable`로 상태를 알리고, 이벤트는 버블링하지 않습니다.
+- `play()`는 Promise를 반환하며 자동 재생 정책 때문에 `NotAllowedError`로 거부될 수 있으므로 항상 처리하고 재생 버튼 대안을 둡니다.
+- 자막은 `track` 요소와 WebVTT, 스크립트는 `TextTrack`의 `mode`·`cues`·`cuechange`로 다룹니다.
+- Web Audio는 `AudioContext`의 노드 그래프이며 `suspended` 상태일 수 있고, AudioWorklet은 오디오 스레드에서 처리합니다.
+- Fullscreen(iPhone Safari 제약), PiP, Media Session, MSE, 출력 장치 선택은 Baseline이 아니므로 기능 확인 후 점진적으로 씁니다.
+- Media Capabilities(2022), `requestVideoFrameCallback()`(2024), EME(2019)는 Baseline이고, ManagedMediaSource, Audio Session, Document PiP는 일부 엔진에만 있습니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="자동 재생이 막혔을 때 video.play()의 동작으로 옳은 것은?"
+  options={['아무 일도 없이 조용히 재생되지 않는다', 'NotAllowedError로 거부되는 Promise를 반환한다', 'ended 이벤트가 즉시 발생한다', 'readyState가 0으로 바뀐다']}
+  correctAnswer={2}
+  explanation="play()는 Promise를 반환하고 브라우저 정책이 재생을 허용하지 않으면 NotAllowedError로 거부됩니다. 거부를 처리해 사용자가 누를 재생 버튼을 보여 주어야 합니다."
+  optionExplanations={['Promise가 거부되므로 catch로 알 수 있습니다.', '정책으로 막히면 NotAllowedError로 거부되므로 정답입니다.', 'ended는 재생이 끝났을 때 발생하는 이벤트입니다.', 'readyState는 로딩 상태이며 재생 허용 여부와 관계없습니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="readyState 값 4(HAVE_ENOUGH_DATA)와 가장 가까운 설명은?"
+  options={['길이와 크기만 알고 있다', '현재 위치의 프레임만 있다', '끊김 없이 재생할 만큼 데이터가 있다', '사용할 소스를 찾지 못했다']}
+  correctAnswer={3}
+  explanation="HAVE_ENOUGH_DATA는 끊김 없이 재생할 수 있을 만큼 데이터가 있다는 상태입니다. 길이와 크기만 아는 것은 1, 현재 프레임만 있는 것은 2이고, 소스를 찾지 못한 것은 networkState의 3입니다."
+  optionExplanations={['메타데이터만 아는 상태는 1(HAVE_METADATA)입니다.', '현재 프레임만 있는 상태는 2(HAVE_CURRENT_DATA)입니다.', '4(HAVE_ENOUGH_DATA)의 정의이므로 정답입니다.', '소스를 못 찾는 것은 networkState 3(NETWORK_NO_SOURCE)입니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="Fullscreen API가 Baseline이 아닌 이유로 옳은 것은?"
+  options={['Firefox가 지원하지 않는다', 'iPhone Safari가 임의의 요소를 전체 화면으로 만들지 못한다', 'requestFullscreen이 Promise를 반환하지 않는다', '보안 컨텍스트가 아니면 항상 실패한다']}
+  correctAnswer={2}
+  explanation="Safari는 macOS와 iPadOS에서는 지원하지만 iPhone에서는 임의의 요소의 전체 화면을 지원하지 않습니다. iPhone의 video 요소에는 WebKit 전용 webkitEnterFullscreen을 씁니다."
+  optionExplanations={['Firefox는 64부터 지원합니다.', 'iPhone Safari 제약 때문이므로 정답입니다.', 'requestFullscreen은 Promise를 반환합니다.', '전체 화면이 보안 컨텍스트에만 한정된다는 것이 이유가 아닙니다.']}
+/>
+
+## 참고 자료
+
+- [MDN — HTMLMediaElement](https://developer.mozilla.org/en-US/docs/Web/API/HTMLMediaElement)
+- [MDN — HTMLMediaElement.play()](https://developer.mozilla.org/en-US/docs/Web/API/HTMLMediaElement/play)
+- [MDN — Autoplay guide](https://developer.mozilla.org/en-US/docs/Web/Media/Guides/Autoplay)
+- [MDN — TimeRanges](https://developer.mozilla.org/en-US/docs/Web/API/TimeRanges)
+- [MDN — MediaError.code](https://developer.mozilla.org/en-US/docs/Web/API/MediaError/code)
+- [MDN — timeupdate event](https://developer.mozilla.org/en-US/docs/Web/API/HTMLMediaElement/timeupdate_event)
+- [HTML Standard — Media elements](https://html.spec.whatwg.org/multipage/media.html)
+- [MDN — WebVTT API](https://developer.mozilla.org/en-US/docs/Web/API/WebVTT_API)
+- [MDN — HTMLTrackElement](https://developer.mozilla.org/en-US/docs/Web/API/HTMLTrackElement)
+- [MDN — Web Audio API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API)
+- [MDN — AudioWorklet](https://developer.mozilla.org/en-US/docs/Web/API/AudioWorklet)
+- [MDN — HTMLMediaElement.setSinkId()](https://developer.mozilla.org/en-US/docs/Web/API/HTMLMediaElement/setSinkId)
+- [MDN — Fullscreen API](https://developer.mozilla.org/en-US/docs/Web/API/Fullscreen_API)
+- [MDN — Element.requestFullscreen()](https://developer.mozilla.org/en-US/docs/Web/API/Element/requestFullscreen)
+- [MDN — Picture-in-Picture API](https://developer.mozilla.org/en-US/docs/Web/API/Picture-in-Picture_API)
+- [MDN — Document Picture-in-Picture API](https://developer.mozilla.org/en-US/docs/Web/API/Document_Picture-in-Picture_API)
+- [MDN — Media Session API](https://developer.mozilla.org/en-US/docs/Web/API/Media_Session_API)
+- [MDN — Media Source Extensions API](https://developer.mozilla.org/en-US/docs/Web/API/Media_Source_Extensions_API)
+- [MDN — ManagedMediaSource](https://developer.mozilla.org/en-US/docs/Web/API/ManagedMediaSource)
+- [MDN — Encrypted Media Extensions API](https://developer.mozilla.org/en-US/docs/Web/API/Encrypted_Media_Extensions_API)
+- [MDN — Web Speech API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Speech_API)
+- [MDN — Media Capabilities API](https://developer.mozilla.org/en-US/docs/Web/API/Media_Capabilities_API)
+- [MDN — Remote Playback API](https://developer.mozilla.org/en-US/docs/Web/API/Remote_Playback_API)
+- [MDN — Presentation API](https://developer.mozilla.org/en-US/docs/Web/API/Presentation_API)
+- [MDN — HTMLVideoElement.requestVideoFrameCallback()](https://developer.mozilla.org/en-US/docs/Web/API/HTMLVideoElement/requestVideoFrameCallback)
+- [MDN — Audio Session API](https://developer.mozilla.org/en-US/docs/Web/API/Audio_Session_API)
+- [web-features 3.40.1 데이터](https://cdn.jsdelivr.net/npm/web-features@3.40.1/data.json)

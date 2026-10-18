@@ -1,0 +1,83 @@
+---
+title: '13. zod로 API 스키마와 타입 단일화'
+description: 'zod 스키마 하나로 책 도메인 타입을 정의해 폼 검증 타입과 API 응답 타입을 통일합니다'
+---
+
+05편의 `BookFormPage.tsx`는 `zodResolver`로 입력값을 검증했고, 12편의 `services/books.ts`는 `useQuery`·`useMutation`으로 책을 조회했습니다. 문제는 두 편의 타입이 따로 정의됐다는 것입니다.
+
+## 개념 정리
+
+### 지금까지의 문제
+
+지금 `services/books.ts`에는 이런 식의 수동 타입이 있었습니다.
+
+```ts
+// (수정 전) services/books.ts 일부
+interface Book {
+  id: string
+  title: string
+  author: string
+  pages: number
+}
+```
+
+`schemas/book.ts`의 폼 검증용 `zod` 스키마에서 뽑은 타입은 이 `interface Book`과 이름은 비슷해도 서로 다른 선언입니다. 서버가 필드를 빼먹거나 이름을 바꿔도 `interface`는 값을 검사하지 않으므로 런타임에야 드러납니다.
+
+### z.infer로 타입 도출
+
+`zod` 스키마를 만들면 그 스키마가 통과시키는 값의 타입을 `z.infer`로 그대로 뽑아낼 수 있습니다. 스키마와 타입이 항상 같은 소스에서 나오므로 둘이 어긋날 수 없습니다.
+
+```ts
+const bookInputSchema = z.object({ title: z.string().min(1) })
+type BookInput = z.infer<typeof bookInputSchema>
+```
+
+### extend로 관련 스키마 파생
+
+폼에서 받는 값(`BookInput`, id 없음)과 서버 응답(`Book`, id 있음)은 필드가 거의 같습니다. `extend`로 필드를 더한 새 스키마를 만들면 중복 선언 없이 관계를 표현합니다.
+
+```ts
+const bookSchema = bookInputSchema.extend({ id: z.string() })
+```
+
+### parse로 API 응답을 실제로 검증
+
+`fetch` 응답은 타입 단언 없이는 `unknown`입니다. `schema.parse(data)`를 쓰면 컴파일 타임 타입뿐 아니라 런타임에도 실제 응답이 스키마와 맞는지 확인하고, 어긋나면 그 자리에서 오류를 던집니다.
+
+## 자주 하는 실수
+
+| 증상 | 원인 | 고치는 법 |
+|------|------|-----------|
+| 응답 필드가 바뀌었는데 빌드가 통과함 | `interface`만 선언하고 실제 파싱은 안 함 | `schema.parse(data)`로 응답을 검증한다 |
+| `pages`에 문자열을 넣으면 오류가 남 | `z.number()`만 쓰고 `coerce`를 빼먹음 | 문자열로 들어올 수 있는 값은 `z.coerce.number()`를 쓴다 |
+| 두 스키마의 필드가 슬금슬금 어긋남 | 각각 처음부터 따로 작성함 | `bookSchema`를 `bookInputSchema.extend(...)`로 파생시킨다 |
+
+## 확인 문제
+
+<Quiz
+  questionNumber={1}
+  question={"이 편 이전 상태(interface Book과 별도 zod 스키마)의 문제점은"}
+  options={["타입스크립트 컴파일 속도가 느려진다","두 선언이 서로 다른 소스라 필드가 어긋나도 컴파일러가 잡지 못한다","React 컴포넌트가 렌더링되지 않는다","zod 패키지 용량이 너무 커진다"]}
+  correctAnswer={2}
+  explanation={"interface는 값을 검사하지 않는 컴파일 타임 선언이라, zod 스키마와 필드가 어긋나도 타입 검사만으로는 잡히지 않습니다."}
+/>
+
+<Quiz
+  questionNumber={2}
+  question={"z.infer의 역할은"}
+  options={["zod 스키마를 JSON으로 직렬화한다","zod 스키마가 통과시키는 값의 타입스크립트 타입을 뽑아낸다","스키마 검증 속도를 높인다","컴포넌트 props를 자동으로 생성한다"]}
+  correctAnswer={2}
+  explanation={"z.infer&lt;typeof schema&gt;는 스키마 정의로부터 대응하는 타입스크립트 타입을 도출합니다."}
+/>
+
+<Quiz
+  questionNumber={3}
+  question={"bookInputSchema.extend로 bookSchema를 만드는 이유는"}
+  options={["두 스키마를 완전히 독립적으로 유지하기 위해서","공통 필드를 중복 선언하지 않고 id처럼 추가되는 필드만 얹기 위해서","검증을 건너뛰기 위해서","React 렌더링 순서를 정하기 위해서"]}
+  correctAnswer={2}
+  explanation={"extend는 기존 스키마의 필드를 그대로 물려받은 채 새 필드만 더한 스키마를 만들어, 공통 필드가 두 곳에서 따로 관리되는 것을 막습니다."}
+/>
+
+## 참고 자료
+
+- [Zod 공식 문서 — Basic usage](https://zod.dev/basics)

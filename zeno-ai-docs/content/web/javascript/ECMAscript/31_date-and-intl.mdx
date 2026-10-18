@@ -1,0 +1,910 @@
+---
+title: '31. Date와 Intl'
+description: 'Date의 시간 표현과 생성·파싱·시간대 규칙, Intl 객체의 로캘별 포맷·정렬·복수형 처리, Temporal의 타입 구성과 표준화 상태를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** Date가 시간을 표현하는 방식과 월·파싱·시간대 함정을 설명하고, Intl 객체로 로캘별 출력을 만들며, Temporal이 Date의 어떤 문제를 바꾸는지 구분할 수 있습니다.
+</Callout>
+
+## Date 객체와 시간 표현
+
+Date는 한 시점을 나타내는 내장 객체이고, 내부에는 시간 값(time value) 하나만 들어 있습니다. 시간 값은 에포크(epoch), 즉 1970-01-01T00:00:00Z로부터 흐른 밀리초이며 윤초는 세지 않습니다.
+
+```js
+new Date(0).toISOString()
+// '1970-01-01T00:00:00.000Z'
+new Date(8.64e15).toISOString()
+// '+275760-09-13T00:00:00.000Z'
+new Date(8.64e15 + 1).getTime() // NaN
+```
+
+- 표현 범위는 에포크 기준 ±8,640,000,000,000,000ms(±1억 일)입니다. 범위를 넘으면 시간 값이 NaN인 Invalid Date가 됩니다.
+- 시간대와 달력 정보는 저장하지 않습니다. 연·월·일·시는 시간 값에서 getter를 부를 때마다 계산하며, getter 종류가 지역 시각으로 계산할지 UTC로 계산할지 정합니다.
+- 가변 객체입니다. setter가 객체 자체를 바꿉니다.
+- `new` 없이 `Date()`를 호출하면 인수와 상관없이 현재 시각을 문자열로 반환합니다. `typeof Date()`는 `'string'`입니다.
+
+연산자는 다음과 같이 동작합니다.
+
+| 연산 | 동작 |
+|------|------|
+| `a - b` | 밀리초 차이(number) |
+| `a + b`, `a + 1` | 문자열 연결 |
+| `a < b`, `a >= b` | 시간 값 비교 |
+| `a == b`, `a === b` | 참조 비교. 같은 객체일 때만 `true` |
+
+Date의 `[Symbol.toPrimitive]`는 힌트가 `number`이면 시간 값을, `default`와 `string`이면 문자열을 돌려줍니다. 그래서 `+`는 문자열 연결이 되고 `-`와 `<`는 숫자 연산이 됩니다. 두 Date가 같은 시각인지는 `a.getTime() === b.getTime()`으로 확인합니다.
+
+## Date 생성자
+
+Date 생성자는 인수의 개수와 타입으로 동작이 갈립니다.
+
+| 호출 | 의미 |
+|------|------|
+| `new Date()` | 현재 시각 |
+| `new Date(date)` | 복사 |
+| `new Date(ms)` | 에포크 이후 밀리초 |
+| `new Date(string)` | `Date.parse`와 같은 규칙으로 해석 |
+| `new Date(y, m, d, h, mi, s, ms)` | 지역 시각의 구성요소 |
+
+이 문서의 지역 시각 예제는 한국 표준시(UTC+9) 환경에서 실행한 결과입니다.
+
+```js
+new Date(2026, 9, 5, 14, 30).toString()
+// 'Mon Oct 05 2026 14:30:00 GMT+0900 (한국 표준시)'
+new Date(2026, 12, 1).getFullYear() // 2027 (월 12는 이월)
+new Date(2026, 2, 0).getDate()      // 28 (3월 0일 = 2월 말일)
+new Date(2026, 9, 5, 25).getDate()  // 6 (25시 = 다음 날 1시)
+new Date(99, 0, 1).getFullYear()    // 1999
+```
+
+- 인수가 2개 이상이면 구성요소 형태입니다. 연과 월만 필수이고, 일은 기본 1, 시·분·초·밀리초는 기본 0입니다.
+- 구성요소는 항상 지역 시각(실행 환경의 시간대)으로 해석합니다. UTC 기준으로 만들 때는 `Date.UTC`를 씁니다.
+- 인수가 하나이면 Date는 복사하고, 그 밖의 값은 원시값으로 바꿉니다. 결과가 문자열이면 파싱하고 아니면 숫자로 변환합니다. `new Date(true)`는 1ms, `new Date(null)`은 0ms, `new Date(undefined)`와 `new Date('abc')`는 Invalid Date입니다.
+- 밀리초의 소수 부분은 0 쪽으로 버립니다. `new Date(1.9)`는 1ms, `new Date(-1.9)`는 -1ms입니다.
+- 범위를 벗어난 구성요소는 에러 없이 윗단위로 이월합니다. 월 12는 다음 해 1월, 일 0은 전달 말일, 시 25는 다음 날 1시입니다.
+- 연도 0–99는 1900을 더해 해석합니다. 0–99년을 만들려면 생성 뒤 `setFullYear`를 호출합니다.
+
+## Date.now·Date.parse·Date.UTC
+
+세 정적 메서드는 모두 Date 객체가 아니라 시간 값(number)을 반환합니다.
+
+```js
+Date.parse('2026-10-05T00:00:00Z') // 1791158400000
+Date.parse('abc')                  // NaN
+Date.UTC(2026, 9, 5)               // 1791158400000
+Date.UTC(2026)                     // 1767225600000
+new Date(Date.UTC(2026, 9, 5, 14, 30)).toISOString()
+// '2026-10-05T14:30:00.000Z'
+```
+
+| 메서드 | 동작 |
+|--------|------|
+| `Date.now()` | 현재 시간 값. `new Date().getTime()`과 같지만 객체를 만들지 않음 |
+| `Date.parse(str)` | 문자열을 해석. 실패하면 `NaN`. `new Date(str)`과 같은 규칙 |
+| `Date.UTC(y, m, ...)` | UTC 구성요소를 시간 값으로 변환 |
+
+- `Date.UTC`의 월은 0부터이고 기본값은 0입니다. 연도만 줘도 됩니다. 연도 0–99를 1900년대로 해석하는 규칙은 생성자와 같습니다.
+- `Date.now()`는 시스템 시계를 읽습니다. 시계가 조정되면 값이 뒤로 가거나 건너뛸 수 있습니다. 경과 시간 측정에는 단조 증가하는 `performance.now()`를 씁니다. 이것은 ECMAScript가 아니라 호스트 API입니다.
+
+## getter와 setter
+
+getter는 시간 값에서 구성요소를 꺼냅니다. 기본 이름은 지역 시각 기준이고, `getUTCFullYear`처럼 `UTC`가 들어간 짝이 UTC 기준입니다.
+
+| 메서드 | 반환 | 범위 |
+|--------|------|------|
+| `getFullYear` | 연 | 네 자리 연도 |
+| `getMonth` | 월 | 0–11 |
+| `getDate` | 일 | 1–31 |
+| `getDay` | 요일 | 0–6 (일요일이 0) |
+| `getHours` | 시 | 0–23 |
+| `getMinutes`·`getSeconds` | 분·초 | 0–59 |
+| `getMilliseconds` | 밀리초 | 0–999 |
+| `getTime`·`valueOf` | 시간 값 | 에포크 이후 ms |
+| `getTimezoneOffset` | UTC와 지역 시각의 차 | 분 단위. UTC 짝 없음 |
+
+- Invalid Date에서는 모든 getter가 `NaN`을 반환합니다.
+- `getYear()`는 Annex B에 남은 폐기 대상으로 연도에서 1900을 뺀 값을 돌려줍니다(2026년은 126). 쓰지 않습니다.
+
+setter는 구성요소를 바꿔 같은 객체의 시간 값을 갱신하고, 새 시간 값(number)을 반환합니다. Date 객체를 반환하지 않으므로 체이닝할 수 없습니다.
+
+- `setFullYear(y, m?, d?)`, `setMonth(m, d?)`, `setDate(d)`
+- `setHours(h, mi?, s?, ms?)`, `setMinutes(mi, s?, ms?)`, `setSeconds(s, ms?)`, `setMilliseconds(ms)`
+- `setTime(ms)`: 시간 값을 통째로 교체
+- 각각 UTC 짝(`setUTCHours` 등)이 있습니다.
+
+```js
+const d = new Date(2026, 9, 5, 14, 30, 15, 250)
+d.getMonth()          // 9 (10월)
+d.getDay()            // 1 (월요일)
+d.getTimezoneOffset() // -540 (UTC+9)
+d.setDate(0)          // 새 시간 값(number)을 반환
+d.toDateString()      // 'Wed Sep 30 2026'
+```
+
+- 범위를 벗어난 값은 이월합니다. `setDate(0)`은 전달 말일, `setMinutes(90)`은 한 시간 30분이 올라갑니다. `setSeconds(-1)`은 분 경계를 넘어 1초 전으로 돌아갑니다(자정이면 전날 23:59:59).
+- Invalid Date에 setter를 호출하면 `NaN`이 유지됩니다. 예외는 `setFullYear`로, 시간 값을 +0으로 보고 계산하므로 Invalid Date를 되살립니다.
+- Date는 가변이라 대입이 복사가 아닙니다. 원본을 보존하려면 `new Date(d)`로 복사한 뒤 수정합니다.
+
+```js
+const a = new Date(2026, 9, 5)
+const b = a              // 같은 객체
+b.setDate(10)
+a.getDate()              // 10 (a도 바뀜)
+const c = new Date(a)    // ✅ 복사
+```
+
+## 월이 0부터 시작하는 함정
+
+Date의 월은 0부터 시작하고, 일은 1부터 시작합니다. 요일도 0부터입니다. 세 값의 시작 기준이 서로 달라 혼동하기 쉽습니다.
+
+| 값 | 시작 | 마지막 |
+|----|------|--------|
+| 월 (`getMonth`, 생성자 인수) | 0 = 1월 | 11 = 12월 |
+| 일 (`getDate`) | 1 | 28–31 |
+| 요일 (`getDay`) | 0 = 일요일 | 6 = 토요일 |
+
+```js
+new Date(2026, 10, 5).getMonth() // 10 → 11월
+new Date('2026-10-05').getMonth() // 9 → 10월
+const d = new Date(2026, 9, 5)
+`${d.getMonth() + 1}월`           // '10월'
+```
+
+- 구성요소를 직접 넘기는 형태는 월이 0부터이고, 문자열 형태는 사람이 읽는 1부터입니다. 두 형태를 섞으면 한 달씩 어긋납니다.
+- 화면에 표시할 때는 `getMonth() + 1`을 하고, 생성자에 사용자 입력을 넘길 때는 `month - 1`을 합니다.
+- 월 이름이 필요하면 숫자를 직접 변환하지 말고 `Intl.DateTimeFormat`의 `month: 'long'`을 씁니다.
+- Temporal의 월은 1부터입니다(아래 Temporal 절).
+
+## 시간대와 UTC
+
+UTC는 기준 시각이고, 시간대(time zone)는 UTC에 더하는 오프셋 규칙입니다. 서머타임(DST)처럼 날짜에 따라 오프셋이 바뀌는 규칙도 시간대에 포함됩니다. 시간 값은 시간대와 무관한 하나의 숫자이고, 같은 시간 값도 지역 시각으로 바꾸면 환경마다 다른 시·일이 나옵니다.
+
+```js
+const d = new Date('2026-10-05T14:30:00Z')
+d.getUTCHours()       // 14
+d.getHours()          // 23 (한국 표준시 환경)
+d.getTimezoneOffset() // -540
+```
+
+- Date가 다루는 시간대는 UTC와 실행 환경의 지역 시간대 둘뿐입니다. `America/New_York` 같은 임의의 시간대로 `getHours`를 얻는 방법은 없습니다. 다른 시간대의 시각은 `Intl.DateTimeFormat`의 `timeZone` 옵션이나 Temporal로 구합니다.
+- 지역 시간대는 브라우저에서는 운영체제 설정을, Node.js에서는 운영체제 설정 또는 `TZ` 환경 변수를 따릅니다.
+- `getTimezoneOffset()`은 UTC에서 지역 시각을 뺀 값을 분으로 반환하므로, UTC보다 동쪽이면 음수입니다. 서머타임이 있는 지역에서는 날짜에 따라 값이 바뀝니다.
+- 한국 표준시에는 서머타임이 없어서 아래 규칙을 직접 만날 일이 적지만, 코드가 다른 시간대의 서버나 사용자에서 실행되면 적용됩니다.
+
+서머타임 전환일에는 지역 시각이 어긋납니다.
+
+- 봄에는 시각 하나가 통째로 건너뛰어져 존재하지 않는 지역 시각이 생깁니다. Date는 건너뛴 만큼 뒤로 밀어 해석합니다.
+- 두 번 나타나는 시각(가을)은 앞쪽, 즉 서머타임 쪽으로 해석합니다.
+- 그 결과 하루가 23시간이거나 25시간인 날이 생깁니다.
+
+```js
+// America/New_York 환경, 2026-03-08 02:00에 1시간 건너뜀
+new Date(2026, 2, 8, 2, 30).getHours()   // 3
+new Date(2026, 2, 8).getTimezoneOffset() // 300
+new Date(2026, 2, 9).getTimezoneOffset() // 240
+```
+
+서버가 UTC이고 사용자가 한국 표준시이면 같은 지역 시각 getter가 다른 값을 반환합니다. 저장과 전송은 UTC(ISO 문자열 또는 시간 값)로 하고, 표시할 때만 사용자 시간대로 변환합니다.
+
+## 문자열 변환
+
+```js
+const d = new Date('2026-10-05T05:30:15.250Z')
+d.toISOString()  // '2026-10-05T05:30:15.250Z'
+d.toUTCString()  // 'Mon, 05 Oct 2026 05:30:15 GMT'
+d.toDateString() // 'Mon Oct 05 2026'
+d.toJSON()       // '2026-10-05T05:30:15.250Z'
+```
+
+| 메서드 | 기준 | 용도 |
+|--------|------|------|
+| `toString()` | 지역 | `Mon Oct 05 2026 14:30:15 GMT+0900 (한국 표준시)` 형태의 디버깅용 |
+| `toDateString()`·`toTimeString()` | 지역 | `toString` 결과의 날짜 부분·시간 부분 |
+| `toISOString()` | UTC | 항상 `YYYY-MM-DDTHH:mm:ss.sssZ`. 저장·전송용 |
+| `toUTCString()` | UTC | HTTP 헤더·쿠키에 쓰는 날짜 형식 |
+| `toJSON()` | UTC | `toISOString`과 같은 값. Invalid Date는 `null` |
+| `toLocaleString()` 등 | 지역 | 로캘 형식. `Intl.DateTimeFormat`에 위임 |
+
+- `toString` 끝 괄호 안의 시간대 이름은 구현과 환경에 따라 달라집니다.
+- `toISOString`은 연도가 0000–9999를 벗어나면 `+275760-09-13`처럼 부호와 여섯 자리 연도를 씁니다. Invalid Date에서는 `RangeError`를 던집니다.
+- `JSON.stringify`는 Date의 `toJSON`을 호출해 ISO 문자열로 만듭니다. `JSON.parse`는 이 문자열을 Date로 되돌리지 않습니다(자세히는 39편).
+- `toLocaleString`, `toLocaleDateString`, `toLocaleTimeString`은 `(locales, options)`를 받으며 규칙은 `Intl.DateTimeFormat`과 같습니다.
+- `toGMTString`은 `toUTCString`의 별칭으로 남은 폐기 대상입니다.
+- 문자열로 바꾸는 암묵적 변환(템플릿 리터럴, `String(d)`, `+`)은 `toString`을 호출합니다.
+
+흔한 실수는 `toISOString().slice(0, 10)`을 지역 날짜로 쓰는 것입니다. UTC 날짜가 나오므로 한국 시간 자정에서 전날이 됩니다.
+
+```js
+new Date(2026, 9, 5).toISOString().slice(0, 10)
+// '2026-10-04' (지역 자정 = UTC 전날 15시)
+```
+
+지역 날짜의 `YYYY-MM-DD`가 필요하면 `getFullYear`·`getMonth() + 1`·`getDate()`로 조립하거나 `Intl.DateTimeFormat`으로 만듭니다(아래 Intl.DateTimeFormat 절).
+
+## 날짜 문자열 파싱 함정
+
+명세가 해석을 보장하는 문자열 형식은 ISO 8601을 단순화한 하나뿐입니다.
+
+```text
+YYYY-MM-DDTHH:mm:ss.sssZ
+```
+
+- 날짜 부분은 `YYYY`, `YYYY-MM`, `YYYY-MM-DD` 중 하나로 줄일 수 있습니다.
+- 시간 부분은 `THH:mm`, `THH:mm:ss`, `THH:mm:ss.sss` 중 하나이고, 시간만 단독으로는 쓸 수 없습니다. `24:00:00`은 허용됩니다.
+- 오프셋은 `Z` 또는 `±HH:mm`입니다. 확장 연도는 `+YYYYYY`, `-YYYYYY`로 쓰며 `-000000`은 안 됩니다.
+
+핵심 규칙은 오프셋이 없을 때의 해석입니다. 날짜만 있는 형식은 UTC로, 날짜와 시간이 모두 있는 형식은 지역 시각으로 해석합니다. 초기 명세의 실수가 웹 호환성 때문에 고쳐지지 않은 결과입니다.
+
+| 문자열 | 해석 | 한국 표준시에서의 결과 |
+|--------|------|-----------------------|
+| `'2026-10-05'` | UTC 자정 | `2026-10-05T00:00:00.000Z` |
+| `'2026-10-05T00:00'` | 지역 자정 | `2026-10-04T15:00:00.000Z` |
+| `'2026-10-05T00:00Z'` | UTC 자정 | `2026-10-05T00:00:00.000Z` |
+| `'2026-10-05T00:00+09:00'` | 오프셋 지정 | `2026-10-04T15:00:00.000Z` |
+
+```js
+new Date('2026-10-05').getHours()       // 9 (UTC 자정)
+new Date('2026-10-05T00:00').getHours() // 0 (지역 자정)
+```
+
+`T00:00` 한 글자 차이로 해석 기준이 UTC에서 지역 시각으로 바뀝니다. 날짜만 담은 문자열을 서로 다른 시간대에서 파싱하면 `getDate()` 결과가 하루 어긋날 수 있습니다.
+
+이 형식이 아닌 문자열은 구현 정의여서 엔진마다 결과가 다릅니다.
+
+- `'2026/10/05'`, `'October 5, 2026'`, `'2026-10-05 14:30'`, `'05/10/2026'`은 명세 밖입니다. Node 24(V8)는 모두 지역 시각으로 받아들이고 `'05/10/2026'`은 5월 10일로 읽지만, 다른 엔진은 Invalid Date를 낼 수 있습니다.
+- 형식은 맞지만 실제로 없는 날짜의 처리도 보장되지 않습니다. V8은 `'2026-02-30'`을 2026-03-02로, `'2026-04-31'`을 2026-05-01로 받아들입니다. 월이 13이면 Invalid Date입니다.
+
+대응 방법은 두 가지입니다.
+
+```js
+// ✅ ISO 형식에 오프셋을 항상 붙인다
+new Date('2026-10-05T00:00:00+09:00')
+// ✅ 사용자 입력은 직접 분해해서 구성요소로 만든다
+const [y, m, d] = '2026-10-05'.split('-').map(Number)
+new Date(y, m - 1, d).getHours() // 0 (지역 자정)
+```
+
+## Invalid Date
+
+Invalid Date는 시간 값이 `NaN`인 Date 객체입니다. 예외를 던지지 않고 이 객체를 만들기 때문에 검사하지 않으면 `NaN`이 뒤로 번집니다.
+
+만들어지는 경우는 세 가지입니다.
+
+- 해석할 수 없는 문자열: `new Date('foo')`
+- 범위를 넘는 시간 값: `new Date(8.64e15 + 1)`
+- `NaN`이나 `Infinity`가 섞인 구성요소: `new Date(2026, NaN)`
+
+| 연산 | 결과 |
+|------|------|
+| getter 전체 (`getTime`, `getFullYear` 등) | `NaN` |
+| `toString()`, `toLocaleDateString()` | `'Invalid Date'` |
+| `toJSON()` | `null` (`JSON.stringify`는 `null`로 직렬화) |
+| `toISOString()` | `RangeError` |
+| `Intl.DateTimeFormat`의 `format` | `RangeError` |
+
+```js
+const bad = new Date('foo')
+bad.getTime()               // NaN
+String(bad)                 // 'Invalid Date'
+bad instanceof Date         // true
+Number.isNaN(bad)           // false (객체이므로)
+Number.isNaN(bad.getTime()) // true ✅
+```
+
+- 검사는 `Number.isNaN(d.getTime())`으로 합니다. `isNaN(d)`도 `true`가 되지만 숫자로 변환되는 점에 기대는 코드입니다.
+- `typeof`는 `'object'`, `instanceof Date`는 `true`라서 타입 검사로는 걸러지지 않습니다.
+- `NaN`은 자기 자신과도 다르므로 `d.getTime() === d.getTime()`은 Invalid Date에서 `false`입니다.
+
+## 날짜 더하기와 차이 계산
+
+Date에는 `add`가 없습니다. 복사본에 setter를 쓰거나 시간 값(밀리초)을 직접 다룹니다.
+
+**일 더하기**는 `setDate(getDate() + n)`으로 합니다. 지역 달력 기준으로 이월하므로 서머타임 전환일에도 시각이 유지됩니다. 밀리초를 더하는 방식은 전환일에 한 시간 어긋납니다.
+
+```js
+// America/New_York 환경, 2026-03-08 서머타임 시작
+const a = new Date(2026, 2, 7, 12)
+new Date(a.getTime() + 86400000).getHours() // 13 ❌
+const b = new Date(a)
+b.setDate(b.getDate() + 1)
+b.getHours()                                // 12 ✅
+```
+
+**월 더하기**는 일이 넘치면 다음 달로 이월합니다. 보정하려면 직접 구현해야 합니다.
+
+```js
+const d = new Date(2026, 0, 31)
+d.setMonth(d.getMonth() + 1)
+d.toDateString() // 'Tue Mar 03 2026' (2월 31일이 이월됨)
+```
+
+```js
+function addMonths(date, n) {
+  const r = new Date(date)
+  const day = r.getDate()
+  r.setDate(1)
+  r.setMonth(r.getMonth() + n)
+  const y = r.getFullYear()
+  const last = new Date(y, r.getMonth() + 1, 0)
+  r.setDate(Math.min(day, last.getDate()))
+  return r
+}
+addMonths(new Date(2026, 0, 31), 1).toDateString()
+// 'Sat Feb 28 2026'
+```
+
+**차이 계산**은 `b - a`가 밀리초를 줍니다. 일수는 `86400000`으로 나눕니다. 서머타임이 있는 시간대에서는 하루가 23시간이거나 25시간이라 나눗셈 결과가 정수가 아닐 수 있습니다. 이때는 `Math.round`를 쓰거나, 두 날짜를 UTC 자정으로 맞춰 뺍니다.
+
+```js
+const day = 86400000
+const a = new Date(2026, 9, 5)
+const b = new Date(2026, 11, 25)
+Math.round((b - a) / day) // 81
+// 서머타임에 영향받지 않는 방식
+const utc = x =>
+  Date.UTC(x.getFullYear(), x.getMonth(), x.getDate())
+const days = (utc(b) - utc(a)) / day // 81
+```
+
+- 달·해 단위 차이는 길이가 일정하지 않아서 밀리초 나눗셈으로 구할 수 없습니다. 만 나이처럼 연·월·일 구성요소를 직접 비교해야 합니다.
+- 날짜 배열의 정렬은 `arr.sort((x, y) => x - y)`입니다. 비교 함수 없이 `sort()`를 쓰면 문자열로 바뀌어 정렬됩니다.
+
+## Intl과 로캘
+
+Intl은 ECMA-402가 정의하는 전역 객체로, 로캘(locale)에 따라 달라지는 포맷·비교·분할 기능을 모읍니다(ECMA-402는 01편). 생성자는 모두 `new Intl.X(locales, options)` 형태입니다.
+
+```js
+Intl.DateTimeFormat.supportedLocalesOf(
+  ['ko-KR', 'xx-YY', 'en-US']
+)
+// ['ko-KR', 'en-US']
+Intl.getCanonicalLocales('KO-kr') // ['ko-KR']
+new Intl.DateTimeFormat('ko-KR-u-ca-japanese')
+  .resolvedOptions().calendar     // 'japanese'
+```
+
+- `locales`는 BCP 47 언어 태그 문자열이거나 그 배열입니다. 생략하면 환경 기본 로캘을 씁니다. 배열이면 지원되는 첫 로캘을 쓰고, 하나도 지원되지 않으면 에러 없이 기본 로캘로 돌아갑니다.
+- 태그의 `-u-` 확장으로 달력(`ca`), 숫자 체계(`nu`), 시간 주기(`hc`), 정렬 방식(`co`)을 고를 수 있습니다.
+- `options`의 인식하지 못하는 키는 무시합니다. 값이 허용 범위를 벗어나면 `RangeError`, 옵션끼리 모순되면 `TypeError`입니다.
+- `resolvedOptions()`는 실제로 적용된 로캘과 옵션을 보여 줍니다.
+- `Intl.supportedValuesOf('currency')`는 지원하는 값 목록을 돌려줍니다. 키는 `calendar`, `collation`, `currency`, `numberingSystem`, `timeZone`, `unit`입니다.
+- 인스턴스를 만드는 비용이 있으므로 반복해서 포맷할 때는 한 번 만들어 재사용합니다.
+- `Date.prototype.toLocaleString`, `Number.prototype.toLocaleString`, `String.prototype.localeCompare`는 같은 규칙을 쓰는 단축형입니다.
+- 출력 문자열은 엔진과 ICU·CLDR 데이터 버전에 따라 문구와 공백이 달라질 수 있습니다. 출력을 다시 파싱하거나 문자열 그대로 비교하지 않습니다. 이 문서의 결과는 Node 24 기준입니다.
+
+## Intl.DateTimeFormat
+
+`Intl.DateTimeFormat`은 로캘·시간대·옵션에 맞춰 날짜와 시각을 문자열로 만듭니다. `format`은 Date 또는 시간 값(number)을 받습니다. 인수가 없거나 `undefined`이면 현재 시각이고, Invalid Date는 `RangeError`입니다. `format`은 바인딩된 함수라서 `dates.map(fmt.format)`처럼 넘길 수 있습니다.
+
+```js
+const d = new Date('2026-10-05T14:30:15Z')
+const f = (l, o) => new Intl.DateTimeFormat(l, o).format(d)
+f('ko-KR')                      // '2026. 10. 5.'
+f('en-US')                      // '10/5/2026'
+f('ko-KR', {dateStyle: 'full'}) // '2026년 10월 5일 월요일'
+f('en-US', {dateStyle: 'full'}) // 'Monday, October 5, 2026'
+```
+
+옵션은 두 계열이고 섞을 수 없습니다.
+
+| 계열 | 옵션 | 값 |
+|------|------|-----|
+| 스타일 단축 | `dateStyle`, `timeStyle` | `full`, `long`, `medium`, `short` |
+| 개별 필드 | `weekday`, `era`, `year`, `month`, `day`, `hour`, `minute`, `second` | 필드마다 `numeric`, `2-digit`, `long`, `short`, `narrow` 중 허용되는 값 |
+| 보조 | `fractionalSecondDigits`, `dayPeriod`, `timeZoneName` | 1–3 / `long`·`short`·`narrow` / `short`·`long` 등 |
+
+- 둘을 함께 주면 `TypeError`입니다. `{dateStyle: 'long', year: 'numeric'}`이 그 예입니다.
+- 아무 옵션도 주지 않으면 `year`, `month`, `day`가 `numeric`으로 적용됩니다.
+- 지정한 필드만 출력됩니다. 필드의 순서와 구분자는 로캘이 정합니다.
+
+```js
+f('ko-KR', {year: 'numeric', month: 'long', day: 'numeric'})
+// '2026년 10월 5일'
+f('en-US', {month: 'short', day: 'numeric'}) // 'Oct 5'
+const ymd = {
+  year: 'numeric', month: '2-digit', day: '2-digit',
+}
+f('en-US', ymd) // '10/05/2026'
+f('en-CA', ymd) // '2026-10-05' (캐나다 영어는 ISO 순서)
+```
+
+시각과 시간대는 다음처럼 지정합니다.
+
+```js
+const t = {hour: 'numeric', minute: 'numeric'}
+const h23 = {...t, hourCycle: 'h23'}
+const ny = {...h23, timeZone: 'America/New_York'}
+f('en-US', {...h23, timeZone: 'UTC'})      // '14:30'
+f('en-US', ny)                             // '10:30'
+f('en-US', {...ny, timeZoneName: 'short'}) // '10:30 EDT'
+```
+
+- `timeZone`은 IANA 이름(`Asia/Seoul`, `America/New_York`, `UTC`)이나 오프셋입니다. 기본은 환경 시간대이고, 없는 이름은 `RangeError`입니다. Date로는 불가능한 임의 시간대 표시가 이 옵션으로 가능합니다.
+- `hour12`는 불리언이고 `hourCycle`은 `h11`(0–11), `h12`(1–12), `h23`(0–23), `h24`(1–24)입니다. `hour12`가 있으면 `hourCycle`보다 우선합니다.
+- `calendar`와 `numberingSystem`으로 달력과 숫자 체계를 바꿀 수 있습니다.
+
+보조 메서드는 세 가지입니다.
+
+```js
+const fm = new Intl.DateTimeFormat('en-US', {
+  dateStyle: 'medium',
+})
+fm.formatToParts(d).map(p => p.type + ':' + p.value)
+// ['month:Oct', 'literal: ', 'day:5',
+//  'literal:, ', 'year:2026']
+fm.formatRange(d, new Date('2026-10-09T14:30:15Z'))
+// 'Oct 5 – 9, 2026'
+```
+
+- `formatToParts`는 `{type, value}` 배열을 반환해 조각별로 스타일을 입히거나 순서를 바꿀 때 씁니다.
+- `formatRange(start, end)`는 공통 부분을 합친 기간 표기를 만듭니다. 같은 달이면 월을 한 번만 씁니다.
+- `resolvedOptions()`는 적용된 `locale`, `calendar`, `numberingSystem`, `timeZone` 등을 반환합니다.
+
+흔한 실수는 로캘과 시간대를 지정하지 않는 것입니다. 인수 없는 `toLocaleString()`은 실행 환경의 설정에 의존하므로 서버와 클라이언트, 사용자마다 출력이 다릅니다.
+
+## Intl.NumberFormat
+
+`Intl.NumberFormat`은 숫자를 로캘에 맞는 자릿수 구분·소수점·통화·단위·축약 표기로 만듭니다. `Number.prototype.toLocaleString`은 같은 규칙의 단축형입니다(자세히는 30편).
+
+```js
+const nf = (l, o) => new Intl.NumberFormat(l, o)
+nf('en-US').format(1234567.891) // '1,234,567.891'
+nf('de-DE').format(1234567.891) // '1.234.567,891'
+nf('en-IN').format(1234567.891) // '12,34,567.891'
+nf('ko-KR').format(1234567.891) // '1,234,567.891'
+```
+
+`style`이 결과의 종류를 정합니다.
+
+| style | 필요한 옵션 | 입력 → 결과 (en-US) |
+|-------|-------------|---------------------|
+| `decimal` (기본) | 없음 | `1234.5` → `1,234.5` |
+| `currency` | `currency` | `1234.5` → `$1,234.50` |
+| `percent` | 없음 | `0.256` → `26%` |
+| `unit` | `unit` | `80` → `80 km/h` |
+
+```js
+const krw = {style: 'currency', currency: 'KRW'}
+nf('ko-KR', krw).format(12000) // '₩12,000'
+nf('ko-KR', {...krw, currency: 'USD'}).format(1234.5)
+// 'US$1,234.50'
+const kmh = {style: 'unit', unit: 'kilometer-per-hour'}
+nf('en-US', kmh).format(80)    // '80 km/h'
+```
+
+- `currency`는 ISO 4217 코드이고 필수입니다. 통화 환산은 하지 않으며 표기만 바꿉니다.
+- 소수 자릿수는 통화가 정합니다. USD는 2자리, KRW는 0자리입니다.
+- `currencyDisplay`는 `symbol`(기본), `narrowSymbol`, `code`(`USD 5.00`), `name`(`1,234.50 US dollars`)입니다. `currencySign: 'accounting'`이면 음수가 `($5.00)`으로 나옵니다.
+- `percent`는 입력에 100을 곱해 표시합니다. `0.256`이 `26%`가 됩니다.
+- `unit`은 `kilometer`, `liter`, `celsius`, `megabyte` 같은 표준 단위 이름이고, `unitDisplay`는 `short`(기본), `long`, `narrow`입니다.
+
+축약과 과학 표기는 `notation`으로 정합니다.
+
+| notation | 입력 → 결과 |
+|----------|-------------|
+| `standard` (기본) | `123456` → `123,456` |
+| `scientific` | `123456` → `1.235E5` |
+| `engineering` | `123456` → `123.456E3` |
+| `compact` | `1234567` → `1.2M` (en), `123만` (ko) |
+
+`compact`에 `compactDisplay: 'long'`을 주면 영어는 `1.2 million`, 한국어 `123456789`는 `1.2억`이 됩니다.
+
+자릿수와 부호 옵션입니다.
+
+| 옵션 | 입력 | 결과 |
+|------|------|------|
+| `minimumFractionDigits: 2` | `5` | `5.00` |
+| `maximumFractionDigits: 0` | `2.5`, `3.5` | `3`, `4` |
+| `maximumSignificantDigits: 3` | `123456` | `123,000` |
+| `minimumIntegerDigits: 3` | `7` | `007` |
+| `useGrouping: false` | `1234567` | `1234567` |
+| `signDisplay: 'always'` | `5` | `+5` |
+
+- 기본 최대 소수 자릿수는 `decimal`이 3(`0.1234567`이 `0.123`), `percent`가 0입니다. 범위는 0–100이고 벗어나면 `RangeError`입니다.
+- `signDisplay`는 `auto`, `always`, `exceptZero`, `negative`, `never`입니다. `exceptZero`는 0에 부호를 붙이지 않습니다.
+- 소수 자릿수 옵션과 유효 숫자 옵션을 함께 주면 기본(`roundingPriority: 'auto'`)에서는 유효 숫자가 이깁니다. `morePrecision`·`lessPrecision`으로 더 정밀한 쪽, 덜 정밀한 쪽을 고를 수 있습니다.
+- 반올림 방식은 기본이 `halfExpand`입니다. 정확히 중간이면 0에서 먼 쪽으로 올립니다(`2.5`는 `3`, `-2.5`는 `-3`). `Math.round(-2.5)`는 `-2`라서 다릅니다. `roundingMode`로 `ceil`, `floor`, `expand`, `trunc`, `halfCeil`, `halfFloor`, `halfExpand`, `halfTrunc`, `halfEven`을 고를 수 있습니다.
+- `trailingZeroDisplay: 'stripIfInteger'`는 정수일 때 소수부 0을 뺍니다.
+- `format`은 BigInt와 십진수 문자열도 받습니다. 문자열은 Number로 바꾸지 않고 정확히 처리하므로 2^53을 넘는 값은 문자열로 넘깁니다(BigInt는 30편).
+
+```js
+nf('en-US').format(12345678901234567890n)
+// '12,345,678,901,234,567,890'
+nf('en-US').format('12345678901234567890.123456789')
+// '12,345,678,901,234,567,890.123'
+```
+
+- `NaN`은 `NaN`, `Infinity`는 `∞`, `-0`은 `-0`으로 출력됩니다. `null`은 `0`, `undefined`와 변환할 수 없는 문자열은 `NaN`입니다.
+- `formatToParts`는 `minusSign`, `currency`, `integer`, `group`, `decimal`, `fraction` 같은 조각을 돌려주고, `formatRange(3, 5)`는 통화 스타일에서 `$3.00 – $5.00`처럼 범위를 만듭니다.
+- `style: 'currency'`에 `currency`를 빠뜨리면 `TypeError`입니다.
+
+## Intl.RelativeTimeFormat
+
+`Intl.RelativeTimeFormat`은 "3일 전", "내일"처럼 기준 시점에 상대적인 표현을 만듭니다. 두 시각의 차이를 계산해 주지 않으므로 값과 단위를 직접 넘깁니다.
+
+```js
+const auto = {numeric: 'auto'}
+const ko = new Intl.RelativeTimeFormat('ko', auto)
+ko.format(-1, 'day')   // '어제'
+ko.format(0, 'day')    // '오늘'
+ko.format(1, 'day')    // '내일'
+ko.format(-3, 'month') // '3개월 전'
+const en = new Intl.RelativeTimeFormat('en')
+en.format(-1, 'day')   // '1 day ago'
+en.format(3, 'days')   // 'in 3 days'
+```
+
+- `format(value, unit)`의 값이 음수이면 과거, 양수이면 미래입니다. 소수도 받습니다(`format(-1.5, 'hour')`는 `1.5 hours ago`).
+- 단위는 `second`, `minute`, `hour`, `day`, `week`, `month`, `quarter`, `year`이고 복수형(`days`)도 됩니다. 그 밖의 단위나 숫자가 아닌 값은 `RangeError`입니다.
+- `numeric`은 `always`(기본)와 `auto`입니다. `auto`는 로캘에 해당 표현이 있으면 `어제`·`오늘`·`내일`처럼 숫자 없는 말을 쓰고, `always`는 `1일 전`, `0일 후`처럼 항상 숫자를 씁니다. 영어 `auto`는 `yesterday`, `tomorrow`, `today`, `last week`, `now`를 씁니다.
+- `style`은 `long`(기본), `short`(`3 mo. ago`), `narrow`(`3mo ago`)입니다.
+- `-0`은 과거로 취급합니다. `always`에서 영어 `-0`은 `0 days ago`입니다.
+- `formatToParts`는 `integer` 조각에 `unit`을 달아 돌려줍니다.
+
+차이를 직접 구해 단위를 고르는 코드가 필요합니다.
+
+```js
+const auto = {numeric: 'auto'}
+const rtf = new Intl.RelativeTimeFormat('ko', auto)
+const diff = new Date('2026-10-02') - new Date('2026-10-05')
+rtf.format(Math.round(diff / 86400000), 'day') // '3일 전'
+```
+
+흔한 실수는 부호를 거꾸로 넘기는 것입니다. 과거 시각에서 현재를 뺀 값(음수)을 그대로 넘겨야 `전`이 됩니다. 또한 `auto`의 특수 문구(예: 한국어 -2일은 `그저께`)는 로캘 데이터에 의존합니다.
+
+## Intl.Collator
+
+`Intl.Collator`는 로캘 규칙으로 두 문자열을 비교합니다. `compare(a, b)`는 음수·0·양수를 반환하고 바인딩된 함수라서 `sort`에 바로 넘길 수 있습니다.
+
+기본 `sort()`는 UTF-16 코드 유닛 순서라서 대문자가 소문자보다 앞서고 악센트 문자가 `z` 뒤로 갑니다.
+
+```js
+const ws = ['b', 'A', 'ä', 'a']
+ws.slice().sort()
+// ['A', 'a', 'b', 'ä'] (코드 유닛 순)
+const de = new Intl.Collator('de')
+ws.slice().sort(de.compare)
+// ['a', 'A', 'ä', 'b']
+const sv = new Intl.Collator('sv')
+sv.compare('z', 'ä') // -1 (스웨덴어는 ä가 z 뒤)
+```
+
+- 같은 문자라도 로캘마다 순서가 다릅니다. 독일어는 `ä`를 `a` 근처에, 스웨덴어는 `z` 뒤에 둡니다.
+- 한글과 라틴 문자가 섞이면 어느 쪽이 앞인지는 로캘 데이터가 정합니다. Node 24의 `ko`는 숫자, 한글, 라틴 문자 순으로 정렬합니다.
+- 기본값은 소문자가 대문자보다 앞입니다. `compare('a', 'A')`는 `-1`, `caseFirst: 'upper'`를 주면 `1`입니다.
+
+주요 옵션입니다.
+
+| `sensitivity` | `a`와 `A` | `a`와 `á` | 구분하는 것 |
+|---------------|-----------|-----------|-------------|
+| `base` | 같음 | 같음 | 기본 문자 |
+| `accent` | 같음 | 다름 | 기본 문자 + 악센트 |
+| `case` | 다름 | 같음 | 기본 문자 + 대소문자 |
+| `variant` | 다름 | 다름 | 전부 (`sort` 용도의 기본) |
+
+- `numeric: true`는 숫자 부분을 크기로 비교합니다. `['file10', 'file2', 'File1']`이 `['File1', 'file2', 'file10']`이 됩니다.
+- `ignorePunctuation: true`이면 구두점을 무시합니다(`compare('a-b', 'ab')`가 `0`).
+- `usage`는 `sort`(기본)와 `search`입니다. `search`는 검색용 비교라서 기본 `sensitivity`가 로캘에 따라 달라집니다.
+- `String.prototype.localeCompare(that, locales, options)`가 같은 규칙입니다(자세히는 33편). 정렬 대상이 많으면 `Collator`를 한 번 만들어 `compare`를 재사용하는 편이 낫습니다.
+
+```js
+'a'.localeCompare('B') // -1
+'a' < 'B'              // false (코드 유닛 비교: 97 > 66)
+```
+
+## Intl.PluralRules
+
+`Intl.PluralRules`는 수를 로캘의 복수형 범주로 분류합니다. `select(n)`이 범주 이름을 반환할 뿐 문구는 만들지 않으므로, 범주별 문구는 직접 매핑합니다.
+
+범주는 `zero`, `one`, `two`, `few`, `many`, `other` 여섯 개이고, 로캘마다 쓰는 범주가 다릅니다.
+
+| 로캘 | 사용하는 범주 |
+|------|---------------|
+| 한국어 (`ko`) | `other` |
+| 영어 (`en`) | `one`, `other` |
+| 러시아어 (`ru`) | `one`, `few`, `many`, `other` |
+| 아랍어 (`ar`) | 여섯 개 전부 |
+
+```js
+const pr = new Intl.PluralRules('en')
+pr.select(1)   // 'one'
+pr.select(0)   // 'other' (영어는 0도 other)
+pr.select(1.5) // 'other'
+const ru = new Intl.PluralRules('ru')
+ru.select(21)  // 'one'
+ru.select(2)   // 'few'
+ru.select(5)   // 'many'
+```
+
+`type`은 `cardinal`(기본, 개수)과 `ordinal`(서수)입니다. 영어 서수는 `one`·`two`·`few`·`other`가 각각 `st`·`nd`·`rd`·`th`에 대응합니다.
+
+```js
+const po = new Intl.PluralRules('en', {type: 'ordinal'})
+const sfx = {one: 'st', two: 'nd', few: 'rd', other: 'th'}
+const ord = n => n + sfx[po.select(n)]
+ord(1)   // '1st'
+ord(22)  // '22nd'
+ord(103) // '103rd'
+ord(11)  // '11th' (11–13은 other)
+```
+
+- `resolvedOptions().pluralCategories`는 그 로캘이 쓰는 범주 배열입니다.
+- `selectRange(start, end)`는 `1–2 items`처럼 범위의 범주를 구합니다.
+- `n === 1 ? 'item' : 'items'` 같은 직접 비교는 영어 밖에서 틀립니다. 서수 `11th`, `12th`, `13th`도 단순히 끝자리로 정하면 틀립니다.
+
+## Intl.ListFormat
+
+`Intl.ListFormat`은 문자열 목록을 로캘에 맞는 접속사와 구분자로 연결합니다. `format`은 문자열의 이터러블을 받고, 문자열이 아닌 항목이 있으면 `TypeError`입니다.
+
+```js
+const items = ['사과', '배', '귤']
+const ko = (o) => new Intl.ListFormat('ko', o).format(items)
+ko()                        // '사과, 배 및 귤'
+ko({type: 'disjunction'})   // '사과, 배 또는 귤'
+const en = new Intl.ListFormat('en')
+en.format(['A', 'B', 'C'])  // 'A, B, and C'
+new Intl.ListFormat('en-GB').format(['A', 'B', 'C'])
+// 'A, B and C' (영국 영어는 마지막 쉼표 없음)
+```
+
+- `type`은 `conjunction`(기본, 그리고), `disjunction`(또는), `unit`(단위 나열)입니다.
+- `style`은 `long`(기본), `short`(영어 `A, B, & C`), `narrow`입니다. `unit`과 `narrow`를 함께 쓰면 영어 `A B C`처럼 구분자 없이 붙습니다.
+- 항목이 둘이면 `A and B`, 하나면 그대로, 없으면 빈 문자열입니다.
+- `formatToParts`는 `element`와 `literal` 조각을 돌려줍니다.
+- `join(', ')`로 직접 조립하면 로캘별 접속사와 쉼표 규칙을 놓칩니다. 숫자는 문자열로 바꿔서 넘깁니다.
+
+## Intl.Segmenter
+
+`Intl.Segmenter`는 문자열을 자소(grapheme)·단어·문장 경계로 나눕니다. `length`와 스프레드는 UTF-16 코드 유닛과 코드 포인트 단위여서 사용자가 보는 글자 수와 다를 수 있습니다(자세히는 33편).
+
+```js
+const flag = '🇰🇷'
+const seg = new Intl.Segmenter()
+flag.length                          // 4 (코드 유닛)
+Array.from(flag).length              // 2 (코드 포인트)
+Array.from(seg.segment(flag)).length // 1 (자소)
+```
+
+- `granularity`는 `grapheme`(기본), `word`, `sentence`입니다.
+- `segment(str)`은 이터러블인 Segments 객체를 반환합니다. 각 조각은 `{segment, index, input}`이고, `word`에서는 `isWordLike`가 붙습니다.
+- 가족 이모지처럼 여러 코드 포인트가 이어진 글자도 자소 하나로 셉니다(`'👨‍👩‍👧‍👦'`는 코드 유닛 11, 코드 포인트 7, 자소 1).
+
+```js
+const ws = new Intl.Segmenter('en', {granularity: 'word'})
+const parts = Array.from(ws.segment('Hello, world!'))
+parts.map(s => s.segment + ':' + s.isWordLike).join(' ')
+// 'Hello:true ,:false  :false world:true !:false'
+parts.filter(s => s.isWordLike).length // 2
+```
+
+- `isWordLike`는 단어이면 `true`, 공백과 구두점이면 `false`입니다. 단어 수는 이 값으로 걸러서 셉니다.
+- 문장 단위는 공백을 앞 문장에 붙입니다. `'Hi there. How are you?'`는 `'Hi there. '`, `'How are you?'`로 나뉩니다.
+- 로캘에 따라 단어 규칙이 다릅니다. 한국어는 공백 기준 어절(`'날씨가'`가 한 조각)이고, 일본어는 사전을 써서 `'今日'`, `'は'`, `'天気'`처럼 나눕니다.
+- `segments.containing(index)`는 그 위치를 포함하는 조각을 반환합니다.
+- Chrome 87, Safari 14.1, Firefox 125부터 지원합니다.
+- 흔한 실수는 `str.length`로 글자 수를 제한하거나 `split('')`으로 뒤집는 것입니다. 이모지와 결합 문자가 중간에서 잘립니다.
+
+## Intl.DisplayNames
+
+`Intl.DisplayNames`는 지역·언어·통화 같은 코드를 지정한 로캘의 이름으로 바꿉니다. `type`은 필수이고 없으면 `TypeError`입니다. 변환은 `of(code)`로 합니다.
+
+```js
+const dn = type => new Intl.DisplayNames(['ko'], {type})
+dn('region').of('US')      // '미국'
+dn('language').of('fr-CA') // '프랑스어(캐나다)'
+dn('currency').of('KRW')   // '대한민국 원'
+dn('script').of('Hang')    // '한글'
+```
+
+| type | 코드 형식 | 예 (영어 결과) |
+|------|-----------|----------------|
+| `region` | ISO 3166-1 두 글자, UN M.49 숫자 | `KR` → `South Korea` |
+| `language` | BCP 47 | `ko` → `Korean` |
+| `currency` | ISO 4217 | `USD` → `US Dollar` |
+| `script` | ISO 15924 | `Hang` → `Hangul` |
+| `calendar`, `dateTimeField` | 달력 이름, 필드 이름 | `gregory` → `Gregorian Calendar` |
+
+- `style`은 `long`(기본), `short`, `narrow`입니다.
+- `languageDisplay`는 `dialect`(기본)와 `standard`입니다. 영어에서 `en-US`가 각각 `American English`, `English (United States)`입니다.
+- 코드 형식이 잘못되면 `RangeError`(`'XYZ'`)입니다. 형식은 맞는데 데이터에 없는 코드는 `fallback`을 따릅니다. `code`(기본)는 코드를 그대로, `none`은 `undefined`를 반환합니다(`'XX'`).
+- 국가·언어·통화 선택 UI를 로캘별 번역 표 없이 만들 때 씁니다.
+
+## Intl.DurationFormat
+
+`Intl.DurationFormat`은 시간 길이(기간)를 로캘에 맞는 문자열로 만듭니다. ECMA-402 2025년 판에 포함됐고 2025년 3월부터 주요 엔진이 모두 지원합니다(Chrome 129, Firefox 136, Node.js 23).
+
+`format`은 단위 이름을 키로 가진 객체를 받습니다. 키는 `years`, `months`, `weeks`, `days`, `hours`, `minutes`, `seconds`, `milliseconds`, `microseconds`, `nanoseconds`입니다.
+
+```js
+const du = {hours: 1, minutes: 46, seconds: 40}
+const df = s => new Intl.DurationFormat('en', {style: s})
+df('long').format(du)    // '1 hour, 46 minutes, 40 seconds'
+df('short').format(du)   // '1 hr, 46 min, 40 sec'
+df('narrow').format(du)  // '1h 46m 40s'
+df('digital').format(du) // '1:46:40'
+new Intl.DurationFormat('ko', {style: 'long'}).format(du)
+// '1시간 46분 40초'
+```
+
+- `style`은 `long`, `short`(기본), `narrow`, `digital`입니다. `digital`은 시계처럼 시:분:초로 씁니다.
+- 값이 0이거나 없는 단위는 기본(`daysDisplay: 'auto'` 등)에서 생략합니다. `always`를 주면 `0 days`까지 씁니다.
+- 단위별로 스타일을 따로 줄 수 있고(`hours: 'numeric'`), `fractionalDigits`(0–9)로 초 아래 소수 자릿수를 정합니다. `{seconds: 1, milliseconds: 500}`에 `digital`과 `fractionalDigits: 2`를 주면 `0:00:01.50`입니다.
+- 값은 정수여야 하고 부호가 섞이면 안 됩니다. 소수와 혼합 부호는 `RangeError`입니다. 유효한 단위가 하나도 없는 `{}`은 `TypeError`입니다.
+- ISO 8601 문자열(`'PT1H30M'`)은 받지 않고 `RangeError`를 냅니다.
+- 단위를 자동으로 올리지 않습니다. `{minutes: 100}`은 `100 minutes`이고 `1 hour, 40 minutes`로 바뀌지 않습니다. 변환은 직접 하거나 Temporal의 `Duration.round`를 씁니다.
+
+## Temporal
+
+Temporal은 Date를 대체하기 위해 설계된 날짜·시간 API입니다. `Math`나 `Intl`처럼 클래스들을 담는 네임스페이스 객체이고 생성자가 아닙니다. `typeof Temporal`은 지원하는 환경에서 `'object'`이고, Node.js 24에서는 `'undefined'`입니다.
+
+### Date의 문제와 Temporal의 설계
+
+| Date의 문제 | Temporal의 해결 |
+|-------------|-----------------|
+| 가변 객체 | 모든 객체가 불변. `with`·`add`는 새 객체를 반환 |
+| 월이 0부터 | 월은 1부터(`month`는 1–12) |
+| UTC와 지역 시간대뿐 | `ZonedDateTime`이 IANA 시간대를 가짐 |
+| 날짜만·시각만 표현할 수 없음 | `PlainDate`, `PlainTime` 등 별도 타입 |
+| 밀리초 정밀도 | 나노초 정밀도(`epochNanoseconds`는 BigInt) |
+| 문자열 파싱이 엔진마다 다름 | ISO 8601 확장 형식(RFC 9557)만 엄격하게 파싱 |
+| 산술 API 없음 | `add`, `subtract`, `until`, `since`, `Duration` |
+| 그레고리력 고정 | 다른 달력(히브리력, 일본력 등) 지원 |
+
+### 타입 구성
+
+| 타입 | 담는 정보 | 어울리는 용도 |
+|------|-----------|---------------|
+| `Instant` | 절대 시각(에포크 이후 나노초). 시간대·달력 없음 | 타임스탬프, 로그 |
+| `ZonedDateTime` | `Instant` + 시간대 + 달력 | 회의 시각, 사용자 지역 표시 |
+| `PlainDateTime` | 날짜 + 시각. 시간대 없음 | 벽시계에 적힌 시각 |
+| `PlainDate` | 날짜만 | 생일, 기념일 |
+| `PlainTime` | 시각만 | 영업 시작 시각 |
+| `PlainYearMonth` | 연 + 월 | 카드 만료일, 월 단위 청구 |
+| `PlainMonthDay` | 월 + 일 | 매년 반복되는 기념일 |
+| `Duration` | 연·월·주·일·시·분·초 등의 기간 | 더하기·빼기 인수, 차이 결과 |
+
+`Temporal.Now`는 타입이 아니라 현재 값을 만드는 네임스페이스입니다. `instant()`, `zonedDateTimeISO()`, `plainDateISO()`, `plainDateTimeISO()`, `plainTimeISO()`, `timeZoneId()`가 있고 시간대 기본값은 시스템 시간대입니다.
+
+Date와 가장 가까운 타입은 `Instant`입니다. `Date.prototype.toTemporalInstant()`로 변환하고, 반대로는 `new Date(instant.epochMilliseconds)`를 씁니다.
+
+### 생성·연산·비교
+
+```js
+const date = Temporal.PlainDate.from('2026-10-05')
+date.month                       // 10 (1부터)
+date.dayOfWeek                   // 1 (월요일 = 1, 일요일 = 7)
+date.add({months: 1}).toString() // '2026-11-05'
+date.with({day: 1}).toString()   // '2026-10-01'
+```
+
+- 존재하지 않는 날짜는 `overflow` 옵션으로 다룹니다. 기본값 `constrain`은 가까운 유효한 값으로 맞추고, `reject`는 `RangeError`를 던집니다. 문자열로 만들 때는 옵션과 상관없이 항상 던집니다.
+
+```js
+const jan31 = Temporal.PlainDate.from('2026-01-31')
+jan31.add({months: 1}).toString()
+// '2026-02-28' (말일로 보정)
+jan31.add({months: 1}, {overflow: 'reject'}) // RangeError
+Temporal.PlainDate.from({year: 2026, month: 2, day: 30})
+// PlainDate 2026-02-28 (constrain)
+Temporal.PlainDate.from('2026-02-30') // RangeError
+```
+
+차이 계산은 `until`과 `since`가 `Duration`을 반환합니다. `PlainDate`의 기본 최대 단위는 일입니다.
+
+```js
+const a = Temporal.PlainDate.from('2026-10-05')
+const b = Temporal.PlainDate.from('2026-12-25')
+a.until(b).toString()                         // 'P81D'
+a.until(b, {largestUnit: 'month'}).toString() // 'P2M20D'
+```
+
+시간대는 `ZonedDateTime`이 다룹니다. 문자열에는 대괄호 시간대 이름이 필수입니다. 일 단위로 더하면 같은 벽시계 시각의 다음 날이 되고, 시간 단위로 더하면 정확한 경과 시간만큼 이동하므로 서머타임 전환일에 결과가 갈립니다.
+
+```js
+const z = Temporal.ZonedDateTime.from(
+  '2026-10-05T14:30:00+09:00[Asia/Seoul]'
+)
+z.withTimeZone('America/New_York').toString()
+// '2026-10-05T01:30:00-04:00[America/New_York]'
+```
+
+```js
+const ny = Temporal.ZonedDateTime.from(
+  '2026-03-07T12:00[America/New_York]'
+)
+ny.add({days: 1}).toString()
+// '2026-03-08T12:00:00-04:00[America/New_York]'
+ny.add({hours: 24}).toString()
+// '2026-03-08T13:00:00-04:00[America/New_York]'
+```
+
+`Instant`는 시간대와 달력이 없어서 시간 단위만 더할 수 있습니다. 일·월은 `RangeError`입니다.
+
+```js
+const t = Temporal.Instant.from('2026-10-05T05:30:00Z')
+t.epochMilliseconds          // 1791178200000
+t.epochNanoseconds           // 1791178200000000000n
+t.add({hours: 2}).toString() // '2026-10-05T07:30:00Z'
+```
+
+비교는 `compare`와 `equals`로 합니다. `valueOf`가 `TypeError`를 던지도록 되어 있어서 `<`, `>`, `-` 같은 연산자는 쓸 수 없습니다.
+
+```js
+Temporal.PlainDate.compare(a, b) // -1
+a.equals(b)                      // false
+a < b                            // TypeError
+dates.sort(Temporal.PlainDate.compare) // 시간순 정렬
+```
+
+`Duration`은 ISO 8601 형식(`P1Y2M3DT4H5M6S`)으로 만들고 읽습니다. 자동으로 단위를 올리지 않으며 모든 필드가 같은 부호여야 합니다. 연·월·주가 들어 있으면 `round`, `total`, `compare`에 기준 날짜(`relativeTo`)가 필요합니다. 달마다 길이가 다르기 때문입니다.
+
+```js
+const dur = Temporal.Duration.from({hours: 27, minutes: 30})
+dur.toString()                              // 'PT27H30M'
+dur.total({unit: 'hours'})                  // 27.5
+dur.round({largestUnit: 'days'}).toString() // 'P1DT3H30M'
+```
+
+### 표준화 상태와 지원
+
+- TC39 4단계에 2026년 3월 11일 회의에서 올랐고, ECMA-262와 ECMA-402에 병합되어 ES2027에 포함될 예정입니다.
+- 4단계가 모든 환경에서 쓸 수 있다는 뜻은 아닙니다(자세히는 01편).
+
+| 환경 | 지원 |
+|------|------|
+| Firefox | 139 (2025-05-27) |
+| Chrome·Edge | 144 (Chrome 2026-01-13) |
+| Node.js | 26 (2026-05-05) |
+| Deno | 2.7 |
+| Safari | 개발 중. 정식 지원 전 |
+
+- 2026년 10월 기준으로 Safari가 지원하지 않으므로 Baseline은 아닙니다. 모든 브라우저를 대상으로 하려면 폴리필(`@js-temporal/polyfill`, `temporal-polyfill`)이 필요합니다(자세히는 51편).
+- Date는 하위 호환 원칙에 따라 제거되지 않습니다. 기존 코드와 JSON·데이터베이스 경계에서는 계속 Date가 나오므로, 두 API를 `toTemporalInstant()`로 오가며 씁니다.
+
+## 핵심 정리
+
+- Date는 에포크 이후 밀리초(시간 값) 하나를 담는 가변 객체이고, 월은 0부터, 일은 1부터, 요일은 0(일요일)부터 시작합니다.
+- 오프셋 없는 문자열은 날짜만이면 UTC, 날짜+시간이면 지역 시각으로 해석합니다. ISO 형식 밖의 문자열은 엔진마다 다릅니다.
+- 잘못된 날짜는 예외가 아니라 Invalid Date(시간 값 `NaN`)가 되므로 `Number.isNaN(d.getTime())`으로 검사하고, 날짜 계산은 서머타임을 고려해 setter나 UTC 기준으로 합니다.
+- Intl 생성자는 로캘과 옵션으로 날짜·숫자·상대 시간·정렬·복수형·목록·분할·이름·기간을 만들며, 출력 문자열은 환경에 따라 달라질 수 있습니다.
+- Temporal은 불변·1부터 시작하는 월·시간대 타입·나노초 정밀도를 갖춘 대체 API로, 2026년 3월 4단계에 올라 ES2027 예정이며 Safari는 아직 지원하지 않습니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="2026년 1월 31일을 가리키는 Date 객체 d에 d.setMonth(1)을 호출한 뒤의 날짜는?"
+  options={['2월 28일', '2월 29일', '3월 3일', 'Invalid Date']}
+  correctAnswer={3}
+  explanation="setMonth는 일을 유지한 채 월만 바꿔서 2월 31일이 되고, 2026년 2월은 28일까지라 넘친 3일이 3월로 이월되어 3월 3일이 됩니다. 말일로 보정하지 않으며 Invalid Date도 되지 않습니다. 2월 29일은 윤년에만 존재합니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="한국 표준시(UTC+9) 환경에서 날짜 문자열 2026-10-05 와 2026-10-05T00:00 을 각각 Date 생성자에 넘길 때의 해석으로 옳은 것은?"
+  options={['둘 다 지역 자정으로 해석된다', '앞은 UTC 자정, 뒤는 지역 자정으로 해석된다', '앞은 지역 자정, 뒤는 UTC 자정으로 해석된다', '둘 다 UTC 자정으로 해석된다']}
+  correctAnswer={2}
+  explanation="오프셋이 없을 때 날짜만 있는 형식은 UTC로, 날짜와 시간이 있는 형식은 지역 시각으로 해석합니다. 그래서 앞 문자열은 한국 시간 오전 9시가 되고 뒤 문자열은 한국 시간 자정이 됩니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="Temporal에 대한 설명으로 옳은 것은?"
+  options={['객체는 setter로 값을 바꾸는 가변 객체다', '월은 1부터 시작하고 객체는 불변이다', 'Instant에 days 단위를 더해 하루 뒤를 구한다', 'ES2026에 포함되어 모든 브라우저에서 기본 제공된다']}
+  correctAnswer={2}
+  explanation="Temporal 객체는 불변이고 with나 add가 새 객체를 반환하며 month는 1부터 시작합니다. Instant는 시간대가 없어 시간 단위만 더할 수 있고 days는 RangeError입니다. 2026년 3월 4단계에 올라 ES2027 예정이며 Safari는 아직 지원하지 않습니다."
+/>
+
+## 참고 자료
+
+- [ECMA-262 — Date Objects](https://tc39.es/ecma262/#sec-date-objects)
+- [ECMA-402 — Internationalization API](https://tc39.es/ecma402/)
+- [MDN — Date](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date)
+- [MDN — Intl](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl)
+- [MDN — Temporal](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Temporal)
+- [Temporal Documentation (TC39)](https://tc39.es/proposal-temporal/docs/)
+- [TC39 Proposals — Temporal](https://github.com/tc39/proposal-temporal)
+- [TC39 Finished Proposals](https://github.com/tc39/proposals/blob/main/finished-proposals.md)
+- [TC39 ECMA-402 Finished Proposals](https://github.com/tc39/proposals/blob/main/ecma402/finished-proposals.md)
+- [TC39 Meeting Notes 2026-03-11 — Temporal for Stage 4](https://github.com/tc39/notes/blob/HEAD/meetings/2026-03/march-11.md#temporal-for-stage-4)

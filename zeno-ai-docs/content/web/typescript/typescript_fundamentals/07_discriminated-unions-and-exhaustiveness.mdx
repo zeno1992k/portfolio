@@ -1,0 +1,58 @@
+---
+title: '07. 판별 유니온과 완전성 검사'
+description: '거래를 income/expense 판별 유니온으로 재모델링하고, 분기 누락을 컴파일 타임에 잡습니다.'
+---
+
+06편에서 `category`는 리터럴 유니온으로 제한됐지만, 수입(급여)과 지출(식비 등)이 같은 `category` 안에 섞여 있습니다. 이 편에서는 거래를 `type: 'income' | 'expense'`라는 명시적인 태그로 구분하는 판별 유니온으로 다시 설계합니다.
+
+## 개념 정리
+
+### 판별 유니온(discriminated union)
+
+유니온을 이루는 각 타입이 같은 이름의 프로퍼티(태그)를 갖고 그 값만 다를 때를 판별 유니온이라고 합니다. 태그 값으로 조건을 나누면 TypeScript가 나머지 프로퍼티까지 자동으로 좁혀줍니다.
+
+### 커스텀 타입 가드
+
+`value is Type` 형태로 반환 타입을 선언한 함수입니다. 06편의 `isCategory`도 커스텀 타입 가드였습니다. 이 편에서는 수입 카테고리와 지출 카테고리가 서로 다른 유니온이라 가드도 두 개로 나눕니다.
+
+### never와 완전성 검사(exhaustiveness check)
+
+`switch`에서 판별 유니온의 모든 태그 값을 `case`로 처리하고 나면, 남는 타입은 `never`(어떤 값도 될 수 없는 타입)입니다. `default` 분기에서 이 `never`를 매개변수로 받는 함수에 넘기면, 나중에 유니온에 새 태그가 추가됐는데 `case`를 빠뜨렸을 때 그 자리에서 컴파일 오류가 납니다.
+
+## 자주 하는 실수
+
+| 증상 | 원인 | 고치는 법 |
+|------|------|-----------|
+| 새 거래 종류를 추가해도 컴파일 오류가 안 남 | `default`에서 `assertNever` 없이 그냥 값을 반환하거나 아무 처리 없이 넘어감 | `default: return assertNever(transaction)`처럼 `never` 매개변수 함수에 반드시 넘긴다 |
+| 수입에 지출 카테고리가 저장됨 | `type`과 무관하게 가드 하나로만 검증 | `type`별로 `isIncomeCategory`/`isExpenseCategory`를 나눠 검증한다 |
+| 합계가 항상 양수로만 계산됨 | 부호 계산 없이 `amount`를 그대로 더함 | `toSignedAmount`로 `type`에 따라 부호를 적용한 값을 합산한다 |
+
+## 확인 문제
+
+<Quiz
+  questionNumber={1}
+  question={"판별 유니온에서 type 같은 공통 프로퍼티가 하는 역할은"}
+  options={["성능을 높이는 캐시 키","조건문에서 나머지 프로퍼티까지 좁혀주는 태그","HTML 폼의 name 속성과 무관한 장식용 값","데이터베이스 기본키"]}
+  correctAnswer={2}
+  explanation={"type 같은 태그 프로퍼티 값을 조건으로 나누면 TypeScript가 해당 분기에서 나머지 프로퍼티 타입까지 자동으로 좁혀줍니다."}
+/>
+
+<Quiz
+  questionNumber={2}
+  question={"switch에서 모든 case를 처리한 뒤 default에 남는 타입은"}
+  options={["any","unknown","never","원래 유니온 전체"]}
+  correctAnswer={3}
+  explanation={"유니온의 모든 케이스를 case로 좁히고 나면, 더 이상 어떤 값도 될 수 없는 타입인 never가 남습니다."}
+/>
+
+<Quiz
+  questionNumber={3}
+  question={"assertNever 함수의 역할은"}
+  options={["런타임에서 값을 문자열로 변환한다","처리하지 않은 케이스가 남으면 그 호출부에서 컴파일 오류가 나게 만든다","배열을 정렬한다","HTTP 요청을 재시도한다"]}
+  correctAnswer={2}
+  explanation={"매개변수 타입을 never로 선언해두면, 유니온에 새 케이스가 추가돼 default까지 값이 남았을 때 assertNever 호출부에서 타입 오류가 발생합니다."}
+/>
+
+## 참고 자료
+
+- [TypeScript Handbook — Narrowing](https://www.typescriptlang.org/docs/handbook/2/narrowing.html)

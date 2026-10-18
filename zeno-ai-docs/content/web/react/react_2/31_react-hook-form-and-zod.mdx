@@ -1,0 +1,443 @@
+---
+title: '31. React Hook Form과 Zod'
+description: 'React Hook Form의 비제어 기반 설계와 핵심 API, Zod 4 스키마와 zodResolver, 서버 에러 연결, 클라이언트·서버 스키마 공유, shadcn/ui 연결, TanStack Form·React 19 Action과의 비교를 정리합니다.'
+---
+
+<Callout type="info">
+  **이번 문서의 목표:** React Hook Form으로 폼 상태와 제출을 구성하고, Zod 스키마를 검증과 타입의 단일 출처로 연결하며, 서버 에러까지 한 흐름으로 다룰 수 있습니다.
+</Callout>
+
+## 비제어 기반 설계와 재렌더링
+
+React Hook Form(RHF)은 입력값을 `useState` 가 아니라 DOM 입력 요소 자체에 두는 비제어(uncontrolled) 방식으로 폼을 다룹니다. 입력할 때마다 컴포넌트가 다시 렌더링되지 않는 것이 목적입니다(제어·비제어 입력은 기초 16편).
+
+| 구분 | 제어 입력 | RHF의 `register` |
+|------|-----------|------------------|
+| 값 위치 | React state | DOM 요소 |
+| 타이핑 시 | 매번 재렌더링 | 재렌더링 없음 |
+| 값을 읽는 때 | 렌더링 중 | 제출·검증 시점 |
+
+- RHF는 입력의 `ref` 를 잡아 두고 필요할 때 값을 읽습니다.
+- 화면에 반영해야 하는 상태(에러, 제출 중)만 구독하고, 구독한 항목이 바뀔 때만 다시 렌더링합니다(아래 "formState").
+- 값을 렌더링 중에 쓰려면 `watch` 나 `useWatch` 로 명시적으로 구독해야 합니다. 구독하는 만큼 재렌더링이 생깁니다.
+- 외부 컴포넌트처럼 `ref` 로 값을 못 읽는 입력은 제어 방식으로 연결합니다(아래 "Controller").
+
+설치는 `react-hook-form` 이며, 이 문서의 기준은 7.x(작성 시점 7.89)입니다. React 16.8부터 19까지를 지원합니다.
+
+## useForm
+
+`useForm` 은 폼 하나의 상태와 메서드를 만드는 Hook입니다. 옵션은 한 번 넘기고, 반환값에서 필요한 것을 꺼냅니다.
+
+```tsx
+import { useForm } from 'react-hook-form'
+
+type Values = { email: string; age: number }
+
+const {
+  register, handleSubmit, formState, control, reset,
+} = useForm<Values>({
+  defaultValues: { email: '', age: 20 },
+})
+```
+
+주요 옵션은 다음과 같습니다.
+
+| 옵션 | 역할 |
+|------|------|
+| `defaultValues` | 초기값. 캐시되어 `reset`·`isDirty` 의 기준이 됨 |
+| `mode`, `reValidateMode` | 검증 시점 |
+| `resolver` | 스키마 검증기 연결 |
+| `values` | 외부 상태로 값을 갱신 |
+| `shouldUnregister` | 입력이 사라지면 값도 제거 |
+| `criteriaMode` | 에러를 첫 번째만 / 전부(`all`) 보관 |
+| `delayError` | 에러 표시를 ms만큼 지연 |
+| `disabled` | 폼 전체 비활성 |
+
+반환값에는 `register`, `handleSubmit`, `formState`, `control`, `watch`, `setValue`, `getValues`, `trigger`, `reset`, `setError`, `setFocus` 가 있습니다.
+
+## register
+
+`register` 는 입력 요소를 폼에 등록하고, 입력에 펼쳐 넣을 `name`, `ref`, `onChange`, `onBlur` 를 돌려줍니다.
+
+```tsx
+<input {...register('email', { required: '필수 입력' })} />
+<input
+  type="number"
+  {...register('age', { valueAsNumber: true, min: 1 })}
+/>
+```
+
+- 두 번째 인수로 HTML 표준에 맞춘 규칙을 줍니다: `required`, `min`, `max`, `minLength`, `maxLength`, `pattern`, `validate`.
+- 값 변환 옵션: `valueAsNumber`, `valueAsDate`, `setValueAs`. HTML 입력의 값은 기본적으로 문자열입니다.
+- `name` 은 필수이고 고유해야 합니다(라디오·체크박스 제외). 중첩 구조는 점 표기(`user.name`)로 씁니다.
+- `disabled` 로 등록한 입력의 값은 `undefined` 가 됩니다.
+- 스키마 검증기(`resolver`)를 쓰면 규칙은 스키마에 두고 `register('email')` 만 씁니다.
+
+**흔한 실수:** 제어 컴포넌트(`value` 와 `onChange` 를 받는 외부 컴포넌트)에 `register` 를 펼치는 것입니다. `ref` 로 값을 읽을 수 없어 동작하지 않으므로 `Controller` 를 씁니다.
+
+## handleSubmit
+
+`handleSubmit(onValid, onInvalid)` 은 제출 이벤트 핸들러를 만들어 줍니다. 검증을 통과하면 `onValid` 에 값 객체를, 실패하면 `onInvalid` 에 에러를 넘깁니다.
+
+```tsx
+const onValid = async (values: Values) => {
+  await save(values) // 검증을 통과한 값만 들어온다
+}
+
+<form onSubmit={handleSubmit(onValid)}>
+  {/* ... */}
+</form>
+```
+
+- 기본 제출 동작은 자동으로 막으므로 `preventDefault` 를 직접 호출하지 않습니다.
+- `onValid` 는 비동기 함수를 받습니다. 끝날 때까지 `isSubmitting` 이 `true` 입니다.
+- `onValid` 안에서 던진 에러는 삼켜지지 않습니다. 요청 실패는 `try`/`catch` 로 받아 `setError` 에 연결합니다(아래 "setError와 서버 에러").
+- 중복 제출은 `isSubmitting` 으로 버튼을 막아서 방지합니다(비동기 UI 패턴은 30편).
+
+## formState
+
+`formState` 는 폼의 현재 상태를 담은 객체입니다.
+
+| 속성 | 뜻 |
+|------|----|
+| `errors` | 필드별 검증 에러 |
+| `isDirty` | 기본값과 달라졌는지(`defaultValues` 필요) |
+| `dirtyFields`, `touchedFields` | 바뀐·방문한 필드 |
+| `isSubmitting` | 제출 처리 중 |
+| `isSubmitted`, `isSubmitSuccessful` | 제출 시도 여부, 성공 여부 |
+| `isValid` | 에러 없음 |
+| `isValidating` | 검증 중 |
+| `submitCount` | 제출 시도 횟수 |
+| `isLoading` | 비동기 `defaultValues` 로딩 중 |
+
+```tsx
+const {
+  register,
+  handleSubmit,
+  formState: { errors, isDirty, isSubmitting },
+} = useForm<Values>()
+
+<p>{errors.email?.message}</p>
+<button disabled={!isDirty || isSubmitting}>저장</button>
+```
+
+- `formState` 는 Proxy로 구독을 관리합니다. 렌더링 전에 읽은 속성만 구독됩니다. 문서는 위처럼 구조 분해로 먼저 꺼내 쓰는 방식을 올바른 예로, JSX 안에서 `formState.isDirty` 처럼 바로 읽는 방식을 잘못된 예로 듭니다.
+- 안 읽는 속성은 구독하지 않아서 그 속성이 바뀌어도 재렌더링이 없습니다. 이것이 RHF가 재렌더링을 줄이는 방식입니다.
+- `useEffect` 의존성에는 속성 하나가 아니라 `formState` 전체를 넣습니다.
+
+## 검증 mode
+
+`mode` 는 검증이 처음 실행되는 시점입니다. 제출한 뒤의 재검증 시점은 `reValidateMode` 가 정합니다.
+
+| `mode` | 검증 시점 |
+|--------|-----------|
+| `onSubmit`(기본) | 제출할 때 |
+| `onBlur` | 입력에서 포커스가 벗어날 때 |
+| `onChange` | 값이 바뀔 때마다. 재렌더링이 많음 |
+| `onTouched` | 처음 blur 때, 이후 매번 change 때 |
+| `all` | blur와 change 모두 |
+
+- `reValidateMode` 의 기본은 `onChange` 입니다. 제출 후에는 고치는 즉시 에러가 사라집니다.
+- 7.56.0부터 `mode` 와 `reValidateMode` 는 초기화 이후에도 바꿀 수 있습니다.
+- 사용성 면에서는 `onTouched` 가 무난합니다. 입력 중에는 방해하지 않고, 한 번 벗어난 뒤에는 바로 피드백을 줍니다.
+
+## Controller와 제어 컴포넌트
+
+`Controller` 는 `value`·`onChange` 로만 동작하는 제어 컴포넌트를 RHF에 연결합니다. MUI, shadcn/ui의 Select, 날짜 선택기 같은 외부 컴포넌트가 대상입니다.
+
+```tsx
+<Controller
+  control={control}
+  name="role"
+  render={({ field, fieldState }) => (
+    <RoleSelect
+      value={field.value}
+      onChange={field.onChange}
+      invalid={fieldState.invalid}
+    />
+  )}
+/>
+```
+
+- `field` 는 `value`, `onChange`, `onBlur`, `name`, `ref`, `disabled` 를 담고, `fieldState` 는 `invalid`, `isTouched`, `isDirty`, `error` 를 담습니다.
+- 같은 필드를 `register` 와 `Controller` 로 이중 등록하지 않습니다.
+- `useController` 는 같은 기능을 Hook으로 제공합니다.
+- 제어 방식이라서 해당 필드의 값이 바뀔 때 `Controller` 하위가 다시 렌더링됩니다. 꼭 필요한 필드에만 씁니다.
+
+## useFieldArray
+
+`useFieldArray` 는 항목을 추가·삭제하는 동적 필드 목록을 다룹니다.
+
+```tsx
+const { fields, append, remove } = useFieldArray({
+  control,
+  name: 'items',
+})
+
+{fields.map((field, index) => (
+  <div key={field.id}>
+    <input {...register(`items.${index}.name` as const)} />
+    <button onClick={() => remove(index)}>삭제</button>
+  </div>
+))}
+<button onClick={() => append({ name: '' })}>추가</button>
+```
+
+- `key` 는 인덱스가 아니라 `field.id` 입니다. `useFieldArray` 가 항목마다 만들어 주는 값입니다.
+- 항목은 객체여야 하고 문자열 같은 원시값 배열은 지원하지 않습니다.
+- `append` 에는 빈 객체 `{}` 가 아니라 입력의 기본값을 모두 채워서 넘깁니다.
+- 조작 메서드: `append`, `prepend`, `insert`, `swap`, `move`, `update`, `replace`, `remove`.
+- `rules` 에 `required`, `minLength`, `maxLength`, `validate` 를 줄 수 있습니다. 스키마를 쓰면 배열 길이 검증도 스키마에 둡니다.
+
+## watch와 useWatch
+
+`watch` 와 `useWatch` 는 입력값을 구독해 렌더링 중에 씁니다. 다른 필드 값에 따라 UI를 바꿀 때 필요합니다.
+
+```tsx
+// useForm과 같은 컴포넌트: 폼 전체가 재렌더링
+const plan = watch('plan')
+
+// 하위 컴포넌트에서: 그 컴포넌트만 재렌더링
+function Price({ control }: { control: Control<Values> }) {
+  const plan = useWatch({ control, name: 'plan' })
+  return <p>{plan === 'pro' ? '9,900원' : '무료'}</p>
+}
+```
+
+| 구분 | 재렌더링 범위 |
+|------|---------------|
+| `watch` | `useForm` 을 호출한 루트 컴포넌트 |
+| `useWatch` | `useWatch` 를 호출한 컴포넌트 |
+
+- 값을 읽기만 하고 반응할 필요가 없으면 `getValues` 를 씁니다. 구독이 없어서 재렌더링을 일으키지 않습니다.
+- `useWatch` 의 `name` 은 문자열, 배열, 생략(전체)이 가능합니다. `exact`, `disabled`, `compute` 옵션이 있습니다.
+- 구독하기 전에 `setValue` 로 바꾼 값은 `useWatch` 가 놓칠 수 있습니다. 구독을 먼저 만들고 값을 설정합니다.
+
+## setError와 서버 에러
+
+`setError` 는 검증 에러를 직접 만듭니다. 서버가 돌려준 에러를 폼에 보여 줄 때 씁니다.
+
+```tsx
+const onValid = async (values: Values) => {
+  const res = await signUp(values)
+  if (res.emailTaken) {
+    setError('email', { type: 'api', message: '이미 사용 중' })
+  } else if (!res.ok) {
+    setError('root.serverError', { message: '다시 시도해 주세요' })
+  }
+}
+// {errors.root?.serverError?.message}
+```
+
+- 필드 에러는 해당 필드에 달고, 폼 전체 에러는 `root.serverError` 같은 `root` 키에 답니다. `root` 에러는 제출할 때마다 지워집니다.
+- `setError` 의 세 번째 인수 `{ shouldFocus: true }` 는 등록된 입력에 포커스를 줍니다.
+- 검증 규칙이 있는 등록 필드의 에러는 다음 검증을 통과하면 사라지고, 등록되지 않은 필드의 에러는 `clearErrors` 를 호출할 때까지 남습니다.
+- `setError` 를 호출하면 `isValid` 는 `false` 가 됩니다.
+- 필드 이름으로 `type`, `root`, `ref`, `types`, `message`, `form` 은 쓰지 않습니다.
+- 스키마를 쓰는 폼에서 한 필드에 에러 여러 개를 보이려면 `criteriaMode: 'all'` 을 줍니다.
+
+## reset과 defaultValues
+
+`defaultValues` 는 폼의 기준값이고, `reset` 은 폼을 이 기준으로 되돌립니다.
+
+```tsx
+const { reset } = useForm<Values>({ defaultValues })
+
+reset()                  // defaultValues로 복원
+reset(serverData)        // 새 값이 새 기준값이 된다
+reset(undefined, { keepErrors: true })
+```
+
+- `defaultValues` 는 비동기 값도 받습니다. 로딩 중에는 `formState.isLoading` 이 `true` 입니다. 이미 렌더링된 폼에 서버 데이터를 채울 때는 `values` 옵션이나 불러온 뒤 `reset(data)` 를 씁니다.
+- `reset(values)` 는 전체 기본값을 넘기는 것이 권장됩니다. 일부가 `undefined` 이면 제어 컴포넌트 복원이 어긋날 수 있습니다.
+- 유지 옵션: `keepErrors`, `keepDirty`, `keepValues`, `keepDefaultValues`, `keepIsSubmitted`, `keepTouched`, `keepSubmitCount`.
+- 제출 성공 뒤 비우는 `reset` 은 `isSubmitSuccessful` 을 보는 `useEffect` 안에서 호출하라는 것이 문서의 권장입니다. 제출이 끝나기 전에 호출하면 안 됩니다.
+- `isDirty` 는 `defaultValues` 와 비교하므로 기본값을 넘기지 않으면 의미가 없습니다.
+
+## Zod 스키마와 z.infer
+
+Zod는 스키마를 한 번 정의해 런타임 검증과 TypeScript 타입을 함께 얻는 라이브러리입니다. 이 문서는 Zod 4(작성 시점 4.6) 기준이며 가져오는 경로는 `'zod'` 입니다.
+
+```ts
+import { z } from 'zod'
+
+export const signupSchema = z.object({
+  email: z.email({ error: '이메일 형식이 아닙니다' }),
+  password: z.string().min(8, { error: '8자 이상' }),
+  age: z.number().int().min(14).optional(),
+})
+
+export type Signup = z.infer<typeof signupSchema>
+// { email: string; password: string; age?: number }
+```
+
+- `z.infer` 는 스키마의 출력 타입을 뽑습니다. 입력 타입은 `z.input`, 출력 타입은 `z.output` 입니다(`z.infer` 는 `z.output` 과 같습니다).
+- 문자열 형식 검사는 최상위 함수가 권장 형태입니다: `z.email()`, `z.url()`, `z.uuid()`. `z.string().email()` 같은 메서드 형태는 Zod 4에서 deprecated입니다.
+- 에러 메시지는 `error` 매개변수로 줍니다. Zod 3의 `message`, `invalid_type_error`, `required_error` 중 앞의 것은 deprecated, 뒤의 둘은 제거되었습니다.
+- 필드 사이 검증은 객체에 `refine` 을 걸고 `path` 로 에러 위치를 지정합니다.
+
+```ts
+const pwSchema = z
+  .object({ password: z.string(), confirm: z.string() })
+  .refine((v) => v.password === v.confirm, {
+    error: '비밀번호가 다릅니다',
+    path: ['confirm'],
+  })
+```
+
+- 비어 있는 입력의 값은 `undefined` 가 아니라 빈 문자열입니다. `.optional()` 은 `undefined` 만 허용하므로 형식 검사(이메일 등)가 붙은 선택 입력은 빈 칸에서 실패합니다. 빈 문자열을 `undefined` 로 바꾸는 처리를 스키마나 `setValueAs` 에 둡니다.
+- 숫자 입력은 `valueAsNumber` 로 숫자를 만들거나 `z.coerce.number()` 를 씁니다. `z.coerce` 계열은 Zod 4에서 입력 타입이 `unknown` 입니다. 빈 문자열은 `0` 이 되므로 주의합니다.
+- 변환(`transform`)이나 `default` 를 쓰면 입력 타입과 출력 타입이 갈라집니다(아래 "zodResolver").
+
+## zodResolver
+
+`zodResolver` 는 Zod 스키마를 RHF의 `resolver` 에 연결합니다. `@hookform/resolvers` 패키지에 있고 가져오는 경로는 `@hookform/resolvers/zod` 입니다. 작성 시점 5.x가 Zod 3.25와 4를 모두 지원합니다.
+
+```tsx
+import { zodResolver } from '@hookform/resolvers/zod'
+
+const form = useForm<Signup>({
+  resolver: zodResolver(signupSchema),
+  defaultValues: { email: '', password: '' },
+})
+```
+
+- 규칙은 스키마에만 두고 입력은 `register('email')` 로 씁니다. 제출 시 스키마를 통과한 값만 `onValid` 에 전달됩니다.
+- 검증 실패 에러는 스키마의 경로를 따라 `formState.errors` 에 들어옵니다. 메시지는 `errors.email?.message` 로 읽습니다.
+- 스키마에 변환·`default`·`coerce` 가 있으면 입력과 출력 타입이 다르므로 제네릭 세 개를 명시합니다.
+
+```tsx
+const form = useForm<
+  z.input<typeof schema>,
+  unknown,
+  z.output<typeof schema>
+>({ resolver: zodResolver(schema) })
+```
+
+- `useForm` 의 첫 번째 제네릭은 폼 입력 값 타입, 세 번째는 `onValid` 가 받는 변환 후 값의 타입입니다.
+- `resolver` 와 `register` 의 규칙 옵션을 함께 쓰면 규칙이 두 곳으로 나뉩니다. 한쪽만 씁니다.
+
+## 클라이언트·서버 스키마 공유
+
+스키마를 서버와 클라이언트가 함께 쓰는 모듈에 두면 검증 규칙과 타입이 하나로 유지됩니다. 클라이언트 검증은 사용성을 위한 것이고, 서버는 어떤 요청이든 다시 검증해야 합니다. 클라이언트의 검증은 우회할 수 있기 때문입니다.
+
+```ts
+// schemas/signup.ts (공용)
+export const signupSchema = z.object({ /* ... */ })
+
+// 서버 핸들러
+const parsed = signupSchema.safeParse(body)
+if (!parsed.success) {
+  const { fieldErrors } = z.flattenError(parsed.error)
+  return { ok: false, fieldErrors } // 필드명: 메시지 배열
+}
+```
+
+- `safeParse` 는 던지지 않고 `success` 로 결과를 알립니다. `parse` 는 실패하면 던집니다.
+- Zod 4에서 `error.flatten()` 은 deprecated이고, `z.flattenError(error)` 나 `z.treeifyError(error)` 를 씁니다.
+- 서버가 돌려준 `fieldErrors` 를 반복하며 `setError` 로 폼에 연결하면 클라이언트와 서버의 에러 표시가 같은 경로를 탑니다.
+- 서버 전용 규칙(이메일 중복처럼 DB를 봐야 하는 것)은 공용 스키마가 아니라 서버 쪽에서 `setError` 용 응답으로 돌려줍니다.
+- 공용 스키마 파일에는 서버 전용 값이나 비밀이 섞이지 않게 합니다. 클라이언트 번들에 함께 들어갑니다.
+
+## shadcn/ui Form 연결
+
+shadcn/ui 문서의 Forms 항목은 React Hook Form, TanStack Form, Formisch를 안내합니다. RHF 연결은 `Controller` 로 필드를 감싸고 shadcn의 `Field` 계열 컴포넌트에 에러 상태를 전달하는 방식입니다.
+
+```tsx
+<Controller
+  name="email"
+  control={form.control}
+  render={({ field, fieldState }) => (
+    <Field data-invalid={fieldState.invalid}>
+      <FieldLabel htmlFor={field.name}>이메일</FieldLabel>
+      <Input {...field} id={field.name}
+        aria-invalid={fieldState.invalid} />
+      {fieldState.invalid && (
+        <FieldError errors={[fieldState.error]} />
+      )}
+    </Field>
+  )}
+/>
+```
+
+- 검증은 `zodResolver` 로 `useForm` 에 연결합니다. UI 컴포넌트는 검증 로직을 갖지 않습니다.
+- `fieldState.invalid` 를 `data-invalid` 와 `aria-invalid` 로 전달해 스타일과 접근성 상태를 맞춥니다(접근성은 32편).
+- `label` 과 입력은 `htmlFor` 와 `id` 로 연결합니다.
+- 이전 버전 문서의 `FormField`·`FormItem`·`FormMessage` 계열 코드를 만날 수 있습니다. 이 문서는 현재 문서의 `Field` 방식을 기준으로 합니다.
+- 컴포넌트는 복사해서 쓰는 방식이라 프로젝트의 `components/ui` 에 있는 실제 코드를 확인하고 씁니다.
+
+## TanStack Form·React 19 Action과 비교
+
+폼을 다루는 방법은 RHF 외에도 있습니다. 용도에 따라 고릅니다.
+
+| 구분 | RHF | TanStack Form | React 19 `form action` |
+|------|-----|---------------|------------------------|
+| 성격 | 폼 상태 라이브러리 | headless, 타입 안전 폼 라이브러리 | React 내장 기능 |
+| 값 접근 | `register`(비제어), `Controller` | `form.Field` 단위 구독 | 제출 시 `FormData` |
+| 검증 | 내장 규칙, `resolver` | Standard Schema(Zod 등) | 직접 작성 |
+| 제출 | `handleSubmit` 을 `onSubmit` 에 연결 | `form.handleSubmit` | `action` 함수가 `FormData` 를 받음 |
+| 점진적 향상 | 클라이언트 JS 필요 | 클라이언트 JS 필요 | 서버 함수를 `action` 에 쓰면 JS 없이도 동작 |
+
+- React 19의 `action` 은 Transition 안에서 실행되고, 성공하면 비제어 입력이 자동으로 초기화됩니다(자세히는 6편, 7편).
+- 필드가 적고 검증이 서버 중심이면 `form action` 과 `useActionState` 로 충분합니다.
+- 필드가 많고 동적 배열, 필드 간 검증, 세밀한 에러 표시가 필요하면 RHF 또는 TanStack Form이 낫습니다.
+- RHF는 비제어 설계라서 재렌더링을 줄이는 데 유리합니다.
+- TanStack Form은 TanStack Query와 같은 생태계의 헤드리스 방식이며 타입 안전과 필드 단위 반응성이 강점입니다.
+- 어떤 선택이든 Zod 스키마는 그대로 재사용할 수 있습니다.
+
+## 핵심 정리
+
+- RHF는 입력을 비제어로 다루어 타이핑마다 재렌더링하지 않으며, `formState` 는 Proxy로 읽은 속성만 구독합니다.
+- `register` 는 일반 입력용이고, `value`·`onChange` 로 동작하는 외부 컴포넌트는 `Controller`, 동적 목록은 `useFieldArray`(`key` 는 `field.id`)를 씁니다.
+- 값을 렌더링에 쓰려면 `watch`(루트 재렌더링)보다 `useWatch`(구독한 컴포넌트만)를 쓰고, 단순 조회는 `getValues` 입니다.
+- 서버 에러는 `setError`(필드 또는 `root.serverError`)로 연결하고, 초기화는 `reset` 과 `defaultValues` 가 기준입니다.
+- Zod 4는 `import { z } from 'zod'`, `z.infer` 로 타입을 얻고, `zodResolver`(`@hookform/resolvers/zod`)로 연결하며, 변환이 있으면 `z.input`·`z.output` 으로 제네릭을 명시합니다.
+- 스키마는 클라이언트·서버 공용 모듈에 두고, 서버는 `safeParse` 로 반드시 다시 검증합니다.
+
+## 마무리 복습
+
+<Quiz
+  questionNumber={1}
+  question="useFieldArray로 만든 목록을 렌더링할 때 올바른 key는?"
+  options={['①배열 인덱스', '②field.id', '③입력의 name 문자열', '④Math.random() 값']}
+  correctAnswer={2}
+  explanation="useFieldArray는 항목마다 고유한 id를 만들어 fields에 담아 줍니다. 인덱스를 key로 쓰면 삭제와 이동에서 입력값이 어긋나므로 문서는 field.id를 key로 쓰라고 합니다."
+  optionExplanations={['삭제나 순서 변경 시 값이 뒤섞입니다.', 'useFieldArray가 제공하는 고유 값이며 올바른 key입니다.', '항목 사이 name이 인덱스를 포함해 바뀌므로 안정적인 key가 아닙니다.', '렌더링마다 key가 바뀌어 입력이 매번 새로 만들어집니다.']}
+/>
+
+<Quiz
+  questionNumber={2}
+  question="스키마에 z.coerce나 default 같은 변환이 있을 때 useForm 제네릭을 올바르게 지정한 것은?"
+  options={['①useForm 제네릭에 z.infer 하나만 넣는다', '②z.input, unknown, z.output 세 개를 순서대로 넣는다', '③제네릭 없이 register 규칙만 쓴다', '④z.output, z.input, unknown 순서로 넣는다']}
+  correctAnswer={2}
+  explanation="변환이 있으면 입력 타입과 출력 타입이 갈라집니다. useForm의 첫 번째 제네릭은 폼 입력 값, 세 번째는 handleSubmit이 받는 변환 후 값이므로 z.input, unknown, z.output 순서로 지정합니다."
+  optionExplanations={['출력 타입 하나로는 입력 쪽 타입이 맞지 않을 수 있습니다.', '입력 타입, 컨텍스트(unknown), 출력 타입 순서입니다.', '스키마 검증의 타입 연결이 사라집니다.', '입력과 출력의 위치가 바뀌었습니다.']}
+/>
+
+<Quiz
+  questionNumber={3}
+  question="클라이언트에서 Zod 스키마로 검증했다. 서버 처리에 대한 설명으로 옳은 것은?"
+  options={['①클라이언트에서 통과했으니 서버 검증은 생략한다', '②서버도 같은 스키마로 safeParse해 다시 검증한다', '③서버는 parse를 쓰면 에러가 절대 던져지지 않는다', '④서버 검증 에러는 setError로 만들 수 없다']}
+  correctAnswer={2}
+  explanation="클라이언트 검증은 사용성을 위한 것이고 우회할 수 있어서 서버가 반드시 다시 검증합니다. 공용 스키마를 safeParse로 돌리고 flattenError로 만든 필드 에러를 응답하면, 클라이언트가 setError로 폼에 연결합니다."
+  optionExplanations={['클라이언트 검증은 우회될 수 있습니다.', '공용 스키마로 서버에서도 검증하는 것이 맞습니다.', 'parse는 실패 시 에러를 던지고, 던지지 않는 쪽은 safeParse입니다.', 'setError는 서버가 돌려준 에러를 폼에 연결하는 데 쓰는 API입니다.']}
+/>
+
+## 참고 자료
+
+- [React Hook Form — Get Started](https://react-hook-form.com/get-started)
+- [React Hook Form — useForm](https://react-hook-form.com/docs/useform)
+- [React Hook Form — register](https://react-hook-form.com/docs/useform/register)
+- [React Hook Form — handleSubmit](https://react-hook-form.com/docs/useform/handlesubmit)
+- [React Hook Form — formState](https://react-hook-form.com/docs/useform/formstate)
+- [React Hook Form — Controller](https://react-hook-form.com/docs/usecontroller/controller)
+- [React Hook Form — useFieldArray](https://react-hook-form.com/docs/usefieldarray)
+- [React Hook Form — useWatch](https://react-hook-form.com/docs/usewatch)
+- [React Hook Form — setError](https://react-hook-form.com/docs/useform/seterror)
+- [React Hook Form — reset](https://react-hook-form.com/docs/useform/reset)
+- [React Hook Form resolvers (zodResolver)](https://github.com/react-hook-form/resolvers)
+- [Zod — API](https://zod.dev/api)
+- [Zod — Zod 4 변경 사항](https://zod.dev/v4/changelog)
+- [shadcn/ui — React Hook Form](https://ui.shadcn.com/docs/forms/react-hook-form)
+- [TanStack Form — Overview](https://tanstack.com/form/latest/docs/overview)
+- [React — form 컴포넌트](https://react.dev/reference/react-dom/components/form)

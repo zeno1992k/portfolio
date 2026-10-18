@@ -1,0 +1,85 @@
+---
+title: '04. 템플릿 리터럴 타입으로 API 경로 만들기'
+description: 'API 라우트와 쿼리 문자열을 템플릿 리터럴 타입으로 정의하고, 함수로 실제 경로 문자열을 만듭니다.'
+---
+
+## 개념 정리
+
+### 템플릿 리터럴 타입 문법
+
+문자열 리터럴 타입 안에 다른 타입을 `${}`로 끼워 넣으면, 그 자리에 올 수 있는 모든 조합이 하나의 문자열 타입으로 계산됩니다.
+
+```ts
+type Greeting = `안녕, ${string}`
+
+const a: Greeting = '안녕, 세계' // 허용
+```
+
+### 유니온과 결합해 문자열 집합 만들기
+
+`${}` 안에 유니온을 넣으면 각 멤버로 만들 수 있는 모든 문자열 조합이 다시 유니온으로 펼쳐집니다.
+
+```ts
+type Method = 'get' | 'post'
+type Action = `${Method}Transaction` // 'getTransaction' | 'postTransaction'
+```
+
+라우트 경로도 같은 방식으로 만듭니다. 거래 하나를 가리키는 경로는 고정된 접두사 뒤에 아무 문자열 id나 올 수 있는 형태입니다.
+
+```ts
+type TransactionRoute = '/api/transactions' | `/api/transactions/${string}`
+```
+
+### 내장 문자열 조작 타입
+
+TypeScript는 문자열 리터럴 타입의 대소문자를 바꿔주는 내장 타입 네 가지를 제공합니다.
+
+| 타입 | 하는 일 |
+|------|---------|
+| `Uppercase<T>` | 전체를 대문자로 |
+| `Lowercase<T>` | 전체를 소문자로 |
+| `Capitalize<T>` | 첫 글자만 대문자로 |
+| `Uncapitalize<T>` | 첫 글자만 소문자로 |
+
+```ts
+type HttpMethod = 'get' | 'post'
+type HttpMethodLabel = Uppercase<HttpMethod> // 'GET' | 'POST'
+```
+
+## 자주 하는 실수
+
+| 증상 | 원인 | 고치는 법 |
+|------|------|-----------|
+| 라우트 문자열에 접두사를 빠뜨려 타입 오류 | 하드코딩한 문자열이 템플릿 리터럴 타입 형태와 다름 | 반드시 `transactionRoute`, `transactionListRoute` 함수를 거쳐 문자열을 만든다 |
+| Capitalize 등을 값에 직접 적용하려 함 | 문자열 조작 타입은 타입에만 적용되고 런타임 값에는 적용되지 않음 | 런타임에 대소문자를 바꾸려면 `toUpperCase()` 같은 문자열 메서드를 쓴다 |
+| TransactionFilter를 화면 필터 UI와 혼동 | 12편 이후 화면 필터는 종류 기준으로 바뀐 사실을 놓침 | TransactionFilter는 이제 API 쿼리 조건 전용이라는 점을 기억한다 |
+
+## 확인 문제
+
+<Quiz
+  questionNumber={1}
+  question={"템플릿 리터럴 타입에서 유니온을 끼워 넣었을 때 일어나는 일은"}
+  options={["첫 번째 유니온 멤버만 사용된다","가능한 모든 조합이 계산되어 다시 유니온으로 펼쳐진다","컴파일 오류가 발생한다","유니온이 배열 타입으로 바뀐다"]}
+  correctAnswer={2}
+  explanation={"템플릿 리터럴 타입 안의 유니온은 가능한 모든 문자열 조합으로 펼쳐져 새로운 유니온 타입이 됩니다."}
+/>
+
+<Quiz
+  questionNumber={2}
+  question={"Uppercase&lt;HttpMethod&gt;가 하는 일은"}
+  options={["런타임에 문자열을 대문자로 바꾼다","문자열 리터럴 유니온의 각 멤버를 컴파일 타임에 대문자 형태로 바꾼 새 타입을 만든다","HTTP 요청을 실제로 보낸다","HttpMethod 값의 개수를 센다"]}
+  correctAnswer={2}
+  explanation={"Uppercase는 타입 수준에서 문자열 리터럴을 대문자로 바꾸는 내장 유틸리티 타입입니다."}
+/>
+
+<Quiz
+  questionNumber={3}
+  question={"이 편에서 06·07편의 TransactionFilter 타입을 다시 가져다 쓴 이유는"}
+  options={["화면 필터 UI가 여전히 이 타입을 그대로 쓰고 있어서","화면에서는 더 이상 쓰이지 않지만 category·month로 거르는 모양이 API 쿼리 조건과 그대로 맞아서","TransactionFilter가 아니면 컴파일이 안 되기 때문에","이름이 같아야만 하는 규칙이 있어서"]}
+  correctAnswer={2}
+  explanation={"12편 이후 화면 필터는 종류 기준으로 바뀌었지만, category·month로 거르는 TransactionFilter의 모양은 API 쿼리 조건에 그대로 재사용할 수 있습니다."}
+/>
+
+## 참고 자료
+
+- [TypeScript Handbook — Template Literal Types](https://www.typescriptlang.org/docs/handbook/2/template-literal-types.html)

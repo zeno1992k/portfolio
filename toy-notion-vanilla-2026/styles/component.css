@@ -1,0 +1,65 @@
+/* 사이드바 내부 UI */
+.sidebar__header {
+  margin-block-end: var(--space-md);
+}
+
+.sidebar__logo {
+  inline-size: 40px;
+  margin-block-end: var(--space-sm);
+}
+
+.sidebar__title {
+  color: var(--color-brand);
+}
+
+.sidebar__description {
+  color: var(--color-text-muted);
+}
+
+.sidebar__actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  margin-block-end: var(--space-md);
+}
+
+/* 공통 버튼 */
+.button {
+  padding-block: var(--space-sm);
+  padding-inline: var(--space-md);
+  border: 0;
+  border-radius: 6px;
+  background-color: var(--color-bg);
+  text-align: start;
+}
+
+/* 문서 목록 */
+.doc-list {
+  list-style: none;
+}
+
+.doc-list__link {
+  display: block;
+  padding: var(--space-sm);
+  color: var(--color-text);
+  text-decoration: none;
+}
+
+/* 버튼·문서 링크의 포커스 표시 */
+:is(.button, .doc-list__link):focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+}
+
+/* 본문 내부 UI */
+.navbar__path {
+  color: var(--color-text-muted);
+}
+
+.doc-canvas__title {
+  margin-block-end: var(--space-sm);
+}
+
+.doc-canvas__description {
+  color: var(--color-text-muted);
+}

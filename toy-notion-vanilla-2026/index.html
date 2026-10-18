@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="toy Zeno Notion">
+    <title>Zeno Notion</title>
+    <link rel="stylesheet" href="./styles/main.css">
+    <script type="module" src="./src/main.js"></script>
+  </head>
+
+  <body>
+    <div id="APP" class="app">
+      <aside id="SIDEBAR" class="sidebar">
+        <header class="sidebar__header">
+          <img src="./assets/icon.png" alt="" class="sidebar__logo">
+          <h2 class="sidebar__title">Zeno Notion</h2>
+          <p class="sidebar__description">개인 작업 공간</p>
+        </header>
+
+        <div class="sidebar__actions">
+          <button id="SEARCH_BTN" class="button" type="button">검색</button>
+          <button id="SETTINGS_BTN" class="button" type="button">설정</button>
+          <button id="NEW_PAGE_BTN" class="button" type="button">새 페이지</button>
+        </div>
+
+        <nav aria-label="문서 목록">
+          <h3>모든 문서</h3>
+          <ul class="doc-list">
+          </ul>
+        </nav>
+
+        <footer class="sidebar__footer">
+          <button id="TRASH_BTN" class="button" type="button">휴지통</button>
+        </footer>
+      </aside>
+
+      <main class="app__main">        <header class="navbar">
+          <p class="navbar__path">zeno Notion / Welcome</p>
+        </header>
+
+        <article class="doc-canvas">
+          <h1 class="doc-canvas__title">Welcome</h1>
+          <p class="doc-canvas__description">나만의 문서 편집기를 만들어 봅니다.</p>
+        </article>
+      </main>
+    </div>
+  </body>
+</html>
