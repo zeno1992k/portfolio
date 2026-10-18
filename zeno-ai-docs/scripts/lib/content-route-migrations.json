@@ -1,4 +1,3 @@
 {
-  "javascript": "web/javascript",
-  "react": "web/react"
+  "javascript/ECMAscript": "web/javascript/ECMAscript"
 }

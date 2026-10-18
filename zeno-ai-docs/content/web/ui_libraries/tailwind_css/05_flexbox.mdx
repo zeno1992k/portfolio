@@ -1,0 +1,65 @@
+---
+title: '05. Flexbox 배치'
+description: '주축·교차축, 크기 분배, 줄바꿈을 짧게 정리합니다.'
+---
+
+## 핵심 먼저 보기
+
+- Flex는 한 방향의 배치에 맞습니다.
+- `justify`는 주축, `items`는 교차축 정렬입니다.
+- 방향을 바꾸면 두 축의 물리적 방향도 바뀝니다.
+
+## 방향과 정렬
+
+`flex`로 배치를 켜고 `flex-row`·`flex-col`로 방향을 정합니다. `justify-between`은 주축의 남은 공간을 사이에 분배하고 `items-center`는 교차축 중앙에 맞춥니다. `flex-col`에서는 주축이 세로입니다.
+
+```html
+<div class="flex items-center gap-3">
+  <span class="shrink-0">이름</span>
+  <p class="min-w-0 flex-1 truncate">긴 설명</p>
+</div>
+```
+
+## 남은 공간과 축소
+
+`flex-1`은 남은 공간 분배에 참여하게 하고, `flex-none`은 자동 확대·축소를 막습니다. `shrink-0`은 줄어들지 않게 할 뿐 부모 넘침까지 해결하지 않습니다. `basis-*`는 주축 기본 크기이며 `w-*`와 함께 있으면 실제 Flex 계산을 봐야 합니다.
+
+## 줄바꿈·순서
+
+`flex-wrap`으로 줄바꿈을 허용하고 `gap`으로 간격을 정합니다. `order-*`·`flex-row-reverse`는 시각적 순서를 바꾸므로 DOM의 읽기·키보드 이동 순서와 어긋나지 않게 사용합니다. 행·열을 동시에 맞추는 구조는 Grid가 더 단순합니다.
+
+## 마무리 복습
+
+<details>
+<summary>확인 문제 3개 펼치기</summary>
+
+<Quiz
+  questionNumber={1}
+  question="flex-col에서 justify-center가 맞추는 주축은?"
+  options={['항상 가로', '글자 기준선만', 'z축', '세로']}
+  correctAnswer={4}
+  explanation="flex-col은 세로 방향이 주축입니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="축소만 막는 클래스는?"
+  options={['min-w-0', 'gap-0', 'shrink-0', 'flex-1']}
+  correctAnswer={3}
+  explanation="shrink-0은 flex-shrink를 0으로 만듭니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="order 클래스로 바뀌지 않는 것은?"
+  options={['Flex 아이템 순서', 'DOM의 실제 순서', '화면 배치 순서', '시각적 위치']}
+  correctAnswer={2}
+  explanation="시각적 재배치는 DOM과 접근성의 논리 순서를 바꾸지 않습니다."
+/>
+
+</details>
+
+## 참고 자료
+
+- [Tailwind CSS — flex](https://tailwindcss.com/docs/flex)
+- [Tailwind CSS — styling-with-utility-classes](https://tailwindcss.com/docs/styling-with-utility-classes)

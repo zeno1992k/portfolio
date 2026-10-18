@@ -3,9 +3,13 @@ title: '48. Typed Array와 바이너리'
 description: 'ArrayBuffer, TypedArray, DataView의 구조와 엔디언, 크기 조절·transfer, Float16Array, Base64·Hex, SharedArrayBuffer와 Atomics를 정리합니다.'
 ---
 
-<Callout type="info">
-  **이번 문서의 목표:** 바이트 덩어리(ArrayBuffer)와 그것을 읽는 창(TypedArray·DataView)의 관계를 설명하고, 오버플로·엔디언·공유 메모리의 동작 규칙을 예측할 수 있습니다.
-</Callout>
+## 핵심 먼저 보기
+
+- ArrayBuffer는 바이트 덩어리이고 TypedArray·DataView가 그 위의 뷰입니다. 같은 버퍼에 뷰 여러 개를 만들 수 있으며 `subarray`와 버퍼를 넘긴 생성자는 메모리를 공유하고, `slice`와 값 복사 생성자는 복사합니다.
+- 정수 TypedArray는 범위를 넘으면 순환하고(`Uint8Array`에 256 → 0), `Uint8ClampedArray`만 0–255로 고정하며 `.5`는 짝수 쪽으로 반올림합니다.
+- TypedArray는 기계의 엔디언(사실상 리틀)을 따르고, DataView는 기본이 빅 엔디언이며 세 번째 인수 `true`로 리틀을 지정합니다.
+- ES2024는 `resize`(크기 조절 가능 버퍼)와 `transfer`·`detached`를, ES2025는 `Float16Array`와 `Math.f16round`를, ES2026은 `Uint8Array`의 Base64·Hex 변환을 추가했습니다.
+- SharedArrayBuffer는 브라우저에서 보안 컨텍스트와 COOP·COEP 교차 출처 격리가 있어야 하고, 공유 메모리의 동기화는 `Atomics`(연산, `wait`·`notify`)로 합니다.
 
 ## ArrayBuffer
 
@@ -19,23 +23,17 @@ ArrayBuffer.isView(new Uint8Array(1)) // true
 ArrayBuffer.isView(buf)               // false
 ```
 
-- 크기는 바이트 단위입니다. `byteLength`는 읽기 전용입니다(크기 조절은 아래 절).
-- 음수나 엔진 한도를 넘는 크기는 `RangeError`입니다.
-- `slice`는 항상 새 버퍼를 만듭니다. 같은 메모리를 가리키는 조각은 TypedArray의 `subarray`로 만듭니다.
-- 같은 버퍼에 뷰를 여러 개 만들 수 있고, 모든 뷰가 같은 바이트를 봅니다.
-
-ECMAScript가 정의하는 것과 호스트가 제공하는 것은 구분해야 합니다.
-
 | 출처 | 항목 |
 |------|------|
 | ECMAScript | `ArrayBuffer`, TypedArray, `DataView`, `SharedArrayBuffer`, `Atomics` |
 | 호스트 | `Worker`, `postMessage`, `structuredClone`, `TextEncoder`, `Blob`, Node.js의 `Buffer` |
 
-`fetch`의 `response.arrayBuffer()`, 파일 읽기, WebSocket 바이너리 메시지는 모두 호스트 API가 ArrayBuffer를 돌려주는 형태입니다. Node.js의 `Buffer`는 `Uint8Array`의 하위 클래스입니다.
-
 ## TypedArray
 
 **TypedArray**는 ArrayBuffer를 하나의 숫자 타입으로 해석해 배열처럼 읽고 쓰는 뷰입니다. `TypedArray`라는 이름의 전역 생성자는 없고, 아래 12개 구체 생성자가 모두 하나의 추상 부모(`Object.getPrototypeOf(Uint8Array)`)를 공유합니다.
+
+<details>
+<summary>전체 비교표 펼치기</summary>
 
 | 생성자 | 요소 바이트 | 값 범위 | 요소 값 타입 |
 |--------|-------------|---------|--------------|
@@ -52,9 +50,7 @@ ECMAScript가 정의하는 것과 호스트가 제공하는 것은 구분해야 
 | `BigInt64Array` | 8 | -2^63 – 2^63-1 | BigInt |
 | `BigUint64Array` | 8 | 0 – 2^64-1 | BigInt |
 
-`BigInt64Array`와 `BigUint64Array`는 ES2020입니다. `Float16Array`(ES2025)를 제외한 나머지는 ES2015입니다. 요소 바이트 수는 `Uint8Array.BYTES_PER_ELEMENT` 같은 정적 프로퍼티로 읽습니다.
-
-### 생성 방법
+</details>
 
 ```js
 new Uint8Array(4)                 // 길이 4, 모두 0
@@ -67,122 +63,9 @@ Uint8Array.from([1, 2, 3], x => x * 2) // 2,4,6
 Uint8Array.of(1, 2)               // 1,2
 ```
 
-- 길이·배열·TypedArray·이터러블을 넘기면 새 버퍼를 만들어 값을 복사합니다. 버퍼를 넘길 때만 메모리를 공유합니다.
-- `new` 없이 호출하면 `TypeError`, 음수 길이는 `RangeError`입니다.
-- 버퍼를 넘길 때 두 가지 정렬 조건이 있습니다. `byteOffset`은 요소 바이트 수의 배수여야 합니다. 길이를 생략하면 `버퍼 크기 - byteOffset`이 요소 바이트 수의 배수여야 합니다. 어기면 `RangeError`입니다.
-
-```js
-const buf = new ArrayBuffer(16)
-new Uint16Array(buf, 3)             // RangeError (3은 2의 배수 아님)
-new Uint16Array(new ArrayBuffer(5)) // RangeError (5는 2의 배수 아님)
-```
-
-- 같은 버퍼를 다른 타입으로 겹쳐 보면 바이트가 재해석됩니다.
-
-```js
-const f = new Float32Array([1])
-new Uint32Array(f.buffer)[0].toString(16) // '3f800000'
-new Int16Array(new Uint8Array([1, 2, 3, 4]).buffer) // 513,1027
-```
-
-### 프로퍼티
-
-| 프로퍼티 | 의미 |
-|----------|------|
-| `buffer` | 뷰가 보는 ArrayBuffer |
-| `byteOffset` | 버퍼 안 시작 위치(바이트) |
-| `byteLength` | 뷰가 차지하는 바이트 수 |
-| `length` | 요소 개수 (`byteLength / 요소 바이트`) |
-
-```js
-const view = new Uint8Array(new ArrayBuffer(16), 4, 8)
-view.byteOffset // 4
-view.byteLength // 8
-view.length     // 8
-```
-
-### 배열과 다른 점
-
-| 항목 | 일반 배열 | TypedArray |
-|------|-----------|------------|
-| 길이 | 가변 | 고정 (크기 조절 가능 버퍼 제외) |
-| 요소 타입 | 제각각 | 하나로 고정, 대입 시 변환 |
-| `push`·`pop`·`shift`·`splice`·`concat`·`flat` | 있음 | 없음 |
-| `Array.isArray` | `true` | `false` |
-| `sort()` 기본 비교 | 문자열 | 숫자 |
-| `JSON.stringify` | `[1,2]` | `{"0":1,"1":2}` |
-| 구멍(빈 슬롯) | 있을 수 있음 | 없음 |
-
-```js
-new Int8Array([10, 9, 1]).sort() // 1,9,10 (숫자 비교)
-[10, 9, 1].sort()                // 1,10,9 (문자열 비교)
-```
-
-- 배열 메서드 중 `at`, `fill`, `find`, `findLast`, `includes`, `indexOf`, `join`, `reverse`, `sort`, `copyWithin`, `forEach`, `reduce`와 이터레이터 메서드는 쓸 수 있습니다. `toSorted`, `toReversed`, `with`(ES2023)도 있습니다.
-- `map`과 `filter`는 같은 타입의 새 TypedArray를 돌려줍니다. 결과 요소에도 타입 변환이 적용됩니다.
-
-```js
-new Uint8Array([1, 2, 3]).map(v => v * 100) // 100,200,44
-```
-
-- 일반 배열로 바꿀 때는 `Array.from(ta)` 또는 `[...ta]`를 씁니다(자세히는 35편, 36편).
-- 이터러블이므로 `for...of`와 스프레드가 됩니다.
-
-### 인덱스 접근 규칙
-
-TypedArray의 정수 인덱스 프로퍼티는 일반 객체와 다르게 동작합니다.
-
-```js
-const d = new Uint8Array(4)
-d[10] = 5        // 범위 밖 쓰기: 조용히 무시
-d[10]            // undefined
-10 in d          // false
-d['1.5'] = 3     // 정수가 아닌 숫자 문자열: 무시
-d.length         // 4
-```
-
-- 범위 밖 인덱스에 쓰기는 에러 없이 무시되고 프로퍼티도 생기지 않습니다. 읽기는 `undefined`입니다.
-- `-1`, `'1.5'` 같은 "숫자로 해석되는 문자열 키"는 인덱스로 취급되어 일반 프로퍼티로 저장되지 않습니다. `foo` 같은 일반 이름은 일반 객체처럼 저장됩니다.
-- 요소를 삭제하거나 비설정 가능(non-configurable)으로 정의할 수 없습니다. 길이가 1 이상인 TypedArray에 `Object.freeze`를 호출하면 `TypeError`입니다.
-
-### set·subarray·slice
-
-세 메서드의 차이는 메모리 공유 여부입니다.
-
-```js
-const a = new Uint8Array([1, 2, 3, 4])
-const sub = a.subarray(1, 3) // 같은 버퍼를 보는 새 뷰
-sub[0] = 99
-a                            // 1,99,3,4 (원본이 바뀐다)
-const cp = a.slice(1, 3)     // 새 버퍼에 복사
-cp[0] = 7
-a                            // 1,99,3,4 (영향 없음)
-```
-
-| 메서드 | 결과 | 메모리 |
-|--------|------|--------|
-| `subarray(begin, end)` | 새 뷰 | 공유 |
-| `slice(begin, end)` | 새 TypedArray | 복사 |
-| `set(source, offset)` | 기존 배열에 값을 덮어씀 | 복사 |
-
-`set`의 `source`는 배열 또는 TypedArray이고, 들어갈 자리가 모자라면 `RangeError`입니다.
-
-```js
-const d = new Uint8Array(4)
-d.set([1, 2], 1) // 0,1,2,0
-d.set([1, 2, 3], 3) // RangeError
-```
-
 ## 오버플로와 Clamped
 
 TypedArray에 값을 넣으면 요소 타입에 맞게 변환되며, 정수 타입은 범위를 넘어도 에러 없이 순환합니다. 변환 순서는 Number로 바꾼 뒤 소수부를 버리고(0 방향 절단) 2^n으로 나눈 나머지를 취하는 것입니다(n은 비트 수). 결과가 해당 타입의 부호 범위에 맞춰 해석됩니다.
-
-```js
-new Uint8Array([256, 257, -1, 1.9, NaN]) // 0,1,255,1,0
-new Int8Array([128, 129, -129, 255])     // -128,-127,127,-1
-new Int16Array([40000])                  // -25536
-new Uint32Array([-1])                    // 4294967295
-```
 
 - `NaN`, `Infinity`, `-Infinity`는 정수 타입에서 0이 됩니다.
 - 문자열은 Number로 변환된 뒤 저장됩니다(`'7'`은 7).
@@ -190,44 +73,9 @@ new Uint32Array([-1])                    // 4294967295
 - `BigInt64Array`는 64비트 범위로 순환합니다. `new BigUint64Array([-1n])`은 `18446744073709551615n`입니다.
 - BigInt 배열에 Number를 넣거나 Number 배열에 BigInt를 넣으면 `TypeError`입니다. 변환하지 않습니다(BigInt는 05편).
 
-**Uint8ClampedArray**는 순환 대신 0–255로 잘라 맞추는(clamp) 타입입니다. 캔버스의 픽셀 데이터(`ImageData`)가 이 타입이라 색상 값이 255를 넘어도 흰색 이상으로 튀지 않습니다.
-
-```js
-new Uint8ClampedArray([256, -5, 300.4, NaN])
-// 255,0,255,0
-new Uint8ClampedArray([0.5, 1.5, 2.5, 3.5])
-// 0,2,2,4
-```
-
-- 범위를 넘으면 0 또는 255로 고정됩니다. `NaN`은 0입니다.
-- 소수는 가장 가까운 정수로 반올림하되, 딱 중간(`.5`)이면 짝수 쪽으로 갑니다. 그래서 `0.5`는 0, `1.5`는 2, `2.5`는 2, `3.5`는 4입니다. 일반 `Math.round`와 다릅니다.
-- `Uint8Array`에 같은 값을 넣으면 순환하고 소수부는 버립니다. 자주 틀리는 부분입니다.
-
 ## DataView
 
 **DataView**는 ArrayBuffer를 요소 단위가 아닌 "바이트 위치와 타입을 지정해" 읽고 쓰는 뷰입니다. 한 버퍼에 서로 다른 타입의 필드가 섞인 파일·네트워크 프로토콜을 해석할 때 씁니다.
-
-```js
-const dv = new DataView(new ArrayBuffer(8))
-dv.setUint16(0, 0xABCD)   // 위치 0에 2바이트
-dv.setFloat32(4, 1.5)     // 위치 4에 4바이트
-dv.getUint16(0).toString(16) // 'abcd'
-dv.getFloat32(4)             // 1.5
-```
-
-- 생성자는 `new DataView(buffer, byteOffset?, byteLength?)`입니다. `buffer`, `byteOffset`, `byteLength` 프로퍼티가 있습니다.
-- 메서드는 `get타입(위치, littleEndian?)`과 `set타입(위치, 값, littleEndian?)` 형태입니다. 타입은 `Int8`, `Uint8`, `Int16`, `Uint16`, `Int32`, `Uint32`, `Float32`, `Float64`, `BigInt64`, `BigUint64`이고 ES2025부터 `Float16`이 추가됐습니다. `Uint8ClampedArray`에 대응하는 메서드는 없습니다.
-- 위치는 바이트 단위입니다. 요소 크기의 배수일 필요가 없습니다. 위치 1에서 `getUint32(1)`을 읽어도 됩니다. TypedArray는 정렬 조건이 있고 DataView는 없습니다.
-- 범위를 넘으면 TypedArray와 달리 `RangeError`를 던집니다.
-
-```js
-const dv = new DataView(new ArrayBuffer(8))
-dv.getUint32(6) // RangeError (6부터 4바이트는 8을 넘는다)
-```
-
-- 값 변환 규칙은 TypedArray와 같습니다. `setUint8(1, 300)`은 44를 저장합니다.
-
-TypedArray와 DataView의 선택 기준은 다음과 같습니다.
 
 | 상황 | 선택 |
 |------|------|
@@ -236,115 +84,20 @@ TypedArray와 DataView의 선택 기준은 다음과 같습니다.
 
 ## Endian
 
-**엔디언**(endian)은 2바이트 이상 값을 메모리에 저장할 때의 바이트 순서입니다. 낮은 자리 바이트를 앞에 두면 리틀 엔디언(little-endian), 높은 자리 바이트를 앞에 두면 빅 엔디언(big-endian)입니다.
-
-`0x12345678`(4바이트)을 주소 0부터 저장하면 다음과 같습니다.
-
-| 방식 | 주소 0 | 주소 1 | 주소 2 | 주소 3 |
-|------|--------|--------|--------|--------|
-| 빅 엔디언 | 12 | 34 | 56 | 78 |
-| 리틀 엔디언 | 78 | 56 | 34 | 12 |
-
-```js
-const dv = new DataView(new ArrayBuffer(4))
-dv.setUint32(0, 0x12345678)       // 기본값: 빅 엔디언
-new Uint8Array(dv.buffer)         // 12 34 56 78 (16진수)
-dv.setUint32(0, 0x12345678, true) // littleEndian = true
-new Uint8Array(dv.buffer)         // 78 56 34 12 (16진수)
-```
-
-- `DataView`의 기본값은 빅 엔디언이고, 세 번째 인수 `true`가 리틀 엔디언입니다.
-- TypedArray는 엔디언을 지정할 수 없고 실행 중인 기계의 바이트 순서를 따릅니다. 오늘날 웹 브라우저와 Node.js가 도는 x86·ARM 기기는 사실상 모두 리틀 엔디언입니다.
-- 네트워크 프로토콜의 표준 순서(네트워크 바이트 순서)는 빅 엔디언입니다. 파일 형식마다 다릅니다(PNG는 빅, BMP·WAV는 리틀).
-- 외부에서 받은 바이너리를 `Uint16Array`나 `Uint32Array`로 바로 읽으면 기계 순서에 의존하는 코드가 됩니다. 순서가 정해진 형식은 `DataView`로 읽습니다.
-
-기계의 순서를 확인하는 방법은 다음과 같습니다.
-
-```js
-new Uint8Array(new Uint16Array([1]).buffer)
-// 1,0 이면 리틀 엔디언, 0,1 이면 빅 엔디언
-```
-
-- 1바이트 타입(`Uint8Array`, `Int8Array`, `Uint8ClampedArray`)은 순서 개념이 없습니다.
+엔디언은 여러 바이트 숫자의 바이트 배치 순서입니다. DataView의 읽기·쓰기 메서드는 `littleEndian` 인수로 순서를 명시합니다. 생략하면 big-endian입니다. 서로 다른 플랫폼·파일 형식 사이에서는 형식이 요구하는 순서를 사용합니다.
 
 ## 크기 조절과 transfer (ES2024)
 
 ES2024는 크기를 바꿀 수 있는 ArrayBuffer와, 버퍼 소유권을 옮기는 `transfer`를 추가했습니다.
-
-### 크기 조절 가능한 ArrayBuffer
-
-생성자의 두 번째 인수에 `maxByteLength`를 주면 그 한도 안에서 `resize`할 수 있는 버퍼가 됩니다.
-
-```js
-const buf = new ArrayBuffer(4, { maxByteLength: 16 })
-buf.resizable     // true
-buf.byteLength    // 4
-buf.maxByteLength // 16
-buf.resize(8)     // 늘어난 4바이트는 0
-buf.resize(17)    // RangeError (한도 초과)
-new ArrayBuffer(4).resizable // false (maxByteLength는 4)
-```
-
-- `byteLength`는 `0` 이상 `maxByteLength` 이하에서 바뀌고, 한도는 생성 후 바꿀 수 없습니다.
-- 줄이면 잘려 나간 바이트는 사라지고, 다시 늘리면 0으로 채워집니다.
-
-뷰는 만드는 방식에 따라 크기 변화를 다르게 따라갑니다.
 
 | 뷰 생성 | 버퍼가 커지면 | 버퍼가 줄어 뷰 끝을 넘으면 |
 |---------|---------------|-----------------------------|
 | 길이 생략 (`new Uint8Array(buf)`) | `length`가 따라 늘어난다 (length-tracking) | 따라 줄어든다 |
 | 길이 지정 (`new Uint8Array(buf, 0, 2)`) | 변화 없음 | 범위 밖(out-of-bounds)이 된다 |
 
-```js
-const buf = new ArrayBuffer(4, { maxByteLength: 16 })
-const track = new Uint8Array(buf)       // 길이 생략
-const fixed = new Uint8Array(buf, 0, 2) // 길이 2 지정
-buf.resize(8)
-track.length // 8
-fixed.length // 2
-buf.resize(1)
-track.length // 1
-fixed.length // 0 (범위 밖)
-buf.resize(4)
-fixed.length // 2 (다시 범위 안)
-```
-
-- 범위 밖 뷰는 `length`, `byteLength`, `byteOffset`이 모두 0이 되고 요소 읽기는 `undefined`입니다. 에러를 던지는 것은 메서드를 호출할 때입니다. 버퍼가 다시 커지면 정상으로 돌아옵니다.
-- `DataView`도 길이를 생략하면 따라가고, 길이를 지정하면 범위 밖이 될 수 있습니다.
-- 길이를 가정하고 캐시해 둔 코드는 버퍼가 줄어드는 순간 깨집니다. 크기 조절 가능 버퍼를 받는 함수에서는 `length`를 매번 읽습니다.
-
-### transfer와 detach
-
-`transfer`는 내용을 새 ArrayBuffer로 옮기고 원본을 분리(detach)합니다. 복사하지 않고 소유권만 이동하므로 큰 버퍼를 넘길 때 빠릅니다.
-
-```js
-const a = new ArrayBuffer(4)
-const view = new Uint8Array(a)
-const b = a.transfer(8) // 새 크기 8 (생략하면 같은 크기)
-a.detached    // true
-a.byteLength  // 0
-b.byteLength  // 8
-view.length   // 0 (분리된 버퍼를 보는 뷰는 길이 0)
-a.slice(0)    // TypeError
-```
-
-- 새 크기가 더 크면 뒤가 0으로 채워지고, 작으면 잘립니다.
-- 원본이 크기 조절 가능이면 `transfer`의 결과도 크기 조절 가능이고 `maxByteLength`가 유지됩니다. `transferToFixedLength()`는 항상 고정 길이 버퍼를 돌려줍니다.
-- 분리된 버퍼는 `detached`가 `true`이고, `byteLength`는 0이며, `slice` 같은 메서드는 `TypeError`입니다. 되돌릴 수 없습니다.
-- 분리는 호스트 API에서도 일어납니다. `structuredClone(buf, { transfer: [buf] })`나 `worker.postMessage(buf, [buf])`는 전송 목록에 넣은 버퍼를 분리합니다. 전송 없이 `postMessage(buf)`만 하면 복사됩니다.
-- 분리된 버퍼의 메모리는 엔진이 회수할 수 있습니다(자세히는 49편).
-
 ## Float16Array (ES2025)
 
 **Float16Array**는 요소 하나가 2바이트(IEEE 754 binary16, 반정밀도)인 TypedArray입니다. 정밀도가 낮아도 되는 대량 수치(그래픽스·머신러닝 가중치)의 메모리를 절반으로 줄이기 위한 타입입니다.
-
-```js
-new Float16Array([1.337])[0] // 1.3369140625
-Math.f16round(1.337)         // 1.3369140625
-Math.f16round(70000)         // Infinity
-```
-
-반정밀도 형식의 한계는 다음과 같습니다.
 
 | 항목 | 값 |
 |------|----|
@@ -354,22 +107,9 @@ Math.f16round(70000)         // Infinity
 | 최소 양의 비정규 수 | 2^-24 (약 0.000000060) |
 | 유효 자릿수 | 십진수 약 3자리 |
 
-- ES2025가 함께 추가한 것은 세 가지입니다. `Float16Array`, `DataView`의 `getFloat16`·`setFloat16`, 값을 반정밀도로 반올림한 Number를 돌려주는 `Math.f16round`.
-- 가장 가까운 반정밀도 값으로 반올림하고, 최댓값을 넘는 값은 `Infinity`가 됩니다. 65520은 반올림 경계를 넘으므로 `Infinity`이고, 아주 작은 값(1e-8)은 0이 됩니다.
-- 반정밀도의 요소는 읽을 때 일반 Number(64비트)로 돌아옵니다. 저장 형식만 16비트입니다.
-- 새 기능이므로 `typeof Float16Array`로 지원을 확인하고 씁니다.
-
 ## Uint8Array의 Base64·Hex (ES2026)
 
 ES2026은 `Uint8Array`에 Base64와 16진수 문자열 변환 메서드를 추가했습니다. 바이트를 텍스트로 옮기는 변환은 지금까지 `btoa`·`atob` 같은 호스트 API나 직접 짠 코드로 했습니다.
-
-```js
-const bytes = Uint8Array.fromBase64('SGVsbG8=')
-bytes              // 72,101,108,108,111
-bytes.toBase64()   // 'SGVsbG8='
-bytes.toHex()      // '48656c6c6f'
-Uint8Array.fromHex('48656c6c6f') // 72,101,108,108,111
-```
 
 | 메서드 | 동작 |
 |--------|------|
@@ -380,41 +120,9 @@ Uint8Array.fromHex('48656c6c6f') // 72,101,108,108,111
 | `ta.setFromBase64(str, options?)` | 기존 배열에 디코딩 결과를 써 넣음 |
 | `ta.setFromHex(str)` | 기존 배열에 디코딩 결과를 써 넣음 |
 
-옵션은 다음과 같습니다.
-
-| 옵션 | 값 | 의미 |
-|------|----|------|
-| `alphabet` | `'base64'` (기본), `'base64url'` | `+` `/` 대신 `-` `_`를 쓰는 URL 안전 알파벳 |
-| `omitPadding` | `true`, `false`(기본) | 인코딩 결과의 끝 `=` 생략 (`toBase64`) |
-| `lastChunkHandling` | `'loose'`(기본), `'strict'`, `'stop-before-partial'` | 디코딩에서 끝의 불완전한 덩어리 처리 (`fromBase64`, `setFromBase64`) |
-
-```js
-const b = new Uint8Array([251, 255])
-b.toBase64()                          // '+/8='
-b.toBase64({ alphabet: 'base64url' }) // '-_8='
-b.toBase64({ alphabet: 'base64url', omitPadding: true }) // '-_8'
-Uint8Array.fromBase64('+/8')          // 251,255 (loose)
-Uint8Array.fromBase64('+/8', { lastChunkHandling: 'strict' })
-// SyntaxError (strict는 패딩이 있는 완전한 덩어리만 허용)
-```
-
-- `lastChunkHandling`의 `'loose'`는 패딩이 없는 마지막 덩어리를 허용합니다. `'strict'`는 4글자 덩어리와 올바른 패딩을 요구하고, 사용되지 않는 비트가 0이 아니어도 에러입니다. `'stop-before-partial'`은 불완전한 마지막 덩어리를 디코딩하지 않고 그 앞에서 멈춥니다(조각조각 도착하는 스트림용).
-- 입력의 공백은 무시됩니다. 알파벳에 없는 문자가 있거나 16진수 문자열의 길이가 홀수면 `SyntaxError`, 문자열이 아닌 인수는 `TypeError`입니다.
-- `toHex`는 항상 소문자를 만들고, `fromHex`는 대소문자를 모두 읽습니다.
-- `setFromBase64`와 `setFromHex`는 새 배열을 만들지 않고 `{ read, written }` 객체를 돌려줍니다. `read`는 소비한 문자 수, `written`은 쓴 바이트 수입니다. 대상이 모자라면 들어가는 만큼만 쓰고 멈추므로 반환값으로 어디까지 처리했는지 확인합니다.
-- MDN은 2025년 9월 이후 주요 브라우저 최신판에서 쓸 수 있다고 분류(Baseline 2025)합니다. Node.js 24에는 아직 없으므로(2026-10 확인) 지원 확인과 폴리필이 필요합니다.
-- 문자열(텍스트)을 바이트로 바꾸는 일은 이 메서드의 몫이 아닙니다. 문자열을 UTF-8 바이트로 바꾸는 `TextEncoder`는 호스트 API입니다(`'가'`는 3바이트).
-
 ## SharedArrayBuffer
 
 **SharedArrayBuffer**는 여러 실행 단위(에이전트: 메인 스레드와 워커)가 같은 메모리를 동시에 볼 수 있는 ArrayBuffer입니다. 일반 ArrayBuffer는 `postMessage`로 보내면 복사되거나 전송되어 한쪽에서 분리되지만, SharedArrayBuffer는 보내도 양쪽이 같은 바이트를 가리킵니다. ES2017에서 도입됐습니다.
-
-```js
-const sab = new SharedArrayBuffer(8)
-sab.byteLength // 8
-sab.growable   // false
-worker.postMessage(sab) // 복사 없이 같은 메모리를 공유
-```
 
 | 항목 | ArrayBuffer | SharedArrayBuffer |
 |------|-------------|--------------------|
@@ -423,11 +131,6 @@ worker.postMessage(sab) // 복사 없이 같은 메모리를 공유
 | `transfer`, `detached` | 있음 | 없음 |
 | `Atomics.wait` 대상 | 불가 | 가능 |
 | 타입 태그 | `[object ArrayBuffer]` | `[object SharedArrayBuffer]` |
-
-- 뷰(TypedArray·DataView)는 일반 버퍼와 똑같이 만듭니다. 워커 쪽에서 받은 SharedArrayBuffer로 자기 뷰를 만들면 됩니다.
-- ES2024에서 `growable`·`maxByteLength`·`grow`가 추가됐습니다. `new SharedArrayBuffer(4, { maxByteLength: 8 })`로 만들고 `grow(8)`로 늘립니다. 줄이려 하면 `RangeError`입니다. 길이를 생략한 뷰는 늘어난 길이를 따라갑니다.
-- 보호 장치 없이 두 스레드가 같은 위치를 읽고 쓰면 결과가 정해지지 않습니다(경쟁 상태, race condition). 일반 인덱스 접근(`ia[0]++`)은 읽기·더하기·쓰기 세 단계라서 중간에 다른 스레드가 끼어듭니다. 이 문제를 `Atomics`로 풉니다.
-- 워커 만들기와 `postMessage` 자체는 ECMAScript가 아니라 호스트 API입니다(비동기 흐름은 40편).
 
 ## SharedArrayBuffer 사용 조건
 
@@ -438,40 +141,9 @@ SharedArrayBuffer는 환경 조건을 만족해야 쓸 수 있습니다. 2018년
 | 브라우저 | 보안 컨텍스트(HTTPS 또는 localhost) + 교차 출처 격리(cross-origin isolation) |
 | Node.js·Deno·Bun | 헤더 조건 없음. 워커 간 공유는 각 런타임의 워커 API로 |
 
-교차 출처 격리는 문서를 보내는 서버가 두 응답 헤더를 지정해 켭니다.
-
-```text
-Cross-Origin-Opener-Policy: same-origin
-Cross-Origin-Embedder-Policy: require-corp
-```
-
-- `Cross-Origin-Embedder-Policy`는 `credentialless`도 쓸 수 있습니다.
-- 격리가 켜지면 다른 출처의 리소스(이미지·스크립트·iframe)는 그쪽이 허용 표시(CORP, CORS)를 해야만 불러와집니다. 외부 위젯이 많은 페이지는 이 때문에 깨질 수 있습니다.
-- 켜졌는지는 `globalThis.crossOriginIsolated`로 확인합니다. `false`면 SharedArrayBuffer를 쓸 수 없으므로 일반 ArrayBuffer로 대체하는 경로를 둡니다.
-
-```js
-if (globalThis.crossOriginIsolated) {
-  worker.postMessage(new SharedArrayBuffer(1024))
-} else {
-  worker.postMessage(new ArrayBuffer(1024)) // 복사본
-}
-```
-
-- 정적 호스팅(GitHub Pages 등)은 응답 헤더를 직접 설정할 수 없어 SharedArrayBuffer를 쓰기 어렵습니다.
-
 ## Atomics
 
 **Atomics**는 공유 메모리의 정수 요소를 쪼개지지 않는 단일 연산으로 읽고 쓰는 정적 메서드 모음입니다(생성자가 아닙니다). 연산 하나가 완전히 끝나기 전에는 다른 스레드가 그 사이를 볼 수 없고, `Atomics` 연산끼리는 순서가 보장됩니다(ES2017).
-
-```js
-const ia = new Int32Array(new SharedArrayBuffer(8))
-Atomics.add(ia, 0, 5) // 0  (바꾸기 전 값을 반환)
-Atomics.load(ia, 0)   // 5
-Atomics.sub(ia, 0, 2) // 5  (이후 ia[0]은 3)
-Atomics.store(ia, 1, 3.9) // 3 (변환된 값을 반환)
-```
-
-### 읽기·쓰기·계산 연산
 
 | 메서드 | 동작 | 반환 |
 |--------|------|------|
@@ -482,72 +154,17 @@ Atomics.store(ia, 1, 3.9) // 3 (변환된 값을 반환)
 | `compareExchange(ta, i, expected, v)` | 현재 값이 `expected`일 때만 `v`로 교체 | 바꾸기 전 값 |
 | `isLockFree(n)` | n바이트 연산이 락 없이 되는지 | `true` 또는 `false` |
 
-```js
-Atomics.compareExchange(ia, 0, 5, 9) // 3 (교체 안 됨)
-ia[0]                                // 3
-Atomics.compareExchange(ia, 0, 3, 9) // 3 (교체됨)
-ia[0]                                // 9
-```
-
-- 첫 인수는 정수 TypedArray여야 합니다. `Int8Array`부터 `Uint32Array`, `BigInt64Array`, `BigUint64Array`가 가능하고, 부동소수점 배열과 `Uint8ClampedArray`는 `TypeError`입니다.
-- 읽기·계산 연산은 공유가 아닌 일반 ArrayBuffer 위의 배열에도 동작합니다. 대기 연산은 아래처럼 다릅니다.
-- BigInt 배열에는 BigInt 값을 줍니다(`Atomics.add(bi, 0, 5n)`).
-- 모든 연산이 "바꾸기 전 값"을 돌려줍니다(`load`·`store` 제외). `add` 결과를 새 값으로 착각하는 것이 흔한 실수입니다.
-
-### 대기와 깨우기
-
-`Atomics.wait`는 위치의 값이 예상값과 같으면 잠들고, 다른 스레드가 `Atomics.notify`로 깨워 줄 때까지 기다립니다.
-
-| 메서드 | 동작 | 반환 |
-|--------|------|------|
-| `wait(ta, i, expected, timeout?)` | 현재 값이 `expected`면 스레드를 막고 대기 (ms) | `'ok'`, `'not-equal'`, `'timed-out'` |
-| `notify(ta, i, count?)` | 대기 중인 스레드를 최대 `count`개 깨움 (기본 전부) | 깨운 수 |
-| `waitAsync(ta, i, expected, timeout?)` (ES2024) | 막지 않고 프로미스로 대기 | `{ async, value }` |
-
-```js
-Atomics.wait(ia, 0, 999, 0) // 'not-equal' (현재 값이 999가 아님)
-Atomics.wait(ia, 0, ia[0], 10) // 'timed-out' (10ms 경과)
-```
-
-- `wait`는 `SharedArrayBuffer` 위의 `Int32Array` 또는 `BigInt64Array`에만 쓸 수 있습니다. 공유가 아닌 버퍼나 다른 타입이면 `TypeError`입니다.
-- `wait`는 스레드를 막으므로 브라우저의 메인 스레드에서는 `TypeError`로 금지되고 워커에서만 씁니다.
-- `waitAsync`는 막지 않으므로 메인 스레드에서도 됩니다. 값이 이미 다르거나 타임아웃이 0이면 `{ async: false, value: 'not-equal' }`처럼 즉시 결과가 나오고, 실제로 기다리면 `{ async: true, value: 프로미스 }`이며 프로미스가 `'ok'` 또는 `'timed-out'`으로 이행됩니다(자세히는 41편).
-- 일반(공유가 아닌) 배열에 `notify`하면 깨울 대기자가 없으므로 0을 돌려줍니다.
-
-`compareExchange`와 `wait`·`notify`를 합치면 상호 배제(뮤텍스)를 만들 수 있습니다.
-
-```js
-// ia[0]: 0 = 풀림, 1 = 잠김
-function lock(ia) {
-  while (Atomics.compareExchange(ia, 0, 0, 1) !== 0) {
-    Atomics.wait(ia, 0, 1) // 값이 1인 동안 대기
-  }
-}
-function unlock(ia) {
-  Atomics.store(ia, 0, 0)
-  Atomics.notify(ia, 0, 1) // 대기자 한 명을 깨움
-}
-```
-
-- `lock`은 0일 때만 1로 바꾸는 데 성공하고, 실패하면(이미 1이면) 잠들었다가 `unlock`의 알림을 받고 다시 시도합니다.
-- 공유 메모리를 쓰는 이유는 큰 데이터를 복사하지 않기 위해서입니다. 동기화 비용과 버그 위험이 있으므로 메시지 전달로 충분하면 쓰지 않습니다.
-
-## 핵심 정리
-
-- ArrayBuffer는 바이트 덩어리이고 TypedArray·DataView가 그 위의 뷰입니다. 같은 버퍼에 뷰 여러 개를 만들 수 있으며 `subarray`와 버퍼를 넘긴 생성자는 메모리를 공유하고, `slice`와 값 복사 생성자는 복사합니다.
-- 정수 TypedArray는 범위를 넘으면 순환하고(`Uint8Array`에 256 → 0), `Uint8ClampedArray`만 0–255로 고정하며 `.5`는 짝수 쪽으로 반올림합니다.
-- TypedArray는 기계의 엔디언(사실상 리틀)을 따르고, DataView는 기본이 빅 엔디언이며 세 번째 인수 `true`로 리틀을 지정합니다.
-- ES2024는 `resize`(크기 조절 가능 버퍼)와 `transfer`·`detached`를, ES2025는 `Float16Array`와 `Math.f16round`를, ES2026은 `Uint8Array`의 Base64·Hex 변환을 추가했습니다.
-- SharedArrayBuffer는 브라우저에서 보안 컨텍스트와 COOP·COEP 교차 출처 격리가 있어야 하고, 공유 메모리의 동기화는 `Atomics`(연산, `wait`·`notify`)로 합니다.
-
 ## 마무리 복습
+
+<details>
+<summary>확인 문제 3개 펼치기</summary>
 
 <Quiz
   questionNumber={1}
   question="다음 코드의 결과로 올바른 것은? new Uint8Array([256, -1, 1.9])"
   options={['256,-1,1', '0,255,1', '255,0,2', '0,0,1']}
   correctAnswer={2}
-  explanation="Uint8Array는 값을 0 방향으로 절단한 뒤 256으로 나눈 나머지를 취합니다. 256은 0, -1은 255, 1.9는 1이 됩니다. 255,0,2는 0–255로 고정하고 반올림하는 Uint8ClampedArray의 결과 형태입니다."
+  explanation="Uint8Array는 값을 0 방향으로 절단한 뒤 256으로 나눈 나머지를 취합니다. 256은 0, -1은 255, 1.9는 1이 됩니다."
 />
 
 <Quiz
@@ -555,7 +172,7 @@ function unlock(ia) {
   question="DataView에서 setUint16(0, 0x1234)를 호출한 뒤 바이트를 0번 위치부터 읽은 결과는?"
   options={['34 12', '12 34', '12 00', '00 12']}
   correctAnswer={2}
-  explanation="DataView의 littleEndian 기본값은 false라서 빅 엔디언으로 저장됩니다. 높은 자리 바이트 12가 먼저 오므로 12 34입니다. 세 번째 인수로 true를 주면 34 12가 됩니다."
+  explanation="DataView의 littleEndian 기본값은 false라서 빅 엔디언으로 저장됩니다. 높은 자리 바이트 12가 먼저 오므로 12 34입니다."
 />
 
 <Quiz
@@ -563,8 +180,10 @@ function unlock(ia) {
   question="크기 조절 가능한 ArrayBuffer에서 길이를 지정해 만든 뷰 new Uint8Array(buf, 0, 2)의 동작으로 옳은 것은?"
   options={['버퍼가 커지면 length가 따라 늘어난다', '버퍼가 2바이트 미만으로 줄면 에러 없이 length가 0이 되고, 다시 커지면 복구된다', '버퍼를 줄이면 즉시 RangeError가 발생한다', '버퍼가 줄어든 뒤에는 영구히 분리된다']}
   correctAnswer={2}
-  explanation="길이를 지정한 뷰는 버퍼 변화를 따라가지 않고, 버퍼가 줄어 뷰의 끝을 넘으면 범위 밖 상태가 되어 length와 byteLength가 0이 됩니다. 버퍼가 다시 충분히 커지면 원래 길이로 돌아옵니다. 길이를 생략한 뷰만 늘어나는 길이를 따라갑니다."
+  explanation="길이를 지정한 뷰는 버퍼 변화를 따라가지 않고, 버퍼가 줄어 뷰의 끝을 넘으면 범위 밖 상태가 되어 length와 byteLength가 0이 됩니다. 버퍼가 다시 충분히 커지면 원래 길이로 돌아옵니다."
 />
+
+</details>
 
 ## 참고 자료
 

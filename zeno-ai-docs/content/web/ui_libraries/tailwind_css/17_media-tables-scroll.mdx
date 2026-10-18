@@ -1,0 +1,67 @@
+---
+title: '17. 이미지·표·스크롤'
+description: '콘텐츠가 잘리거나 화면을 밀어내지 않도록 표현합니다.'
+---
+
+## 핵심 먼저 보기
+
+- 이미지는 크기·비율·자르기 방식을 구분합니다.
+- 넓은 표는 화면 전체 대신 표 영역에서 스크롤하게 합니다.
+- 스크롤 효과를 추가해도 콘텐츠에 접근할 수 있어야 합니다.
+
+## 이미지 비율
+
+`aspect-video`는 16:9, `aspect-square`는 1:1 비율입니다. `object-cover`는 상자를 채우며 일부를 자르고 `object-contain`은 전체 이미지를 보존하며 빈 공간을 남길 수 있습니다. object-fit이 눈에 보이려면 크기와 비율의 제약이 있어야 합니다.
+
+```html
+<img class="aspect-video w-full object-cover"
+  src="/images/cover.jpg" alt="강의 표지">
+```
+
+## 표의 폭
+
+`table-auto`는 콘텐츠 기반, `table-fixed`는 고정 레이아웃 방식입니다. `border-collapse`와 셀 padding은 별도로 정합니다. 표를 `overflow-x-auto` 영역으로 감싸면 넓은 데이터가 페이지 전체를 밀어내는 것을 줄입니다. 작은 화면에서 중요한 열을 무작정 숨기지는 않습니다.
+
+## 스크롤과 넘침
+
+`overflow-hidden`은 넘친 내용을 잘라내면서 스크롤 컨테이너가 될 수 있고, `overflow-clip`은 스크롤 컨테이너를 만들지 않는 자르기 방식입니다. sticky가 깨졌다면 이 차이를 확인합니다.
+
+`scroll-smooth`는 부드러운 스크롤, `scroll-mt-*`는 고정 헤더를 고려한 이동 여유, `snap-x snap-mandatory`는 스크롤 스냅에 사용합니다. 스냅은 부모·자식 조건과 콘텐츠 접근성을 함께 확인합니다.
+
+## 마무리 복습
+
+<details>
+<summary>확인 문제 3개 펼치기</summary>
+
+<Quiz
+  questionNumber={1}
+  question="이미지 전체 보존에 가까운 것은?"
+  options={['object-cover', 'overflow-hidden만', 'truncate', 'object-contain']}
+  correctAnswer={4}
+  explanation="contain은 이미지를 상자 안에 전부 맞추는 방식입니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="넓은 표로 페이지가 밀릴 때?"
+  options={['모든 데이터 삭제', 'z-index 증가', '표 영역 overflow-x-auto', '전체 글자 0px']}
+  correctAnswer={3}
+  explanation="넓은 콘텐츠의 스크롤 범위를 해당 영역으로 제한할 수 있습니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="overflow-hidden과 clip의 차이 중 하나는?"
+  options={['이미지 타입', '스크롤 컨테이너 생성 여부', '둘 다 항상 동일', '텍스트 색']}
+  correctAnswer={2}
+  explanation="clip은 hidden과 달리 스크롤 컨테이너를 만들지 않습니다."
+/>
+
+</details>
+
+## 참고 자료
+
+- [Tailwind CSS — object-fit](https://tailwindcss.com/docs/object-fit)
+- [Tailwind CSS — table-layout](https://tailwindcss.com/docs/table-layout)
+- [Tailwind CSS — overflow](https://tailwindcss.com/docs/overflow)
+- [Tailwind CSS — scroll-snap-type](https://tailwindcss.com/docs/scroll-snap-type)

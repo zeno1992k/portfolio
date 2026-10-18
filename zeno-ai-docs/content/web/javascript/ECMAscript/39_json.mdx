@@ -3,9 +3,14 @@ title: '39. JSON'
 description: 'JSON 표기법, JSON.stringify와 JSON.parse의 변환 규칙, replacer·reviver·toJSON, 직렬화 한계, ES2026 JSON.rawJSON, structuredClone과의 차이, 보안 주의점을 정리합니다.'
 ---
 
-<Callout type="info">
-  **이번 문서의 목표:** JSON의 문법과 JSON.stringify·JSON.parse의 변환 규칙을 설명하고, 직렬화에서 값이 사라지거나 에러가 나는 경우를 예측하며, structuredClone과 구분해 쓸 수 있습니다.
-</Callout>
+## 핵심 먼저 보기
+
+- JSON은 객체, 배열, 문자열, 숫자, `true`·`false`, `null`의 6종만 표현하는 텍스트 형식입니다. 키와 문자열은 큰따옴표만 쓰고 주석과 후행 쉼표는 금지입니다.
+- `JSON.stringify`는 own 열거 가능 프로퍼티만 직렬화합니다. undefined·함수·Symbol은 객체에서 생략되고 배열에서 `null`이 되며, NaN·Infinity는 `null`, BigInt와 순환 참조는 TypeError입니다.
+- 값의 처리 순서는 `toJSON`, replacer 함수, 타입별 변환입니다. `JSON.parse`의 reviver는 자식부터 호출되고 undefined를 반환하면 삭제합니다.
+- ES2026의 `context.source`와 `JSON.rawJSON`으로 큰 정수와 숫자 표기를 정밀도 손실 없이 왕복할 수 있습니다.
+- 메모리 안 깊은 복사는 `structuredClone`(Date·Map·순환 유지, 함수는 DataCloneError)이고, 텍스트 저장과 전송은 JSON입니다.
+- `eval`로 JSON을 파싱하지 않고, 파싱 결과를 재귀 병합할 때는 `__proto__`·`constructor`·`prototype` 키를 거부합니다.
 
 ## 개념과 표기법
 
@@ -17,13 +22,6 @@ const obj = { name: 'Kim', age: 30 }   // JavaScript 객체
 typeof text // 'string'
 ```
 
-- 직렬화(serialization): 메모리의 값을 텍스트로 바꾸는 일. `JSON.stringify`가 맡습니다.
-- 역직렬화(deserialization): 텍스트를 값으로 되돌리는 일. `JSON.parse`가 맡습니다.
-- 용도: 서버와 클라이언트 사이의 데이터 교환, 설정 파일(`package.json`), 문자열만 저장하는 `localStorage` 같은 저장소.
-- 확장자는 `.json`, MIME 타입은 `application/json`입니다. 시스템 사이에서 교환하는 JSON 텍스트는 UTF-8로 인코딩해야 합니다(RFC 8259).
-
-### JSON이 표현하는 값
-
 | JSON 값 | 표기 | JavaScript 대응 |
 |---------|------|-----------------|
 | 객체 | `{"a":1}` | 일반 객체 |
@@ -32,43 +30,6 @@ typeof text // 'string'
 | 숫자 | `1`, `-1.5`, `1e3` | number |
 | 불리언 | `true`, `false` | boolean |
 | null | `null` | null |
-
-이 6종 밖의 값(undefined, 함수, Symbol, BigInt, Date, Map 등)은 JSON에 표기법이 없습니다. 최상위 값은 객체나 배열이 아니어도 됩니다. `JSON.parse('5')`는 `5`를 반환합니다.
-
-### JSON과 객체 리터럴의 차이
-
-| 항목 | JSON | JavaScript 객체 리터럴 |
-|------|------|------------------------|
-| 키 | 큰따옴표 문자열만 | 식별자, 문자열, 숫자, 계산된 키 |
-| 문자열 | 큰따옴표만 | 작은따옴표, 큰따옴표, 백틱 |
-| 후행 쉼표 | 금지 | 허용 |
-| 주석 | 금지 | 허용 |
-| 값 | 위 6종만 | 함수, undefined 등 모든 값 |
-| 숫자 | 10진수만 | `0x10`, `1_000`, `.5`, `NaN` 등 허용 |
-
-문법 세부 규칙은 다음과 같습니다.
-
-- 숫자: 선택적 `-`, 정수부(`0` 또는 `1`–`9`로 시작), 선택적 소수부(`.` 뒤에 숫자 1개 이상), 선택적 지수부(`e`·`E` 뒤에 선택적 부호와 숫자). `01`, `+1`, `.5`, `1.`, `NaN`, `Infinity`는 모두 문법 위반입니다.
-- 문자열 이스케이프: `\"` `\\` `\/` `\b` `\f` `\n` `\r` `\t` `\uXXXX`만 허용합니다. U+0000–U+001F 제어 문자(탭, 줄 바꿈 포함)는 문자열 안에 그대로 쓸 수 없고 이스케이프해야 합니다.
-- 공백: 스페이스, 탭(`\t`), `\n`, `\r` 네 가지만 인정합니다. NBSP 같은 다른 공백은 오류입니다.
-- 같은 키가 중복되어도 `JSON.parse`는 마지막 값을 채택합니다. `{"a":1,"a":2}`는 `{ a: 2 }`입니다.
-- ES2019에서 U+2028·U+2029를 문자열 리터럴 안에 쓸 수 있게 되어(JSON superset), JSON 텍스트는 ECMAScript 문법의 부분집합이 되었습니다. 그렇다고 `eval`로 파싱해도 된다는 뜻은 아닙니다(아래 보안 절).
-
-### JSON 객체
-
-`JSON`은 메서드를 담은 전역 객체입니다. 함수도 생성자도 아니며 ES5에서 추가되었습니다.
-
-```js
-JSON()     // TypeError: JSON is not a function
-new JSON() // TypeError: JSON is not a constructor
-```
-
-| 메서드 | 역할 |
-|--------|------|
-| `JSON.stringify` | 값을 JSON 텍스트로 |
-| `JSON.parse` | JSON 텍스트를 값으로 |
-| `JSON.rawJSON` (ES2026) | `stringify`가 원문 그대로 출력할 값을 생성 |
-| `JSON.isRawJSON` (ES2026) | `rawJSON`이 만든 객체인지 판별 |
 
 ## JSON.stringify
 
@@ -81,50 +42,9 @@ JSON.stringify('hi') // '"hi"' (따옴표가 포함된 문자열)
 JSON.stringify(5)    // '5'
 ```
 
-직렬화 대상과 순서 규칙은 다음과 같습니다.
-
 - 객체에서는 자신의(own) 열거 가능한 문자열 키 프로퍼티만 직렬화합니다. 상속된 프로퍼티, 비열거 프로퍼티, Symbol 키는 제외됩니다(자세히는 18편).
 - 접근자 프로퍼티는 getter를 호출해 반환값을 직렬화합니다. getter가 던진 에러는 그대로 전파됩니다.
 - 키 순서는 정수 형태의 키가 오름차순으로 먼저 오고, 나머지는 생성 순서입니다(자세히는 09편).
-
-```js
-JSON.stringify({ b: 1, 2: 'x', a: 2, 1: 'y' })
-// '{"1":"y","2":"x","b":1,"a":2}'
-```
-
-값 하나는 다음 순서로 처리됩니다.
-
-1. 객체 또는 BigInt이면 `toJSON`을 호출합니다(아래 toJSON 절).
-2. replacer 함수가 있으면 호출합니다.
-3. Number·String·Boolean 래퍼 객체를 원시 값으로 풉니다(자세히는 20편).
-4. 타입에 따라 텍스트로 바꿉니다(아래 결과표).
-
-최상위 값이 undefined·함수·Symbol이면 `'undefined'` 문자열이 아니라 `undefined` 값 자체를 반환합니다.
-
-```js
-JSON.stringify(undefined) // undefined (문자열이 아님)
-JSON.parse(JSON.stringify(undefined)) // SyntaxError
-```
-
-문자열과 숫자의 출력 규칙은 다음과 같습니다.
-
-- 문자열: `"`와 `\`는 이스케이프하고, 제어 문자는 `\b \f \n \r \t` 또는 `\u00XX`로 출력합니다. 한글, 이모지, U+2028은 이스케이프하지 않습니다.
-- 짝이 없는 서로게이트(U+D800–U+DFFF)는 `\udXXX` 형태로 이스케이프합니다(ES2019 Well-formed JSON.stringify). 잘못된 UTF-16이 출력되지 않게 하는 규칙입니다.
-- 숫자: 유한한 수만 Number의 문자열 변환 규칙으로 출력합니다. `-0`은 `0`이 됩니다.
-
-```js
-console.log(JSON.stringify('a"b\n'))   // "a\"b\n"
-console.log(JSON.stringify('\ud800'))  // "\ud800"
-JSON.stringify([0.1 + 0.2, 1e21, 5e-7, -0])
-// '[0.30000000000000004,1e+21,5e-7,0]'
-```
-
-이미 직렬화한 문자열을 다시 `stringify`하면 따옴표가 이중으로 붙습니다.
-
-```js
-const once = JSON.stringify({ a: 1 })   // '{"a":1}'
-console.log(JSON.stringify(once))       // "{\"a\":1}"
-```
 
 ## 타입별 직렬화 결과표
 
@@ -136,105 +56,9 @@ undefined·함수·Symbol 값은 위치에 따라 결과가 다릅니다.
 | 함수 | 프로퍼티 생략 | `null` | `undefined` 반환 |
 | Symbol 값 | 프로퍼티 생략 | `null` | `undefined` 반환 |
 
-```js
-JSON.stringify({ a: undefined, b: () => 1, c: [undefined] })
-// '{"c":[null]}'
-```
-
-아래 값은 위치와 무관하게 같은 결과입니다.
-
-| 값 | 결과 |
-|----|------|
-| `NaN`, `Infinity`, `-Infinity` | `null` |
-| `-0` | `0` |
-| `true`, `false`, `null` | 그대로 |
-| BigInt | TypeError |
-| Number·String·Boolean 래퍼 객체 | 원시 값 |
-| BigInt 래퍼 객체 | TypeError |
-| Date | ISO 8601 문자열(`toJSON`) |
-| 유효하지 않은 Date | `null` |
-| Map, Set, WeakMap, WeakSet | `{}` |
-| RegExp | `{}` |
-| Error | 자신의 열거 가능 프로퍼티만. `message`는 비열거라 보통 `{}` |
-| TypedArray | 인덱스를 키로 쓴 객체 `{"0":1,"1":2}` |
-| 희소 배열의 빈 칸 | `null` |
-| 클래스 인스턴스 | 자신의 열거 가능 프로퍼티만 담은 일반 객체 |
-| Symbol 키 프로퍼티 | 생략 |
-
-클래스 인스턴스의 메서드와 접근자는 프로토타입에 있으므로 출력되지 않고, 클래스 이름도 남지 않습니다.
-
 ## replacer와 들여쓰기
 
-### replacer 배열
-
 두 번째 인수가 배열이면 출력할 키의 허용 목록으로 쓰입니다.
-
-```js
-const user = {
-  id: 1, name: 'Kim', pw: 'x', addr: { city: 'Seoul' },
-}
-JSON.stringify(user, ['id', 'name'])
-// '{"id":1,"name":"Kim"}'
-JSON.stringify(user, ['id', 'addr', 'city'])
-// '{"id":1,"addr":{"city":"Seoul"}}'
-```
-
-- 허용 목록은 중첩된 모든 깊이에 적용됩니다. `addr` 안의 `city`도 목록에 있어야 출력됩니다.
-- 출력 순서는 객체의 키 순서가 아니라 배열 순서입니다. `JSON.stringify({ a: 1, b: 2 }, ['b', 'a'])`는 `'{"b":2,"a":1}'`입니다.
-- 원소는 문자열과 숫자(String·Number 객체 포함)만 유효합니다. 숫자는 문자열로 바뀌어 키와 비교되고, 중복은 무시됩니다. 다른 타입은 무시됩니다.
-- 배열 요소 자체는 걸러지지 않습니다. 배열 안 객체의 프로퍼티만 목록으로 걸러집니다.
-
-허용 목록 방식은 출력할 키를 명시하므로 비밀번호 같은 값이 실수로 섞이는 것을 막습니다.
-
-### replacer 함수
-
-두 번째 인수가 함수이면 모든 값에 대해 `(key, value)`로 호출되고, 반환값이 직렬화됩니다. 함수도 배열도 아닌 값(`null` 포함)은 무시되므로, space만 지정할 때 `null`을 넘깁니다.
-
-```js
-const hide = (k, v) => (k === 'pw' ? undefined : v)
-JSON.stringify(user, hide)
-// '{"id":1,"name":"Kim","addr":{"city":"Seoul"}}'
-```
-
-- 첫 호출의 key는 빈 문자열 `''`, value는 최상위 값이며 `this`는 `{ '': 최상위값 }`입니다. 이후 부모, 자식 순서(위에서 아래)로 호출됩니다.
-
-```js
-const calls = []
-const track = (k, v) => (calls.push(k), v)
-JSON.stringify({ a: 1, b: { c: 2 } }, track)
-calls // ['', 'a', 'b', 'c']
-```
-
-- `this`는 현재 값을 가진 객체입니다. 화살표 함수는 자기 `this`가 없으므로 `this`가 필요하면 일반 함수로 작성합니다.
-- 배열 요소의 key는 인덱스 문자열(`'0'`, `'1'`)입니다.
-- `value`는 `toJSON`을 거친 뒤의 값입니다. 원본은 `this[key]`로 읽습니다. Date는 `value`가 문자열이고 `this[key]`가 Date 객체입니다.
-- 반환값 처리: 원시 값은 그대로 직렬화하고, 객체·배열은 내용을 다시 순회하며(자식마다 replacer 재호출), undefined·함수·Symbol은 객체에서 생략하고 배열에서는 `null`로 바꿉니다. 최상위(key `''`)에서 undefined를 반환하면 `stringify`의 결과가 undefined입니다.
-- key 이름만 비교하면 모든 깊이의 같은 이름 프로퍼티에 적용됩니다.
-
-Map처럼 기본으로는 `{}`가 되는 값을 변환하는 데 씁니다.
-
-```js
-JSON.stringify(
-  { m: new Map([['a', 1]]) },
-  (k, v) => (v instanceof Map ? Object.fromEntries(v) : v)
-)
-// '{"m":{"a":1}}'
-```
-
-### space 들여쓰기
-
-세 번째 인수는 출력에 줄 바꿈과 들여쓰기를 넣습니다.
-
-```js
-JSON.stringify({ a: 1, b: [1, 2] }, null, 2)
-// {
-//   "a": 1,
-//   "b": [
-//     1,
-//     2
-//   ]
-// }
-```
 
 | space 값 | 결과 |
 |----------|------|
@@ -245,98 +69,13 @@ JSON.stringify({ a: 1, b: [1, 2] }, null, 2)
 | 문자열 | 앞 10글자를 들여쓰기 단위로 사용(`'\t'`, `'--'`) |
 | 빈 문자열 | 들여쓰기 없음 |
 
-- Number·String 객체도 같은 규칙으로 쓰입니다.
-- 들여쓰기가 있으면 `:` 뒤에 공백이 한 칸 추가됩니다. 빈 배열과 빈 객체는 `[]`, `{}` 그대로 출력됩니다.
-- 공백만큼 텍스트가 커지므로 네트워크 전송용에는 생략합니다.
-
 ## toJSON
 
 값에 `toJSON(key)` 메서드가 있으면, `stringify`는 그 값 대신 `toJSON`이 돌려준 값을 직렬화합니다. 직렬화 방식을 객체 스스로 정하는 훅입니다.
 
-```js
-class Money {
-  constructor(n) { this.n = n }
-  toJSON() { return this.n + 'won' }
-}
-JSON.stringify({ price: new Money(5) })
-// '{"price":"5won"}'
-```
-
-- 호출 대상은 객체와 BigInt 값입니다. 프로토타입 체인에서 찾으므로 상속된 `toJSON`도 호출됩니다.
-- 인수 `key`는 부모 안에서의 프로퍼티 이름입니다. 배열 요소는 인덱스 문자열, 최상위는 `''`입니다. `this`는 값 자신입니다.
-
-```js
-JSON.stringify({ x: { toJSON: (k) => 'key=' + k } })
-// '{"x":"key=x"}'
-```
-
-- 호출 순서는 `toJSON`이 먼저, replacer 함수가 나중입니다. replacer가 받는 `value`는 이미 `toJSON`을 거친 값입니다.
-- `toJSON`이 undefined를 반환하면 프로퍼티는 생략되고 배열 요소는 `null`이 됩니다.
-- 반환한 객체에 또 `toJSON`이 있어도 다시 호출하지 않습니다. 함수 프로퍼티이므로 출력에서 생략됩니다.
-- 내장 구현으로 `Date.prototype.toJSON`이 있습니다. `toISOString()` 결과를 반환하고, 유효하지 않은 Date는 `null`을 반환합니다(자세히는 31편).
-- `this`가 필요하면 화살표 함수가 아닌 메서드로 정의합니다.
-- `toJSON`은 직렬화 방향만 정합니다. 되돌리는 쪽은 reviver나 `fromJSON` 같은 정적 메서드가 맡습니다.
-- ES2026의 `JSON.rawJSON` 객체를 반환하면 원문 그대로 출력됩니다(아래 절).
-
 ## 순환 참조와 BigInt 에러
 
-### 순환 참조
-
 순환 참조는 객체가 자기 자신을 직접 또는 간접으로 가리키는 구조입니다. `stringify`는 직렬화 중인 객체를 다시 만나면 TypeError를 던집니다.
-
-```js
-const a = { name: 'a' }
-a.self = a
-JSON.stringify(a)
-// TypeError: Converting circular structure to JSON
-```
-
-- 에러 메시지 문구는 엔진마다 다릅니다(위는 V8). `instanceof TypeError`로 판별합니다.
-- 순환이 생기는 전형: 부모와 자식이 서로 참조하는 트리, 양방향 연결 그래프, DOM 노드.
-- 같은 객체를 여러 곳에서 참조하는 것은 순환이 아닙니다. 에러는 나지 않고 참조된 위치마다 내용이 중복 출력됩니다.
-
-```js
-const s = { v: 1 }
-JSON.stringify({ x: s, y: s })
-// '{"x":{"v":1},"y":{"v":1}}'
-```
-
-해결 방법은 두 가지입니다.
-
-첫째, 역참조 프로퍼티를 replacer로 제외합니다.
-
-```js
-const root = { n: 'r', kids: [] }
-const kid = { n: 'k', parent: root }
-root.kids.push(kid)
-const skip = (k, v) => (k === 'parent' ? undefined : v)
-JSON.stringify(root, skip) // '{"n":"r","kids":[{"n":"k"}]}'
-```
-
-둘째, 이미 본 객체를 `WeakSet`에 기록해 두 번째 등장부터 제거합니다.
-
-```js
-const seen = new WeakSet()
-const dropSeen = (k, v) => {
-  if (typeof v !== 'object' || v === null) return v
-  if (seen.has(v)) return undefined
-  seen.add(v)
-  return v
-}
-```
-
-이 방식은 순환이 아닌 공유 참조도 두 번째부터 지웁니다. 위 `{ x: s, y: s }`에 적용하면 `y`가 사라집니다. `seen`은 `stringify` 호출마다 새로 만들어야 합니다. 메모리 안에서 순환 구조를 그대로 복제하려면 `structuredClone`을 씁니다(아래 절).
-
-### BigInt
-
-BigInt는 임의 정밀도 정수 타입입니다(자세히는 30편). JSON 숫자 표기에는 크기 제한이 없지만, `stringify`는 BigInt를 직렬화하지 않고 TypeError를 던집니다.
-
-```js
-JSON.stringify({ id: 10n })
-// TypeError: Do not know how to serialize a BigInt
-```
-
-BigInt 래퍼 객체(`Object(10n)`)도 같은 에러입니다. 메시지 문구는 엔진마다 다릅니다.
 
 | 해결 방법 | 출력 | 복원 |
 |-----------|------|------|
@@ -344,37 +83,9 @@ BigInt 래퍼 객체(`Object(10n)`)도 같은 에러입니다. 메시지 문구�
 | `JSON.rawJSON` (ES2026) | `10` (숫자) | reviver의 `context.source` |
 | `BigInt.prototype.toJSON` 추가 | `"10"` | reviver에서 `BigInt(v)` |
 
-```js
-JSON.stringify({ id: 10n }, (k, v) =>
-  typeof v === 'bigint' ? v.toString() : v)
-// '{"id":"10"}'
-```
-
-`BigInt.prototype.toJSON`을 추가하는 방법은 내장 프로토타입을 수정하여 모든 코드에 영향을 주므로 권장하지 않습니다. 복원은 아래 reviver 절에서 다룹니다.
-
 ## 직렬화 한계
 
 JSON은 6종 값만 표현하므로 `stringify`와 `parse`를 왕복해도 원래 값이 복원되지 않는 경우가 많습니다.
-
-```js
-const src = {
-  d: new Date(0), u: undefined, n: NaN, m: new Map(),
-}
-JSON.parse(JSON.stringify(src))
-// { d: '1970-01-01T00:00:00.000Z', n: null, m: {} }
-```
-
-- 타입 정보 소실: Date는 문자열이 되고, Map·Set·RegExp는 `{}`가 되며, TypedArray는 인덱스 키 객체가 됩니다.
-- 프로토타입과 메서드 소실: 클래스 인스턴스는 일반 객체로 돌아옵니다.
-- 프로퍼티 어트리뷰트 소실: 접근자는 값으로 평탄화되고, 비열거 프로퍼티와 Symbol 키는 빠집니다(자세히는 14편).
-- 값 변형: undefined는 사라지거나 `null`이 되고, NaN·Infinity는 `null`, `-0`은 `0`, 희소 배열의 빈 칸은 `null`이 됩니다.
-- 구조 소실: 공유 참조는 별개의 객체로 복제되고, 순환 참조는 에러입니다.
-- 정밀도: `parse`는 모든 숫자를 double로 읽으므로 `9007199254740993`은 `9007199254740992`가 됩니다. `1.10`처럼 숫자의 표기는 보존되지 않아 `1.1`로 돌아옵니다.
-- 키 순서: 정수 형태의 키가 앞으로 이동합니다.
-- Error: `message`와 `stack`이 출력되지 않으므로 필요한 값을 `{ name: e.name, message: e.message }`처럼 직접 옮깁니다.
-- 동기 처리: 큰 문서를 `stringify`·`parse`하는 동안 스레드가 멈춥니다.
-
-타입별로 직접 처리하는 방법은 다음과 같습니다.
 
 | 값 | 직렬화 | 복원 |
 |----|--------|------|
@@ -384,51 +95,12 @@ JSON.parse(JSON.stringify(src))
 | 클래스 인스턴스 | `toJSON` | 정적 `fromJSON` |
 | BigInt | 문자열 또는 `rawJSON` | `BigInt(v)` 또는 `context.source` |
 
-```js
-const m = new Map([['a', 1]])
-const text = JSON.stringify([...m]) // '[["a",1]]'
-new Map(JSON.parse(text))           // Map(1) { 'a' => 1 }
-```
-
-```js
-class Pt {
-  constructor(x, y) { this.x = x; this.y = y }
-  static fromJSON(o) { return new Pt(o.x, o.y) }
-}
-const p = Pt.fromJSON(JSON.parse('{"x":1,"y":2}'))
-p instanceof Pt // true
-```
-
 ## JSON.parse
 
 `JSON.parse(text, reviver)`는 JSON 텍스트를 값으로 바꿉니다. `reviver`는 생략할 수 있습니다(다음 절).
 
-```js
-JSON.parse('{"a":[1,"x",null]}') // { a: [ 1, 'x', null ] }
-JSON.parse('5')                  // 5
-JSON.parse('"hi"')               // 'hi'
-```
-
-- `text`는 문자열로 변환(ToString)된 뒤 파싱됩니다.
-
-```js
-JSON.parse(null)      // null (문자열 'null'로 변환)
-JSON.parse(undefined) // SyntaxError ('undefined'는 JSON이 아님)
-JSON.parse({})        // SyntaxError ('[object Object]')
-```
-
-- 이미 파싱된 객체에 다시 `parse`를 호출하면 `[object Object]` 오류가 납니다. 흔한 실수입니다.
-- 객체와 배열은 항상 새로 만든 일반 객체(프로토타입 `Object.prototype`)와 배열입니다. 숫자는 number(double)입니다.
-- 중복 키는 마지막 값이 남습니다.
-- 숫자 정밀도: 범위를 넘는 정수는 반올림되고, 너무 큰 지수는 `Infinity`가 됩니다. `-0`은 `-0`으로 읽힙니다.
-
-```js
-JSON.parse('9007199254740993') // 9007199254740992
-JSON.parse('1e400')            // Infinity
-JSON.parse('-0')               // -0
-```
-
-문법 위반은 모두 SyntaxError입니다.
+<details>
+<summary>전체 비교표 펼치기</summary>
 
 | 입력 텍스트 | 오류 이유 |
 |-------------|-----------|
@@ -444,147 +116,22 @@ JSON.parse('-0')               // -0
 | 앞뒤의 NBSP | 공백으로 인정되지 않음 |
 | `{"a":1}{` | JSON 뒤에 남은 문자 |
 
-에러 메시지와 위치 표기는 엔진마다 다르므로 문구가 아니라 `SyntaxError` 타입으로 판별합니다. 신뢰할 수 없는 텍스트는 `try...catch`로 감쌉니다(자세히는 44편).
-
-```js
-function parseOr(text, fallback) {
-  try { return JSON.parse(text) } catch { return fallback }
-}
-parseOr('{oops', {}) // {}
-```
+</details>
 
 ## reviver
 
 reviver는 `JSON.parse`의 두 번째 인수로 넘기는 함수입니다. 파싱이 끝난 각 값을 후처리해 변환하거나 삭제합니다.
 
-```js
-const text = '{"a":1,"b":2}'
-const x10 = (k, v) => (typeof v === 'number' ? v * 10 : v)
-JSON.parse(text, x10)
-// { a: 10, b: 20 }
-```
-
-- 인수는 `(key, value, context)`이고 `this`는 현재 값을 가진 객체입니다. `context`는 ES2026에서 추가되었습니다(다음 절).
-- key는 항상 문자열입니다. 배열 인덱스도 `'0'`처럼 문자열이며, 루트의 key는 `''`입니다.
-- 호출 순서는 깊이 우선으로 자식이 먼저, 부모가 나중이고 루트가 맨 마지막입니다. replacer가 부모부터 호출되는 것과 반대입니다.
-
-```js
-const order = []
-JSON.parse('{"a":1,"b":[2,3],"c":{"d":4}}',
-  (k, v) => (order.push(k), v))
-order // ['a', '0', '1', 'b', 'd', 'c', '']
-```
-
-- 반환값이 그대로면 유지하고, 다른 값이면 교체하고, undefined이면 그 프로퍼티를 삭제합니다. 배열 요소를 삭제하면 빈 칸이 생깁니다. 루트에서 반환한 값이 `parse`의 최종 결과이며 undefined도 그대로 반환됩니다.
-
-```js
-const dropA = (k, v) => (k === 'a' ? undefined : v)
-JSON.parse('{"a":1,"b":2}', dropA) // { b: 2 }
-JSON.parse('[1,2,3]', (k, v) => (v === 2 ? undefined : v))
-// [ 1, <1 empty item>, 3 ]
-```
-
-- reviver는 파싱이 모두 끝난 뒤에 실행됩니다. 잘못된 JSON은 reviver가 호출되기 전에 SyntaxError가 납니다. reviver 안에서 던진 에러는 그대로 전파됩니다.
-
-대표적인 용도는 날짜 문자열을 Date로 되돌리는 것입니다.
-
-```js
-const json = '{"at":"2020-01-02T03:04:05.000Z"}'
-JSON.parse(json, (k, v) => (k === 'at' ? new Date(v) : v))
-// { at: 2020-01-02T03:04:05.000Z } (at은 Date 객체)
-```
-
-값의 모양(ISO 문자열 정규식)만으로 변환하면 원래 문자열이던 값까지 Date가 됩니다. 키 이름이나 위치로 대상을 한정합니다. reviver는 이미 Number로 변환된 값을 받으므로, 큰 정수의 정밀도 손실은 reviver의 `value`로는 복구할 수 없습니다. 이 문제는 다음 절의 `context.source`가 해결합니다.
-
 ## reviver의 소스 텍스트 접근과 JSON.rawJSON
 
 ES2026은 reviver의 세 번째 인수(`context`)와 `JSON.rawJSON`, `JSON.isRawJSON`을 추가했습니다. TC39는 이 제안(JSON.parse source text access)을 2025년 11월에 4단계로 올렸고 ES2026 명세에 포함되었습니다.
-
-### context.source
-
-원시 값(문자열, 숫자, `true`·`false`, `null`)에 대해서는 JSON 텍스트에서 그 값을 만든 원문이 `context.source`에 문자열로 담깁니다.
-
-```js
-JSON.parse('[1.50, 1e2, "x", null]', (k, v, ctx) => {
-  if (k !== '') console.log(v, ctx.source)
-  return v
-})
-// 1.5 1.50
-// 100 1e2
-// x "x"
-// null null
-```
-
-- 객체와 배열은 `context`가 빈 객체 `{}`입니다.
-- `source`는 원문 그대로입니다. 문자열은 따옴표와 이스케이프를 포함하고, 숫자는 `1.50`, `1e2`처럼 쓴 표기를 유지합니다.
-- 값이 파싱 직후 그대로일 때만 제공됩니다. reviver가 앞서 `this[key]`를 바꿔 값이 달라졌다면 `{}`이고, 값이 바뀐 객체 안쪽의 값들도 `source`를 받지 못합니다.
-- 용도는 큰 정수를 정밀도 손실 없이 BigInt로 읽는 것과 숫자 표기의 보존입니다.
-
-```js
-const text = '{"id":12345678901234567890,"n":5}'
-JSON.parse(text, (k, v, { source }) =>
-  k === 'id' ? BigInt(source) : v)
-// { id: 12345678901234567890n, n: 5 }
-```
-
-흔한 실수가 두 가지 있습니다. 키를 한정하지 않고 모든 숫자에 `BigInt(source)`를 쓰면 `1.5` 같은 값에서 SyntaxError가 납니다(`BigInt('1.5')`). 또 세 번째 인수를 지원하지 않는 구형 환경에서는 `context`가 undefined이므로 `{ source }` 구조 분해가 TypeError를 냅니다.
-
-### JSON.rawJSON
-
-`JSON.rawJSON(text)`는 문자열·숫자·`true`·`false`·`null`의 JSON 텍스트를 받아, `stringify`가 변환 없이 그대로 출력하는 객체를 만듭니다.
-
-```js
-const big = JSON.rawJSON('12345678901234567890')
-JSON.stringify({ id: big }) // '{"id":12345678901234567890}'
-JSON.stringify({ id: 12345678901234567890 })
-// '{"id":12345678901234567000}' (Number는 정밀도 손실)
-```
-
-- 반환값은 `null` 프로토타입의 동결된 객체이며, 원문을 담은 `rawJSON` 프로퍼티 하나를 가집니다.
-
-```js
-big.rawJSON // '12345678901234567890'
-```
-
-- 인수는 문자열로 변환됩니다. `JSON.rawJSON(10)`은 `'10'`과 같습니다.
-- 다음은 SyntaxError입니다: 빈 문자열, 객체·배열 텍스트(`'{}'`, `'[1]'`), 앞뒤 공백(`' 1'`, `'1 '`), JSON이 아닌 텍스트(`'abc'`, `'.5'`). 객체나 배열 조각을 끼워 넣는 용도로는 쓸 수 없습니다.
-- 문자열은 따옴표까지 포함해 넘깁니다. `JSON.rawJSON('"x"')`는 `"x"`로 출력됩니다.
-- `JSON.isRawJSON(v)`는 `rawJSON`이 만든 객체인지 판별합니다. 모양만 흉내 낸 객체는 `false`입니다.
-
-```js
-JSON.isRawJSON(big)              // true
-JSON.isRawJSON({ rawJSON: '1' }) // false
-```
-
-- `toJSON`이나 replacer가 `rawJSON` 객체를 반환해도 원문 그대로 출력됩니다.
-- `JSON.rawJSON('1.50')`은 `1.50`을 그대로 출력합니다. 일반 숫자 `1.5`로는 만들 수 없는 표기입니다.
-
-BigInt를 왕복하는 조합은 다음과 같습니다.
-
-```js
-const data = { id: 12345678901234567890n }
-const text = JSON.stringify(data, (k, v) =>
-  typeof v === 'bigint' ? JSON.rawJSON(String(v)) : v)
-// '{"id":12345678901234567890}'
-JSON.parse(text, (k, v, { source }) =>
-  k === 'id' ? BigInt(source) : v)
-// { id: 12345678901234567890n }
-```
-
-MDN은 `JSON.rawJSON`을 2025년 3월부터 최신 주요 브라우저 전체에서 쓸 수 있는 Baseline 2025로 분류합니다. 구형 환경을 지원해야 하면 `typeof JSON.rawJSON === 'function'`으로 확인합니다.
 
 ## structuredClone과 비교
 
 `structuredClone(value)`는 값을 깊은 복사하는 전역 함수입니다. 구조화된 복제 알고리즘(structured clone algorithm)을 사용하며, ECMAScript가 아니라 HTML 표준이 정의한 호스트 API입니다(자세히는 01편). MDN은 2022년 3월부터 모든 주요 브라우저에서 쓸 수 있다고 표시합니다.
 
-```js
-const src = { d: new Date(0), m: new Map([[1, 2]]) }
-src.self = src
-const copy = structuredClone(src)
-copy.d instanceof Date // true
-copy.m instanceof Map  // true
-copy.self === copy     // true (순환 유지)
-```
+<details>
+<summary>전체 비교표 펼치기</summary>
 
 | 항목 | JSON 왕복 | structuredClone |
 |------|-----------|-----------------|
@@ -606,127 +153,23 @@ copy.self === copy     // true (순환 유지)
 | 결과 | 문자열 | 값(문자열이 아님) |
 | 변환 규칙 지정 | `toJSON`, replacer, reviver | 불가능 |
 
-- 복제할 수 없는 값이 하나라도 있으면 `DataCloneError`(DOMException)가 납니다. 함수 프로퍼티나 메서드 축약으로 쓴 메서드를 가진 객체 리터럴이 대표적입니다. JSON은 같은 값을 조용히 생략합니다.
-- 프로토타입 체인은 복제되지 않습니다. 클래스 인스턴스를 복제하면 데이터는 남지만 메서드는 사라집니다.
-
-```js
-class K { x = 1; m() {} }
-const c = structuredClone(new K())
-c instanceof K // false
-c.x            // 1
-c.m            // undefined
-```
-
-- 두 번째 인수 `{ transfer }`는 ArrayBuffer 같은 전송 가능 객체의 소유권을 복사 없이 옮깁니다. 원본은 분리됩니다.
-
-```js
-const buf = new ArrayBuffer(8)
-const moved = structuredClone(buf, { transfer: [buf] })
-buf.byteLength   // 0 (원본은 분리됨)
-moved.byteLength // 8
-```
-
-선택 기준은 다음과 같습니다.
-
-- 메모리 안에서 복제만 필요하면 `structuredClone`입니다.
-- 텍스트로 저장하거나 전송해야 하면 JSON입니다. `structuredClone`은 문자열을 만들지 않습니다.
-- 변환 규칙을 직접 정해야 하면 JSON입니다(`toJSON`, replacer, reviver).
-- 함수나 프로토타입을 보존해야 하면 둘 다 맞지 않습니다. 직접 복사 코드를 작성합니다. 얕은 복사는 스프레드로 충분합니다(자세히는 36편).
-
-`JSON.parse(JSON.stringify(obj))`로 깊은 복사를 하는 관행은 Date가 문자열이 되고 Map·undefined가 사라지는 버그의 흔한 원인입니다.
+</details>
 
 ## 보안 주의점
 
-### eval로 JSON을 파싱하지 않기
-
-JSON.parse가 없던 ES5 이전에는 `eval`로 JSON을 읽는 관행이 있었습니다. `eval`은 텍스트를 코드로 실행하므로 입력 속 코드가 그대로 실행됩니다(자세히는 20편).
-
-```js
-const text = '{"a": console.log("RUN")}'
-eval('(' + text + ')') // RUN 출력 (입력 속 코드가 실행됨)
-JSON.parse(text)       // SyntaxError (실행되지 않음)
-```
-
-`JSON.parse`는 데이터만 해석하는 전용 파서라 코드를 실행하지 않습니다. 문자열을 코드로 실행하는 `new Function`도 같은 위험이 있습니다. ES2019 이후 JSON이 문법상 ECMAScript의 부분집합이 되었어도, 입력이 JSON이라는 보장이 없으므로 `eval`은 여전히 금지입니다.
-
-### 프로토타입 오염
-
-프로토타입 오염은 공격자가 `Object.prototype`에 프로퍼티를 심어 모든 객체가 그 값을 상속하게 만드는 공격입니다(자세히는 17편).
-
-`JSON.parse` 자체는 안전합니다. `__proto__` 키를 프로토타입 설정이 아니라 평범한 own 프로퍼티로 만듭니다(객체 리터럴의 `__proto__` 키와 다른 점, 자세히는 09편).
-
-```js
-const o = JSON.parse('{"__proto__":{"admin":true}}')
-o.admin                       // undefined
-Object.hasOwn(o, '__proto__') // true
-```
-
-위험은 파싱 결과를 다른 객체에 합치는 코드에서 생깁니다.
-
-```js
-function merge(t, s) {
-  for (const k in s) {
-    if (typeof s[k] === 'object' && s[k] !== null) {
-      t[k] = t[k] || {} // t.__proto__는 Object.prototype
-      merge(t[k], s[k])
-    } else t[k] = s[k]
-  }
-  return t
-}
-merge({}, JSON.parse('{"__proto__":{"admin":true}}'))
-console.log({}.admin) // true (모든 객체가 오염됨)
-```
-
-- `{"constructor":{"prototype":{"admin":true}}}` 입력도 같은 경로로 오염시킵니다.
-- `Object.assign({}, parsed)`는 대상의 `__proto__` setter를 호출해 그 객체 하나의 프로토타입을 바꿉니다. 전역 `Object.prototype`은 바뀌지 않습니다.
-- `{ ...parsed }`는 `__proto__`를 own 프로퍼티로 복사하므로 프로토타입이 바뀌지 않습니다.
-
-방어 방법은 다음과 같습니다.
-
-- 재귀 병합에서 `__proto__`, `constructor`, `prototype` 키를 거부합니다.
-- reviver로 위험한 키를 제거합니다.
-
-```js
-const banned = ['__proto__', 'constructor', 'prototype']
-const strip = (k, v) => (banned.includes(k) ? undefined : v)
-JSON.parse('{"__proto__":{"a":1},"ok":1}', strip)
-// { ok: 1 }
-```
-
-- 사전 용도의 객체는 `Object.create(null)`이나 `Map`을 씁니다. 프로토타입이 없어 오염 경로가 없습니다(자세히는 17편, 38편).
-- 키가 직접 가진 것인지는 `Object.hasOwn`으로 확인합니다(자세히는 18편).
-- 파싱 결과를 스키마로 검증해 기대한 키만 통과시킵니다.
-
-### 그 밖의 주의점
-
-- 파싱 결과의 타입과 값을 믿지 않습니다. 문자열이어야 할 필드가 객체나 배열일 수 있으므로 사용 전에 검증합니다.
-- `JSON.stringify`는 여는 꺾쇠 문자를 이스케이프하지 않습니다. 결과를 HTML의 `script` 태그 안에 그대로 넣으면 문자열 속 `</script>`로 태그를 닫고 코드를 주입할 수 있습니다. 여는 꺾쇠 문자를 `\u003c`로 치환합니다.
-
-```js
-const s = JSON.stringify({ q: '</script>' })
-console.log(s.replaceAll('<', '\\u003c'))
-// {"q":"\u003c/script>"}
-```
-
-- 객체를 통째로 `stringify`해 로그나 응답에 넣으면 비밀번호와 토큰이 함께 노출됩니다. replacer 배열(허용 목록)로 필요한 키만 출력합니다.
-
-## 핵심 정리
-
-- JSON은 객체, 배열, 문자열, 숫자, `true`·`false`, `null`의 6종만 표현하는 텍스트 형식입니다. 키와 문자열은 큰따옴표만 쓰고 주석과 후행 쉼표는 금지입니다.
-- `JSON.stringify`는 own 열거 가능 프로퍼티만 직렬화합니다. undefined·함수·Symbol은 객체에서 생략되고 배열에서 `null`이 되며, NaN·Infinity는 `null`, BigInt와 순환 참조는 TypeError입니다.
-- 값의 처리 순서는 `toJSON`, replacer 함수, 타입별 변환입니다. `JSON.parse`의 reviver는 자식부터 호출되고 undefined를 반환하면 삭제합니다.
-- ES2026의 `context.source`와 `JSON.rawJSON`으로 큰 정수와 숫자 표기를 정밀도 손실 없이 왕복할 수 있습니다.
-- 메모리 안 깊은 복사는 `structuredClone`(Date·Map·순환 유지, 함수는 DataCloneError)이고, 텍스트 저장과 전송은 JSON입니다.
-- `eval`로 JSON을 파싱하지 않고, 파싱 결과를 재귀 병합할 때는 `__proto__`·`constructor`·`prototype` 키를 거부합니다.
+`JSON.parse`는 `eval`처럼 코드를 실행하지 않습니다. 다만 결과가 신뢰할 수 있는 데이터라는 뜻은 아니므로 구조와 타입을 검증합니다. 외부 객체를 병합할 때는 `__proto__` 등 위험한 키와 프로토타입 오염 가능성을 확인합니다.
 
 ## 마무리 복습
+
+<details>
+<summary>확인 문제 3개 펼치기</summary>
 
 <Quiz
   questionNumber={1}
   question="프로퍼티 a는 undefined, b는 Symbol 값, c는 Infinity, d는 undefined 하나만 담은 배열인 객체를 JSON.stringify하면 결과는?"
   options={['{}', '{"a":null,"c":null,"d":[null]}', '{"c":null,"d":[null]}', '{"c":null,"d":[]}']}
   correctAnswer={3}
-  explanation="객체의 undefined와 Symbol 값 프로퍼티(a, b)는 생략되고, Infinity는 null로 출력되며, 배열 안의 undefined는 null이 됩니다. 따라서 결과는 c가 null이고 d가 null 하나를 담은 배열인 객체입니다. a를 null로 출력하는 것은 배열 요소에만 해당하고, 배열의 요소 수는 줄지 않습니다."
+  explanation="객체의 undefined와 Symbol 값 프로퍼티(a, b)는 생략되고, Infinity는 null로 출력되며, 배열 안의 undefined는 null이 됩니다. 따라서 결과는 c가 null이고 d가 null 하나를 담은 배열인 객체입니다."
 />
 
 <Quiz
@@ -734,7 +177,7 @@ console.log(s.replaceAll('<', '\\u003c'))
   question="JSON 텍스트의 숫자 12345678901234567890을 정밀도 손실 없이 BigInt로 읽는 방법으로 알맞은 것은? (ES2026 기준)"
   options={['JSON.parse의 두 번째 인수로 BigInt 함수를 그대로 넘긴다', 'reviver의 세 번째 인수 context.source를 BigInt로 변환한다', 'replacer 배열에 해당 키 이름을 넣는다', 'JSON.rawJSON으로 텍스트를 파싱한다']}
   correctAnswer={2}
-  explanation="reviver는 이미 Number로 변환된 value를 받으므로 정밀도가 손실된 뒤입니다. 세 번째 인수 context.source에는 JSON 원문이 문자열로 담겨 있어 BigInt(source)로 정확히 변환할 수 있습니다. replacer 배열은 stringify의 키 허용 목록이고, JSON.rawJSON도 stringify에서 원문을 출력하기 위한 도구라서 파싱에는 쓸 수 없습니다."
+  explanation="reviver는 이미 Number로 변환된 value를 받으므로 정밀도가 손실된 뒤입니다. 세 번째 인수 context.source에는 JSON 원문이 문자열로 담겨 있어 BigInt(source)로 정확히 변환할 수 있습니다."
 />
 
 <Quiz
@@ -742,8 +185,10 @@ console.log(s.replaceAll('<', '\\u003c'))
   question="Date, Map, 순환 참조를 포함한 객체를 복제할 때 JSON.parse(JSON.stringify(obj))와 structuredClone(obj)의 차이로 옳은 것은?"
   options={['JSON 방식은 Map을 유지하지만 structuredClone은 Map을 빈 객체로 만든다', '두 방식 모두 순환 참조를 그대로 복제한다', 'structuredClone은 클래스 인스턴스의 프로토타입까지 유지한다', 'structuredClone은 Date·Map·순환 참조를 유지하지만, JSON 방식은 Date를 문자열로, Map을 빈 객체로 바꾸고 순환 참조에서는 TypeError를 낸다']}
   correctAnswer={4}
-  explanation="structuredClone은 Date, Map, 순환 참조를 유지합니다. JSON 방식은 Date를 ISO 문자열로, Map을 빈 객체로 바꾸고 순환 참조에서 TypeError를 던집니다. 첫째 보기는 두 방식이 반대로 서술되었고, 둘째 보기의 JSON 방식은 에러가 나며, 셋째 보기와 달리 structuredClone은 프로토타입 체인을 복제하지 않아 클래스 인스턴스가 일반 객체가 됩니다."
+  explanation="structuredClone은 Date, Map, 순환 참조를 유지합니다. JSON 방식은 Date를 ISO 문자열로, Map을 빈 객체로 바꾸고 순환 참조에서 TypeError를 던집니다."
 />
+
+</details>
 
 ## 참고 자료
 

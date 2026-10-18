@@ -1,0 +1,68 @@
+---
+title: '16. 전환·애니메이션·변형'
+description: 'transition·animation·transform과 동작 줄이기 설정을 구분합니다.'
+---
+
+## 핵심 먼저 보기
+
+- transition은 값이 바뀔 때, animation은 키프레임 흐름에 사용합니다.
+- 필요한 속성만 전환하고 불필요한 움직임은 줄입니다.
+- 사용자의 동작 줄이기 선호를 반영합니다.
+
+## 상태 사이 전환
+
+`transition-colors duration-150 ease-out`은 색 변화를 짧게 전환합니다. `delay-*`는 시작 지연입니다. `transition-all`을 습관적으로 넣으면 크기·레이아웃까지 의도치 않게 움직일 수 있습니다.
+
+```html
+<button class="bg-blue-600 transition-colors duration-150
+  hover:bg-blue-700 motion-reduce:transition-none">
+  저장
+</button>
+```
+
+## 반복 애니메이션
+
+`animate-spin`은 회전, `animate-pulse`는 완만한 투명도 변화에 씁니다. 커스텀 동작은 `@theme`의 `--animate-*`와 `@keyframes`로 정의합니다. `animate-none`으로 동작을 해제할 수 있습니다.
+
+로딩 상태가 길게 유지되면 회전만 보여 주지 말고 상태 설명도 제공합니다. `motion-safe:`는 동작을 줄이지 않는 조건에, `motion-reduce:`는 줄이기 선호에 반응합니다.
+
+## 이동·회전·크기
+
+`translate-x-*`·`rotate-*`·`scale-*`는 화면에서 보이는 변형이며 일반적인 문서 배치 공간을 다시 계산하는 margin과 다릅니다. `origin-*`은 변형 기준점입니다. 여러 transform 효과를 조합할 때는 생성된 CSS와 실제 결과를 확인합니다.
+
+## 마무리 복습
+
+<details>
+<summary>확인 문제 3개 펼치기</summary>
+
+<Quiz
+  questionNumber={1}
+  question="색 변화만 전환하고 싶을 때?"
+  options={['transition-colors', '항상 transition-all', 'animate-spin', 'grid-flow-col']}
+  correctAnswer={1}
+  explanation="전환 속성을 좁히면 의도하지 않은 다른 속성의 전환을 줄입니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="사용자 동작 줄이기 선호에 반응하는 것은?"
+  options={['dark:만', 'md:만', 'group:만', 'motion-reduce:']}
+  correctAnswer={4}
+  explanation="motion-reduce는 prefers-reduced-motion 조건에 반응합니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="translate가 일반적으로 바꾸지 않는 것은?"
+  options={['화면 변형', '요소의 보이는 위치', '원래 문서 흐름의 배치 공간', '시각적 위치']}
+  correctAnswer={3}
+  explanation="transform의 이동은 일반 레이아웃 재배치와 구분됩니다."
+/>
+
+</details>
+
+## 참고 자료
+
+- [Tailwind CSS — transition-property](https://tailwindcss.com/docs/transition-property)
+- [Tailwind CSS — animation](https://tailwindcss.com/docs/animation)
+- [Tailwind CSS — hover-focus-and-other-states](https://tailwindcss.com/docs/hover-focus-and-other-states)

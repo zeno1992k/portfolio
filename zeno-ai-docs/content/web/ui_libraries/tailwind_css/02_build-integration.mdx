@@ -1,0 +1,70 @@
+---
+title: '02. 빌드 연결과 CSS 진입점'
+description: 'Vite·PostCSS·CLI 연결 방식과 v4 CSS 진입점을 구분합니다.'
+---
+
+## 핵심 먼저 보기
+
+- v4의 CSS 진입점은 `@import "tailwindcss";`입니다.
+- 프로젝트가 사용하는 빌드 도구에 맞는 어댑터 하나를 선택합니다.
+- 연결이 끝나도 그 CSS가 실제 페이지에 포함되어야 합니다.
+
+## 도구별 연결 방식
+
+| 환경 | 연결 도구 | 맡는 역할 |
+|---|---|---|
+| Vite | `@tailwindcss/vite` | Vite 빌드에서 CSS 생성 |
+| PostCSS 기반 앱 | `@tailwindcss/postcss` | PostCSS 플러그인으로 처리 |
+| 독립적인 CSS 빌드 | `@tailwindcss/cli` | 입력 CSS를 출력 CSS로 변환 |
+
+새 앱을 만드는 순서를 외우기보다 **CSS 파일 → Tailwind 변환 → 페이지에서 로드**하는 경로를 이해합니다. 같은 CSS를 Vite 플러그인과 PostCSS 플러그인으로 중복 처리할 이유는 없습니다.
+
+## v4 CSS 진입점
+
+```css
+@import "tailwindcss";
+```
+
+Vite는 플러그인 목록에 `tailwindcss()`를 등록하고, PostCSS는 `@tailwindcss/postcss`를 등록합니다. React·Next.js 등 프레임워크에서는 최상위 스타일 파일이 실제로 import되는지도 확인합니다. 이 문서의 코드 조각은 역할 설명이며 전체 앱 설정 파일은 아닙니다.
+
+## 자주 섞이는 버전
+
+v3의 `@tailwind base`·`components`·`utilities`, `tailwind.config.js` 중심 안내와 v4 안내를 섞지 않습니다. v4는 CSS 중심 설정이며 오래된 JavaScript 설정이 필요하면 `@config`로 명시적으로 읽습니다. Play CDN은 시험해 보는 용도이며 제품 배포용 빌드를 대신하지 않습니다.
+
+## 마무리 복습
+
+<details>
+<summary>확인 문제 3개 펼치기</summary>
+
+<Quiz
+  questionNumber={1}
+  question="Vite의 전용 Tailwind 연결 도구는?"
+  options={['브라우저 쿠키', 'React Router', '@tailwindcss/vite', '@tailwindcss/postcss만 가능']}
+  correctAnswer={3}
+  explanation="Vite에는 전용 Vite 플러그인을 사용할 수 있습니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="CSS 생성이 됐는데 화면이 바뀌지 않는다면?"
+  options={['HTML을 이미지로 변환', '출력 CSS가 페이지에 로드되는지 확인', '모든 클래스 삭제', 'DB 재시작']}
+  correctAnswer={2}
+  explanation="빌드 결과를 페이지에서 불러오는 과정도 필요합니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="v4의 기본 CSS 진입 문법은?"
+  options={['@import "tailwindcss";', '@tailwind init;', '@use javascript;', '@class all;']}
+  correctAnswer={1}
+  explanation="v4는 CSS import로 Tailwind를 가져옵니다."
+/>
+
+</details>
+
+## 참고 자료
+
+- [Tailwind CSS — installation/using-vite](https://tailwindcss.com/docs/installation/using-vite)
+- [Tailwind CSS — installation/using-postcss](https://tailwindcss.com/docs/installation/using-postcss)
+- [Tailwind CSS — upgrade-guide](https://tailwindcss.com/docs/upgrade-guide)
+- [Tailwind CSS — installation/tailwind-cli](https://tailwindcss.com/docs/installation/tailwind-cli)

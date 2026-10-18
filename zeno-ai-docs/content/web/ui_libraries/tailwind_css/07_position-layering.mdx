@@ -1,0 +1,65 @@
+---
+title: '07. 위치와 쌓임 순서'
+description: 'relative·absolute·fixed·sticky와 z-index의 범위를 이해합니다.'
+---
+
+## 핵심 먼저 보기
+
+- absolute는 기준이 되는 조상을 확인합니다.
+- sticky는 스크롤 컨테이너와 오프셋이 필요합니다.
+- 큰 z-index도 부모의 쌓임 맥락을 벗어나지 못합니다.
+
+## 위치 기준
+
+`relative`는 원래 자리를 유지하며 자식의 위치 기준이 될 수 있습니다. `absolute`는 일반 흐름에서 빠져 가까운 기준 조상을 사용합니다. `fixed`는 보통 뷰포트를 기준으로 하지만 transform 등이 있는 조상은 기준을 바꿀 수 있습니다.
+
+```html
+<div class="relative">
+  <span class="absolute right-2 top-2">새 글</span>
+</div>
+```
+
+## sticky가 안 붙을 때
+
+`sticky top-0`은 위 경계에 닿으면 붙습니다. 조상의 overflow가 다른 스크롤 기준을 만들지 않았는지, 부모 영역에 이동 여유가 있는지 확인합니다. `sticky`만 선언하고 오프셋을 정하지 않으면 기대한 고정 효과가 안 생길 수 있습니다.
+
+## z-index와 겹침
+
+`z-10`, `z-50`은 현재 쌓임 맥락 안에서 순서를 정합니다. transform·opacity·isolation 등으로 맥락이 나뉠 수 있어 숫자만 키우면 해결되지 않습니다. `isolate`는 새 쌓임 맥락을 만들 때 사용합니다. 모달은 앱의 포털이나 네이티브 dialog 같은 구조도 함께 고려합니다.
+
+## 마무리 복습
+
+<details>
+<summary>확인 문제 3개 펼치기</summary>
+
+<Quiz
+  questionNumber={1}
+  question="absolute 자식의 일반적인 기준 조상을 만드는 것은?"
+  options={['gap-4 부모', 'relative 부모', 'text-center 부모', 'font-bold 부모']}
+  correctAnswer={2}
+  explanation="relative는 absolute 자식의 위치 기준을 만드는 대표적인 방식입니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="sticky top-0이 안 붙을 때 볼 것은?"
+  options={['조상의 overflow와 이동 공간', '텍스트 색', '이미지 압축률', '파일 확장자']}
+  correctAnswer={1}
+  explanation="sticky는 조상 스크롤 컨테이너와 부모 영역의 영향을 받습니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="z-index를 크게 해도 못 올라가는 원인은?"
+  options={['항상 글자 크기', 'HTML 공백', 'border-radius만', '부모 쌓임 맥락']}
+  correctAnswer={4}
+  explanation="자식은 부모 쌓임 맥락을 벗어나 다른 맥락의 순서를 임의로 이기지 못합니다."
+/>
+
+</details>
+
+## 참고 자료
+
+- [Tailwind CSS — position](https://tailwindcss.com/docs/position)
+- [Tailwind CSS — z-index](https://tailwindcss.com/docs/z-index)
+- [Tailwind CSS — overflow](https://tailwindcss.com/docs/overflow)

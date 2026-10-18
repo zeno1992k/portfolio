@@ -1,0 +1,66 @@
+---
+title: '15. 임의 값과 임의 변형'
+description: '대괄호·CSS 변수·선택자 문법의 쓰임과 한계를 구분합니다.'
+---
+
+## 핵심 먼저 보기
+
+- 표준 토큰으로 표현하기 어려운 값에 대괄호를 씁니다.
+- 임의 값도 완성된 클래스 문자열로 소스에 보여야 합니다.
+- 재사용되는 값은 테마나 컴포넌트로 올립니다.
+
+## 값과 속성
+
+`w-[22rem]`은 특정 너비, `grid-cols-[1fr_2fr]`는 특정 열 비율입니다. 클래스 안 공백은 필요한 곳에서 `_`로 표현합니다. `[text-wrap:balance]`처럼 임의 속성을 직접 적는 문법도 있습니다.
+
+```html
+<div class="w-[22rem] max-w-full [text-wrap:balance]">
+  필요한 값만 직접 지정합니다.
+</div>
+```
+
+`text-[length:var(--label-size)]`처럼 타입 힌트는 같은 접두사의 글자 크기·색 해석이 모호할 때 구분을 돕습니다. v4의 `bg-(--surface)`는 CSS 변수 참조의 축약 문법입니다.
+
+## 임의 변형
+
+`[&>p]:mt-2`는 현재 요소의 직계 p 자식에 위 여백을 줍니다. 여기서 `&`는 현재 선택자입니다. 외부 콘텐츠처럼 자식마다 클래스를 넣기 어려울 때 유용하지만, 앱 전체에 긴 선택자 문자열을 반복하면 유지보수가 어려워집니다.
+
+## 동적 값
+
+실행 중 받은 너비는 인라인 스타일의 CSS 변수에 넣고 `w-[var(--card-width)]`라는 완성된 클래스를 사용합니다. `w-[${width}px]`처럼 런타임 문자열을 만들어도 빌드가 실제 클래스를 알 수는 없습니다. 임의 URL·선택자를 외부 입력 그대로 받아 적용하지 않습니다.
+
+## 마무리 복습
+
+<details>
+<summary>확인 문제 3개 펼치기</summary>
+
+<Quiz
+  questionNumber={1}
+  question="grid-cols-[1fr_2fr]의 밑줄은?"
+  options={['주석 시작', '필요한 공백 표현', '항상 밑줄 글자', '파일 경로 구분']}
+  correctAnswer={2}
+  explanation="임의 값 안에서 밑줄은 문법이 요구하는 공백을 나타내는 데 사용됩니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="임의 값이 반복될 때 고려할 것은?"
+  options={['테마 토큰으로 이름 붙이기', '모든 값을 계속 복사', 'Preflight 삭제', 'CSS 중단']}
+  correctAnswer={1}
+  explanation="반복되는 디자인 값은 공통 토큰으로 관리하면 변경 지점이 줄어듭니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="런타임 너비 전달에 적절한 방식은?"
+  options={['클래스 이름을 동적으로 조각내기만', '빌드 없이 CSS 자동 생성 기대', '랜덤 클래스', 'CSS 변수와 고정 클래스']}
+  correctAnswer={4}
+  explanation="클래스는 고정하고 실행 중 변하는 값만 CSS 변수로 전달할 수 있습니다."
+/>
+
+</details>
+
+## 참고 자료
+
+- [Tailwind CSS — adding-custom-styles](https://tailwindcss.com/docs/adding-custom-styles)
+- [Tailwind CSS — detecting-classes-in-source-files](https://tailwindcss.com/docs/detecting-classes-in-source-files)

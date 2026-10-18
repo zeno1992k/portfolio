@@ -1,0 +1,72 @@
+---
+title: '04. 여백과 크기'
+description: 'spacing 토큰, 너비·높이, 넘침을 막는 크기 규칙을 익힙니다.'
+---
+
+## 핵심 먼저 보기
+
+- `p`는 안쪽, `m`은 바깥, `gap`은 자식 사이 여백입니다.
+- 숫자 유틸리티는 테마의 `--spacing` 단위를 사용합니다.
+- 고정 크기보다 최소·최대 크기와 유연한 레이아웃을 먼저 생각합니다.
+
+## 간격을 읽는 법
+
+| 클래스 | 의미 |
+|---|---|
+| `p-4`, `px-4`, `py-2` | 전체·좌우·상하 안쪽 여백 |
+| `mt-2`, `mx-auto` | 위 바깥 여백·가로 자동 여백 |
+| `gap-4`, `gap-x-2` | 자식 사이 전체·가로 간격 |
+| `ps-4`, `pe-4` | 글쓰기 방향의 시작·끝 안쪽 여백 |
+
+기본 `--spacing`은 `0.25rem`이므로 `p-4`는 `1rem`입니다. 테마나 루트 글자 크기를 바꾸면 실제 크기도 달라집니다. 숫자를 고정 픽셀 단위로 외우지 않습니다.
+
+## 너비·높이
+
+`w-full`은 기준 컨테이너의 전체 너비, `w-1/2`는 절반입니다. `size-10`은 너비·높이를 함께 정합니다. `max-w-prose`는 읽기 좋은 본문 폭, `max-w-3xl`은 테마의 최대 너비 토큰을 사용합니다. 토큰에 없는 값은 `max-w-[64rem]`처럼 명시할 수 있습니다.
+
+```html
+<main class="mx-auto w-full max-w-3xl px-4">
+  <p class="min-w-0">본문</p>
+</main>
+```
+
+## 넘침을 막는 크기
+
+Flex·Grid 자식이 텍스트 때문에 줄지 않으면 `min-w-0`을 확인합니다. `h-full`은 부모 높이가 정해져 있어야 기대대로 동작합니다. 모바일 화면 높이는 주소창 변화의 영향을 받으므로 `min-h-dvh`처럼 동적 뷰포트 단위도 구분합니다.
+
+## 마무리 복습
+
+<details>
+<summary>확인 문제 3개 펼치기</summary>
+
+<Quiz
+  questionNumber={1}
+  question="p-4의 숫자 4는 무엇에 곱해지는가?"
+  options={['spacing 테마 단위', '항상 1px', '화면 너비', '글자 수']}
+  correctAnswer={1}
+  explanation="숫자형 간격은 --spacing을 기반으로 계산됩니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="자식 사이 간격을 부모에서 정하는 것은?"
+  options={['mt-auto만 가능', 'z-4', 'text-4', 'gap-4']}
+  correctAnswer={4}
+  explanation="gap은 Flex나 Grid 등의 자식 사이 간격을 정합니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="Flex 자식이 긴 텍스트 때문에 줄지 않을 때 볼 것은?"
+  options={['border 색', 'font-style', 'min-w-0', 'z-index']}
+  correctAnswer={3}
+  explanation="기본 최소 크기가 콘텐츠보다 작아지지 못하게 할 수 있습니다."
+/>
+
+</details>
+
+## 참고 자료
+
+- [Tailwind CSS — padding](https://tailwindcss.com/docs/padding)
+- [Tailwind CSS — width](https://tailwindcss.com/docs/width)
+- [Tailwind CSS — theme](https://tailwindcss.com/docs/theme)

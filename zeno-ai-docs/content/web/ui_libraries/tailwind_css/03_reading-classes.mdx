@@ -1,0 +1,67 @@
+---
+title: '03. 클래스 문법과 우선순위'
+description: '유틸리티·변형·부정값·충돌을 읽는 기준을 정리합니다.'
+---
+
+## 핵심 먼저 보기
+
+- `md:hover:bg-blue-700`은 조건과 실제 스타일을 나눠 읽습니다.
+- HTML에서 클래스 이름을 뒤에 적었다고 항상 이기지 않습니다.
+- 반응형·상태 조건마다 충돌하는 속성을 하나로 정리합니다.
+
+## 클래스 읽는 순서
+
+`md:`는 화면 폭 조건, `hover:`는 마우스 상태, `bg-blue-700`은 배경색입니다. `-mt-2`는 음수 위 여백이고 `bg-black/50`의 `/50`은 해당 색의 불투명도입니다. 모든 속성에 음수·투명도 문법이 적용되는 것은 아닙니다.
+
+```html
+<button class="bg-blue-600 p-3 md:hover:bg-blue-700">
+  저장
+</button>
+```
+
+## 충돌하는 클래스
+
+`p-2 p-4`를 함께 적어도 HTML 나열 순서가 최종 우선순위를 정하지 않습니다. 생성된 CSS의 순서·레이어·선택자 우선순위·조건이 결정합니다. 조건부 UI에서는 둘 중 하나만 남기는 방식으로 조합합니다.
+
+v4의 강제 우선 적용 문법은 `p-4!`처럼 끝에 `!`를 붙입니다. 프로젝트 전체의 우선순위 문제를 이것으로 덮지 않습니다.
+
+## display와 숨김
+
+`hidden`은 `display: none`, `invisible`은 공간을 남기는 숨김, `sr-only`는 화면에서 숨기면서 보조 기술에 읽힐 수 있게 하는 패턴입니다. 문서를 비밀로 만드는 접근 제어는 아닙니다. `hidden md:block`은 작은 화면에서 숨겼다가 md 이상에서 보입니다.
+
+## 마무리 복습
+
+<details>
+<summary>확인 문제 3개 펼치기</summary>
+
+<Quiz
+  questionNumber={1}
+  question="p-2 p-4에서 최종 값을 정하는 것은?"
+  options={['파일명', '생성된 CSS의 캐스케이드', 'HTML에서 뒤에 적힌 이름만', '글자 수']}
+  correctAnswer={2}
+  explanation="클래스 속성의 나열 순서가 CSS 우선순위를 직접 결정하지 않습니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="공간을 남기고 요소를 보이지 않게 하는 것은?"
+  options={['invisible', 'hidden', 'flex', 'block']}
+  correctAnswer={1}
+  explanation="invisible은 visibility를 바꾸므로 레이아웃 공간이 남습니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="bg-black/50의 50은 무엇인가?"
+  options={['너비', '높이', '글자 크기', '색 불투명도']}
+  correctAnswer={4}
+  explanation="색에 붙인 슬래시 값은 색의 불투명도를 조정합니다."
+/>
+
+</details>
+
+## 참고 자료
+
+- [Tailwind CSS — styling-with-utility-classes](https://tailwindcss.com/docs/styling-with-utility-classes)
+- [Tailwind CSS — display](https://tailwindcss.com/docs/display)
+- [Tailwind CSS — upgrade-guide](https://tailwindcss.com/docs/upgrade-guide)

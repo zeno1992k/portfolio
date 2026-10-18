@@ -1,5 +1,6 @@
 import { generateStaticParamsFor, importPage } from 'nextra/pages'
 import { useMDXComponents as getMDXComponents } from '@/mdx-components'
+import { isVisibleDocumentRoute } from '../lib/document-visibility'
 
 const getNextraStaticParams = generateStaticParamsFor('mdxPath')
 
@@ -23,7 +24,10 @@ export async function generateStaticParams() {
 export async function generateMetadata(props: PageProps<'/[[...mdxPath]]'>) {
   const params = await props.params
   const { metadata } = await importPage(params.mdxPath)
-  return metadata
+  const route = '/' + (params.mdxPath ?? []).join('/')
+  return isVisibleDocumentRoute(route)
+    ? metadata
+    : { ...metadata, robots: { index: false, follow: false } }
 }
 
 const Wrapper = getMDXComponents().wrapper

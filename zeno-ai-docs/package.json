@@ -8,7 +8,7 @@
     "prebuild": "node scripts/gen-home-data.js",
     "build": "next build --turbopack",
     "start": "next start",
-    "postbuild": "pagefind --site .next/server/app --output-path out/_pagefind && node scripts/export-legacy-redirects.js",
+    "postbuild": "pagefind --site .next/server/app --glob \"web/{javascript/ECMAscript,ui_libraries/tailwind_css}/**/*.html\" --output-path out/_pagefind && node scripts/export-legacy-redirects.js",
     "lint": "eslint"
   },
   "dependencies": {

@@ -2,12 +2,10 @@ import type { MetadataRoute } from 'next'
 import type { PageMapItem } from 'nextra'
 import { getPageMap } from 'nextra/page-map'
 import { SITE_URL } from './site-url'
+import { isVisibleDocumentRoute } from './lib/document-visibility'
 
 export const dynamic = 'force-static'
 
-
-// 테스트 문서만 있는 과목은 검색 엔진에 알리지 않는다.
-const HIDDEN_ROUTE_PREFIXES = ['/web/nextjs', '/web/ui_libraries']
 
 function collectRoutes(items: PageMapItem[]): string[] {
   return items.flatMap((item) => {
@@ -22,9 +20,7 @@ function collectRoutes(items: PageMapItem[]): string[] {
 }
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
-  const routes = collectRoutes(await getPageMap()).filter(
-    (route) => !HIDDEN_ROUTE_PREFIXES.some((prefix) => route.startsWith(prefix)),
-  )
+  const routes = collectRoutes(await getPageMap()).filter(isVisibleDocumentRoute)
 
   return routes.map((route) => ({
     url: new URL(route, SITE_URL).href,

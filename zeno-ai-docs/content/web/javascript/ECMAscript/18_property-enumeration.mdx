@@ -3,9 +3,13 @@ title: '18. 프로퍼티 존재 확인과 열거'
 description: 'in·Object.hasOwn으로 프로퍼티 존재를 확인하고, for...in·Object.keys 계열·Reflect.ownKeys의 열거 범위와 순서, Object.assign·fromEntries·groupBy를 정리합니다.'
 ---
 
-<Callout type="info">
-  **이번 문서의 목표:** 프로퍼티 존재 확인 방법과 열거 방법이 상속·비열거·심볼 키를 각각 어떻게 다루는지 구분하고, 열거 순서의 규칙을 설명할 수 있습니다.
-</Callout>
+## 핵심 먼저 보기
+
+- `in`은 상속까지 포함해 존재를 확인하고, `Object.hasOwn`은 자기 프로퍼티만 확인합니다. 새 코드에서는 `obj.hasOwnProperty` 대신 `Object.hasOwn`을 씁니다.
+- `for...in`은 상속된 열거 가능 문자열 키까지 순회합니다. `Object.keys`·`values`·`entries`는 자기 열거 가능 문자열 키만, `getOwnPropertyNames`는 비열거까지, `Reflect.ownKeys`는 심볼까지 모두 반환합니다.
+- `Object.assign`은 `[[Get]]`과 `[[Set]]`로 얕게 복사하므로 getter와 setter가 실행됩니다. `Object.fromEntries`는 `entries`의 역변환입니다.
+- 키 순서는 배열 인덱스 오름차순, 나머지 문자열 키 생성 순서, 심볼 키 생성 순서입니다. 추가 순서가 의미를 가지면 배열이나 Map을 씁니다.
+- `Object.groupBy`(ES2024)는 프로토타입이 null인 객체를 반환하고 키를 문자열로 변환합니다. 객체 키가 필요하면 `Map.groupBy`를 씁니다.
 
 ## in 연산자
 
@@ -21,26 +25,6 @@ o.own = 2
 'zzz' in o        // false
 ```
 
-- 왼쪽 피연산자는 프로퍼티 키(문자열 또는 심볼)로 변환됩니다. `1 in { 1: 'x' }`는 `'1'`을 검사합니다.
-- 오른쪽 피연산자가 객체가 아니면 TypeError입니다. `'a' in 'abc'`는 오류이고, `'length' in new String('abc')`는 true입니다.
-- 비열거 프로퍼티와 심볼 키도 찾습니다. `'length' in []`는 true입니다.
-- 값이 `undefined`인 프로퍼티도 존재하는 것으로 봅니다. `'a' in { a: undefined }`는 true입니다.
-- `for (const k in obj)`의 `in`은 연산자가 아니라 반복문 문법의 일부입니다(아래 for...in 절).
-- `#x in obj`는 클래스의 프라이빗 필드 존재를 확인하는 문법입니다(ES2022, 자세히는 24편).
-- 함수 형태는 `Reflect.has(obj, key)`이고, Proxy의 `has` 트랩이 `in`을 가로챕니다(자세히는 47편).
-
-배열에서는 값이 아니라 인덱스(키)를 검사합니다. 흔한 실수입니다.
-
-```js
-const arr = ['a', 'b']
-'a' in arr    // false — 값이 아니라 키를 검사한다
-1 in arr      // true
-3 in arr      // false
-1 in [1, , 3] // false — 구멍은 프로퍼티가 없다
-```
-
-배열에 값이 있는지는 `includes`로 확인합니다(자세히는 28편).
-
 ## Object.hasOwn
 
 `Object.hasOwn(obj, key)`(ES2022)는 key가 obj 자신의 프로퍼티일 때만 true를 반환합니다. 프로토타입 체인은 보지 않고, 열거 가능 여부와 값도 보지 않습니다.
@@ -54,12 +38,6 @@ Object.hasOwn(o, 'inherited') // false
 Object.hasOwn(o, 'toString')  // false
 ```
 
-- 첫 인수가 null 또는 undefined이면 TypeError입니다.
-- 원시 값은 래퍼 객체로 바꿔 검사합니다. `Object.hasOwn('abc', 0)`과 `Object.hasOwn('abc', 'length')`는 true이고 `Object.hasOwn(1, 'x')`는 false입니다.
-- 비열거 프로퍼티와 심볼 키도 true가 될 수 있습니다.
-- 배열에서는 `Object.hasOwn([], 'length')`가 true, `Object.hasOwn([], 'push')`가 false입니다. `push`는 `Array.prototype`에 있습니다.
-- 지원: Chrome 93, Firefox 92, Safari 15.4, Node.js 16.9부터입니다. 이전 환경에서는 `Object.prototype.hasOwnProperty.call(obj, key)`를 씁니다.
-
 ## hasOwnProperty와 hasOwn의 차이
 
 `obj.hasOwnProperty(key)`는 `Object.prototype`에 들어 있는 메서드이고, `Object.hasOwn(obj, key)`는 정적 메서드입니다. 검사 내용은 같지만 호출 방식 때문에 실패하는 경우가 다릅니다.
@@ -69,21 +47,6 @@ Object.hasOwn(o, 'toString')  // false
 | 프로토타입이 null인 객체 | TypeError (메서드 없음) | 정상 동작 |
 | 같은 이름 프로퍼티가 메서드를 덮어쓴 객체 | 덮어쓴 값을 호출 (함수가 아니면 TypeError) | 정상 동작 |
 | obj가 null 또는 undefined | TypeError | TypeError |
-
-```js
-const dict = Object.create(null)
-dict.k = 1
-dict.hasOwnProperty('k') // TypeError: not a function
-Object.hasOwn(dict, 'k') // true
-
-const evil = { hasOwnProperty: () => false, a: 1 }
-evil.hasOwnProperty('a') // false
-Object.hasOwn(evil, 'a') // true
-```
-
-- `Object.hasOwn`은 `Object.prototype.hasOwnProperty.call`의 짧은 형태입니다. 인수 변환 순서만 다릅니다. `hasOwnProperty`는 키를 먼저, `hasOwn`은 대상 객체를 먼저 변환하며, 실무에서는 드러나지 않습니다.
-- 외부 데이터(`JSON.parse` 결과, 사용자 입력)는 키 이름으로 `hasOwnProperty`를 가질 수 있고, `Object.create(null)` 객체는 메서드 자체가 없습니다. 이런 객체에서는 `obj.hasOwnProperty`를 쓰지 않습니다.
-- 새 코드에서는 `Object.hasOwn`을 기본으로 씁니다.
 
 ## 존재 확인 방법 비교
 
@@ -104,202 +67,25 @@ Object.hasOwn(evil, 'a') // true
 
 `for...in`은 객체의 열거 가능한 문자열 키를 하나씩 꺼내는 반복문이며, 프로토타입 체인에서 상속받은 열거 가능한 키까지 순회합니다. 열거 가능 여부는 프로퍼티의 `enumerable` 어트리뷰트가 정합니다(자세히는 14편).
 
-```js
-const parent = { p: 1 }
-const child = Object.create(parent)
-child.c = 2
-
-for (const key in child) console.log(key)
-// 'c', 'p' — 자기 키가 먼저, 그다음 프로토타입 체인
-
-Object.keys(child) // ['c']
-```
-
-순회 규칙은 다음과 같습니다.
-
-- 대상은 열거 가능한 문자열 키입니다. 심볼 키는 열거 가능해도 순회하지 않습니다.
-- 키는 항상 문자열입니다. 배열이면 `'0'`, `'1'`이 나옵니다.
-- 순서는 자기 객체의 키 전부, 그다음 프로토타입의 키, 그다음 그 프로토타입의 키입니다. 각 객체 안에서는 열거 순서 규칙(아래 열거 순서 절)을 따릅니다.
-- 앞쪽 객체에 같은 이름의 프로퍼티가 있으면 뒤쪽 객체의 같은 이름은 건너뜁니다. 앞쪽 프로퍼티가 비열거여도 같습니다.
-- 순회 중에 아직 방문하지 않은 프로퍼티를 삭제하면 방문하지 않습니다. 순회 중에 추가한 프로퍼티는 방문한다는 보장이 없습니다. 같은 이름은 한 번만 방문합니다.
-- 대상이 null 또는 undefined이면 오류 없이 본문을 한 번도 실행하지 않습니다. 원시 값은 객체로 바꿔 순회하므로 `for (const i in 'ab')`는 `'0'`, `'1'`을 냅니다.
-- `for (const k in obj)`는 반복마다 새 바인딩을 만들고, `for (var k in obj)`는 반복이 끝난 뒤에도 마지막 키가 남습니다.
-
-```js
-const base = { x: 1, y: 2 }
-const derived = Object.create(base)
-Object.defineProperty(derived, 'x', { value: 10 }) // 비열거
-
-for (const k in derived) console.log(k)
-// 'y' — 비열거 x가 base의 x를 가려서 x는 나오지 않는다
-```
-
-`for...in`을 쓸 때 자주 틀리는 점입니다.
-
-- 상속된 키가 섞입니다. 생성자 함수의 `prototype`에 대입한 메서드는 열거 가능하므로 순회에 나타납니다. 클래스 본문의 메서드는 비열거여서 나타나지 않습니다(자세히는 24편).
-
-```js
-function Dog() { this.name = 'rex' }
-Dog.prototype.bark = function () {}
-
-for (const k in new Dog()) console.log(k) // 'name', 'bark'
-```
-
-- 누군가 `Object.prototype`이나 `Array.prototype`에 열거 가능한 프로퍼티를 추가하면 모든 `for...in`에 그 키가 나타납니다. 자기 프로퍼티만 필요하면 `Object.hasOwn`으로 거르거나 `Object.keys`·`Object.entries`를 씁니다.
-- 배열에 `for...in`을 쓰면 인덱스가 문자열로 나오고, 배열에 붙인 추가 프로퍼티까지 순회합니다. `const a = [10, 20]; a.extra = 1`이면 `'0'`, `'1'`, `'extra'`가 나옵니다. 배열은 `for...of`나 배열 메서드로 순회합니다(자세히는 28편, 35편).
-
 ## Object.keys, Object.values, Object.entries
 
 세 메서드는 객체 자신의 열거 가능한 문자열 키 프로퍼티를 각각 키 배열, 값 배열, `[키, 값]` 쌍의 배열로 반환합니다. `keys`는 ES5, `values`와 `entries`는 ES2017입니다.
-
-```js
-const p = { a: 1, b: 2 }
-
-Object.keys(p)    // ['a', 'b']
-Object.values(p)  // [1, 2]
-Object.entries(p) // [['a', 1], ['b', 2]]
-```
-
-- 상속 프로퍼티, 비열거 프로퍼티, 심볼 키는 포함하지 않습니다. `Object.entries(Object.create({ i: 1 }))`는 `[]`입니다.
-- 반환값은 호출 시점의 스냅숏 배열입니다. 이후에 객체를 바꿔도 이미 만든 배열은 바뀌지 않습니다.
-- 키는 항상 문자열입니다. `Object.keys({ 1: 'a' })`는 `['1']`이고, 이 배열에서 `includes(1)`은 false, `includes('1')`은 true입니다.
-- `values`와 `entries`는 값을 읽을 때 getter를 실행합니다. 접근자 프로퍼티는 getter의 반환값이 들어갑니다.
-- 인수가 null 또는 undefined이면 TypeError입니다. 원시 값은 래퍼 객체로 바꿉니다. `Object.keys('ab')`는 `['0', '1']`, `Object.keys(1)`은 `[]`입니다.
-- 배열은 인덱스 문자열을 반환하고 구멍은 건너뜁니다. `Object.keys([1, , 3])`은 `['0', '2']`입니다.
-- `Map`과 `Set`은 자기 열거 가능 프로퍼티가 없으므로 `Object.keys(new Map([[1, 2]]))`는 `[]`입니다. Map의 키는 `map.keys()`로 읽습니다(자세히는 38편).
-- 빈 객체 판별은 `Object.keys(obj).length === 0`으로 합니다.
-
-`entries`는 `for...of`와 구조 분해를 함께 써서 순회할 때 가장 많이 쓰입니다(자세히는 35편, 37편).
-
-```js
-const price = { apple: 100, pear: 200 }
-
-for (const [name, won] of Object.entries(price)) {
-  console.log(name, won)
-}
-// 'apple' 100
-// 'pear' 200
-```
 
 ## Object.fromEntries
 
 `Object.fromEntries(iterable)`(ES2019)는 `[키, 값]` 쌍의 이터러블(자세히는 35편)로 새 객체를 만들며, `Object.entries`의 역변환입니다.
 
-```js
-Object.fromEntries([['a', 1], ['b', 2]]) // { a: 1, b: 2 }
-Object.fromEntries(new Map([['x', 1]]))  // { x: 1 }
-```
-
-`entries`, 배열 메서드, `fromEntries`를 이어 붙이면 객체의 값을 걸러 내거나 바꿀 수 있습니다.
-
-```js
-const price = { apple: 100, pear: 200, fig: 50 }
-
-Object.fromEntries(
-  Object.entries(price).filter(([, won]) => won >= 100)
-) // { apple: 100, pear: 200 }
-
-Object.fromEntries(
-  Object.entries(price).map(([k, v]) => [k, v * 2])
-) // { apple: 200, pear: 400, fig: 100 }
-```
-
-- 각 요소는 객체여야 하며, `0`번 프로퍼티를 키로, `1`번 프로퍼티를 값으로 읽습니다. 문자열이나 숫자 같은 원시 값 요소는 TypeError입니다. `[['a']]`처럼 값이 없으면 `{ a: undefined }`가 됩니다.
-- 같은 키가 여러 번 나오면 뒤의 값이 이깁니다. `[['a', 1], ['a', 3]]`은 `{ a: 3 }`입니다.
-- 키는 문자열 또는 심볼로 변환됩니다. Map의 숫자 키 `2`는 `'2'`가 됩니다.
-- 인수가 null, undefined, 이터러블이 아닌 값이면 TypeError입니다.
-- 결과는 `Object.prototype`을 상속하는 일반 객체입니다.
-- 프로퍼티를 새로 정의하는 방식이어서 `['__proto__', v]` 쌍은 프로토타입을 바꾸지 않고 `'__proto__'`라는 이름의 자기 프로퍼티를 만듭니다.
-- Map과 객체는 `new Map(Object.entries(obj))`와 `Object.fromEntries(map)`로 서로 바꿉니다.
-
 ## Object.assign
 
 `Object.assign(target, ...sources)`(ES2015)는 sources의 자기 열거 가능 프로퍼티(문자열 키와 심볼 키)를 target에 복사하고 target을 반환합니다. 새 객체를 만들지 않고 target을 직접 바꿉니다.
-
-```js
-const target = { a: 1 }
-const out = Object.assign(target, { b: 2 }, { a: 9, c: 3 })
-
-out === target // true
-target         // { a: 9, b: 2, c: 3 }
-```
-
-- sources는 왼쪽부터 차례로 적용되므로 같은 키는 오른쪽 소스가 이깁니다.
-- 소스에서 값을 읽을 때 `[[Get]]`, target에 쓸 때 `[[Set]]`(일반 대입)을 씁니다. 그래서 소스의 getter는 실행되어 반환값이 target에 일반 데이터 프로퍼티로 복사되고, target에 setter가 있으면 setter가 실행됩니다.
-- 복사되는 것은 값뿐입니다. `writable` 같은 어트리뷰트와 접근자 자체는 복사되지 않습니다. 어트리뷰트까지 복제하려면 `Object.defineProperties(target, Object.getOwnPropertyDescriptors(src))`를 씁니다(자세히는 14편).
-- 상속 프로퍼티와 비열거 프로퍼티는 복사하지 않습니다.
-- target에 쓸 수 없는 프로퍼티(동결된 객체, 읽기 전용 프로퍼티)가 있으면 TypeError입니다. 그 전에 복사된 프로퍼티는 되돌리지 않습니다.
-- 소스가 null 또는 undefined이면 건너뜁니다. 문자열 소스는 인덱스 키로 복사됩니다. `Object.assign({}, null, 'hi', 5)`는 `{ '0': 'h', '1': 'i' }`입니다.
-- target이 null 또는 undefined이면 TypeError이고, 원시 값이면 래퍼 객체가 반환됩니다. `Object.assign(1, { a: 1 })`은 `[Number: 1] { a: 1 }`입니다.
-- 배열도 인덱스 키로 처리합니다. `Object.assign([1, 2, 3], [4, 5])`는 `[4, 5, 3]`입니다.
-- 얕은 복사입니다. 중첩 객체는 같은 참조를 공유합니다(자세히는 10편).
-
-```js
-const t1 = { set x(v) { console.log('setter', v) } }
-Object.assign(t1, { x: 1 })
-// 'setter 1' 출력, t1.x는 여전히 접근자 프로퍼티
-
-const t2 = {
-  set x(v) { console.log('setter', v) },
-  ...{ x: 1 },
-}
-// 출력 없음, t2.x는 값 1을 가진 데이터 프로퍼티
-```
-
-`Object.assign({}, a, b)`와 `{ ...a, ...b }`는 둘 다 새 객체를 만들지만, 스프레드는 `[[Set]]` 대신 프로퍼티를 새로 정의합니다. 이 차이는 위의 setter 경우와 아래의 `'__proto__'` 경우에 드러납니다(자세히는 36편).
-
-`JSON.parse`가 만든 객체에는 `'__proto__'`라는 자기 프로퍼티가 있을 수 있습니다. `Object.assign`은 이것을 `[[Set]]`으로 쓰기 때문에 프로토타입 설정자가 실행되어 target의 프로토타입이 바뀝니다. 스프레드는 자기 프로퍼티로 정의하므로 영향이 없습니다.
-
-```js
-const evil = JSON.parse('{"__proto__": {"admin": true}}')
-Object.keys(evil)             // ['__proto__']
-
-const viaAssign = Object.assign({}, evil)
-viaAssign.admin               // true — 프로토타입이 바뀌었다
-const viaSpread = { ...evil }
-viaSpread.admin               // undefined
-```
 
 ## getOwnPropertyNames와 getOwnPropertySymbols
 
 `Object.getOwnPropertyNames(obj)`는 obj 자신의 모든 문자열 키를 열거 가능 여부와 상관없이 배열로 반환합니다. `Object.getOwnPropertySymbols(obj)`(ES2015)는 자신의 모든 심볼 키(자세히는 34편)를 배열로 반환합니다. 둘 다 상속 키는 포함하지 않습니다.
 
-```js
-const sym = Symbol('s')
-const o = { a: 1, [sym]: 2 }
-Object.defineProperty(o, 'hid', { value: 3 }) // 비열거
-
-Object.keys(o)                  // ['a']
-Object.getOwnPropertyNames(o)   // ['a', 'hid']
-Object.getOwnPropertySymbols(o) // [Symbol(s)]
-```
-
-- 배열의 `length`는 비열거 자기 프로퍼티라서 `Object.getOwnPropertyNames([1, 2])`는 `['0', '1', 'length']`이고 `Object.keys([1, 2])`는 `['0', '1']`입니다. 문자열 원시 값도 `Object.getOwnPropertyNames('ab')`가 `['0', '1', 'length']`입니다.
-- 클래스 본문의 메서드는 비열거이므로 `Object.keys`로는 보이지 않고 `getOwnPropertyNames`로 확인합니다.
-
-```js
-class A { m() {} static s() {} }
-
-Object.keys(A.prototype) // []
-Object.getOwnPropertyNames(A.prototype)
-// ['constructor', 'm']
-Object.getOwnPropertyNames(A)
-// ['length', 'name', 'prototype', 's']
-```
-
-- 인수 처리는 `Object.keys`와 같습니다. null 또는 undefined는 TypeError, 원시 값은 래퍼 객체로 바꿉니다. `Object.getOwnPropertySymbols('ab')`는 `[]`입니다.
-- `getOwnPropertyNames`에는 심볼 키가, `getOwnPropertySymbols`에는 문자열 키가 들어 있지 않습니다. 둘을 합친 결과가 필요하면 `Reflect.ownKeys`를 씁니다.
-
 ## Reflect.ownKeys
 
 `Reflect.ownKeys(obj)`(ES2015)는 obj 자신의 모든 키를 한 배열에 반환합니다. 문자열 키(열거 가능 여부 무관)가 먼저, 심볼 키가 그다음에 옵니다. `[...Object.getOwnPropertyNames(obj), ...Object.getOwnPropertySymbols(obj)]`와 같은 결과입니다.
-
-```js
-const o = { a: 1, [Symbol('s')]: 2 }
-Object.defineProperty(o, 'hid', { value: 3 })
-
-Reflect.ownKeys(o) // ['a', 'hid', Symbol(s)]
-```
 
 - 상속 키는 포함하지 않습니다.
 - 인수가 객체가 아니면 TypeError입니다. 다른 열거 메서드와 달리 원시 값을 객체로 바꾸지 않습니다. `Reflect.ownKeys('ab')`는 오류입니다.
@@ -308,36 +94,7 @@ Reflect.ownKeys(o) // ['a', 'hid', Symbol(s)]
 
 ## 열거 순서
 
-한 객체의 자기 키는 항상 다음 순서로 나열됩니다.
-
-1. 배열 인덱스 형태의 문자열 키를 숫자 오름차순으로
-2. 나머지 문자열 키를 프로퍼티가 만들어진 순서로
-3. 심볼 키를 프로퍼티가 만들어진 순서로
-
-```js
-const o = { b: 1, 2: 'x', a: 1, 1: 'y' }
-o.c = 1
-o[0] = 'z'
-
-Object.keys(o) // ['0', '1', '2', 'b', 'a', 'c']
-```
-
-- 이 순서는 `Object.keys`·`values`·`entries`, `getOwnPropertyNames`, `getOwnPropertySymbols`(심볼만), `Reflect.ownKeys`, `Object.assign`, 스프레드, `JSON.stringify`에 공통으로 적용됩니다.
-- `for...in`은 각 객체 안에서 같은 순서를 따르고, 자기 객체를 먼저 순회한 뒤 프로토타입 체인을 올라갑니다. `for...in`의 순서가 명세에서 정해진 것은 ES2020부터입니다.
-- 배열 인덱스는 정규 표기의 정수 문자열이어야 합니다. `'1'`은 인덱스이고 `'01'`, `'1.5'`, `'-1'`은 인덱스가 아니라서 일반 문자열 키로 생성 순서를 따릅니다.
-- 현재 명세는 인덱스 범위를 0 이상 4294967294(`2 ** 32 - 2`) 이하로 정합니다. 4294967295 이상은 일반 문자열 키입니다.
-- 이미 있는 키에 값을 다시 대입해도 위치는 그대로입니다. 삭제한 뒤 다시 추가하면 맨 뒤로 갑니다.
-- 배열은 인덱스 오름차순이 먼저이고, 그다음이 `length`, 그다음이 추가한 프로퍼티입니다. `Reflect.ownKeys`로 보면 `['0', '1', '5', 'length', 'name']`처럼 나옵니다.
-
-숫자처럼 보이는 키를 쓰면 추가한 순서가 지켜지지 않습니다.
-
-```js
-const byId = { 20: 'b', 3: 'c', 100: 'a' }
-
-Object.keys(byId) // ['3', '20', '100'] — 추가 순서가 아니다
-```
-
-추가 순서가 의미를 가지면 객체 대신 배열이나 Map을 씁니다. Map은 키가 무엇이든 삽입 순서를 유지합니다(자세히는 38편).
+자기 키는 배열 인덱스 문자열의 숫자 오름차순 → 나머지 문자열의 생성 순서 → 심벌의 생성 순서입니다. `for...in`은 상속된 열거 가능 문자열 키까지 보므로 자기 키만 필요하면 `Object.keys`나 `Object.hasOwn`을 씁니다.
 
 ## 열거 메서드 비교표
 
@@ -352,85 +109,23 @@ Object.keys(byId) // ['3', '20', '100'] — 추가 순서가 아니다
 | `JSON.stringify` | 열거 가능만 | 제외 | 제외 |
 | `Object.getOwnPropertyDescriptors` | 전부 | 전부 | 제외 |
 
-| 방법 | 결과 | 원시 값 인수 |
-|------|------|------|
-| `for...in` | 키를 하나씩 | 객체로 변환(null·undefined는 0회) |
-| `Object.keys`·`values`·`entries` | 배열 | 객체로 변환(null·undefined는 TypeError) |
-| `getOwnPropertyNames`·`Symbols` | 배열 | 객체로 변환(null·undefined는 TypeError) |
-| `Reflect.ownKeys` | 배열 | TypeError |
-| `Object.assign` | target | 소스는 변환, null·undefined 소스는 건너뜀 |
-
 선택 기준은 다음과 같습니다.
-
-- 객체 자신의 데이터를 순회하면 `Object.entries`(필요하면 `keys`, `values`)
-- 상속된 키까지 필요하면 `for...in`
-- 비열거 키까지 필요하면 `Object.getOwnPropertyNames`
-- 심볼을 포함해 전부 필요하면 `Reflect.ownKeys`
-- 키 하나가 있는지만 알면 되면 `Object.hasOwn` 또는 `in`
 
 ## Object.groupBy (ES2024)
 
 `Object.groupBy(items, callback)`는 이터러블의 요소를 callback이 반환한 값별로 묶어, 그룹 키마다 요소 배열을 가진 객체를 반환합니다.
 
-```js
-const nums = [1, 2, 3, 4, 5]
-Object.groupBy(nums, (n) => (n % 2 ? 'odd' : 'even'))
-// { odd: [1, 3, 5], even: [2, 4] }
-```
-
-```js
-const items = [
-  { name: 'apple', type: 'fruit' },
-  { name: 'carrot', type: 'veg' },
-  { name: 'pear', type: 'fruit' },
-]
-const g = Object.groupBy(items, (it) => it.type)
-
-g.fruit.map((it) => it.name) // ['apple', 'pear']
-g.veg.length                 // 1
-```
-
-- callback은 `(요소, 인덱스)`를 받고 요소마다 순서대로 한 번 호출됩니다. 그룹 안의 요소는 원래 순서를 유지합니다.
-- 반환 객체의 프로토타입은 null입니다. `hasOwnProperty`나 `toString`이 없으므로 키 확인은 `Object.hasOwn`이나 `in`으로 하고, 문자열로 변환하면(`String(g)`, 템플릿 리터럴) TypeError입니다. 대신 `'toString'`, `'constructor'`, `'__proto__'` 같은 이름도 일반 그룹 키로 안전하게 쓸 수 있습니다.
-- callback이 반환한 값은 프로퍼티 키로 변환됩니다. 숫자 `0`은 `'0'`이 되고, 객체는 모두 `'[object Object]'`가 되어 한 그룹에 합쳐집니다. 객체나 숫자 그대로를 키로 쓰려면 `Map.groupBy`를 씁니다(자세히는 38편).
-- `Map.groupBy`는 같은 시그니처로 Map을 반환하며, 키를 변환하지 않습니다.
-
-```js
-Map.groupBy([1, 2, 3, 4], (n) => n % 2 === 0)
-// Map(2) { false => [1, 3], true => [2, 4] }
-```
-
-- 첫 인수는 이터러블이어야 합니다. 배열, 문자열, Set은 되고 일반 객체는 TypeError입니다. null 또는 undefined, 함수가 아닌 callback도 TypeError입니다.
-- 요소가 없으면 빈 객체가 반환됩니다. 요소가 하나도 없는 그룹은 만들어지지 않습니다.
-- 그룹 키의 순서는 열거 순서 규칙을 따릅니다. 인덱스 형태의 키는 오름차순으로 앞에 오므로 `Object.groupBy([1, 2, 3, 4], (n) => n % 2)`는 `'0'` 그룹이 `'1'` 그룹보다 먼저입니다.
-- 그룹별 개수는 `Object.fromEntries(Object.entries(g).map(([k, v]) => [k, v.length]))`로 얻습니다. 위 예에서 `{ fruit: 2, veg: 1 }`입니다.
-- 지원: Chrome 117, Firefox 119, Safari 17.4, Node.js 21부터입니다. 이전 환경에서는 `reduce`로 묶습니다(자세히는 29편).
-
-```js
-const groups = items.reduce((acc, it) => {
-  (acc[it.type] ??= []).push(it)
-  return acc
-}, {})
-```
-
-`reduce`에서 누적 객체를 `{}`로 만들면 `'constructor'` 같은 키가 상속된 값과 충돌합니다. `acc['constructor']`는 이미 함수여서 `??=`가 배열을 넣지 않고, 이어지는 `push`가 TypeError를 냅니다. `Object.create(null)`을 초기값으로 쓰면 피할 수 있습니다.
-
-## 핵심 정리
-
-- `in`은 상속까지 포함해 존재를 확인하고, `Object.hasOwn`은 자기 프로퍼티만 확인합니다. 새 코드에서는 `obj.hasOwnProperty` 대신 `Object.hasOwn`을 씁니다.
-- `for...in`은 상속된 열거 가능 문자열 키까지 순회합니다. `Object.keys`·`values`·`entries`는 자기 열거 가능 문자열 키만, `getOwnPropertyNames`는 비열거까지, `Reflect.ownKeys`는 심볼까지 모두 반환합니다.
-- `Object.assign`은 `[[Get]]`과 `[[Set]]`로 얕게 복사하므로 getter와 setter가 실행됩니다. `Object.fromEntries`는 `entries`의 역변환입니다.
-- 키 순서는 배열 인덱스 오름차순, 나머지 문자열 키 생성 순서, 심볼 키 생성 순서입니다. 추가 순서가 의미를 가지면 배열이나 Map을 씁니다.
-- `Object.groupBy`(ES2024)는 프로토타입이 null인 객체를 반환하고 키를 문자열로 변환합니다. 객체 키가 필요하면 `Map.groupBy`를 씁니다.
-
 ## 마무리 복습
+
+<details>
+<summary>확인 문제 3개 펼치기</summary>
 
 <Quiz
   questionNumber={1}
   question="base = { a: 1 }, o = Object.create(base), o.b = undefined 일 때 다음 다섯 식 중 true인 것은 몇 개인가? ('a' in o), Object.hasOwn(o, 'a'), ('b' in o), Object.hasOwn(o, 'b'), (o.b !== undefined)"
   options={['1개', '2개', '3개', '4개']}
   correctAnswer={3}
-  explanation="'a' in o는 프로토타입 체인의 a를 찾아 true, Object.hasOwn(o, 'a')는 자기 프로퍼티가 아니므로 false입니다. 'b' in o와 Object.hasOwn(o, 'b')는 값이 undefined여도 프로퍼티가 존재하므로 둘 다 true이고, o.b !== undefined는 값이 undefined라서 false입니다. 따라서 true는 3개입니다."
+  explanation="'a' in o는 프로토타입 체인의 a를 찾아 true, Object.hasOwn(o, 'a')는 자기 프로퍼티가 아니므로 false입니다. 'b' in o와 Object.hasOwn(o, 'b')는 값이 undefined여도 프로퍼티가 존재하므로 둘 다 true이고, o.b !== undefined는 값이 undefined라서 false입니다."
 />
 
 <Quiz
@@ -438,7 +133,7 @@ const groups = items.reduce((acc, it) => {
   question="proto = { p: 1 }, o = Object.create(proto), o.a = 1, defineProperty로 만든 비열거 키 hid(value만 지정), 열거 가능한 심볼 키 하나를 가진 o가 있다. for...in이 순회하는 키 수, Object.keys(o).length, Reflect.ownKeys(o).length를 순서대로 고르면?"
   options={['2, 1, 3', '1, 1, 2', '3, 1, 4', '2, 2, 3']}
   correctAnswer={1}
-  explanation="for...in은 열거 가능한 문자열 키만 상속까지 순회하므로 a와 p의 2개입니다. 비열거 hid와 심볼 키는 제외됩니다. Object.keys는 자기 열거 가능 문자열 키인 a뿐이라 1개입니다. Reflect.ownKeys는 상속은 제외하고 a, hid, 심볼 키를 모두 포함해 3개입니다."
+  explanation="for...in은 열거 가능한 문자열 키만 상속까지 순회하므로 a와 p의 2개입니다. 비열거 hid와 심볼 키는 제외됩니다."
 />
 
 <Quiz
@@ -448,6 +143,8 @@ const groups = items.reduce((acc, it) => {
   correctAnswer={2}
   explanation="배열 인덱스 형태의 키(0, 1, 2)가 숫자 오름차순으로 먼저 나오고, 나머지 문자열 키는 만들어진 순서(b, a, c)로 이어집니다. 첫째 보기는 추가 순서, 셋째 보기는 인덱스 키를 뒤에 둔 것, 넷째 보기는 문자열 키를 알파벳순으로 정렬한 것이라 모두 틀립니다."
 />
+
+</details>
 
 ## 참고 자료
 

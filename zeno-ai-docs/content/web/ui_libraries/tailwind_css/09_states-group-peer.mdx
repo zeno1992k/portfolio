@@ -1,0 +1,68 @@
+---
+title: '09. 상태·group·peer'
+description: '자신·부모·형제의 상태에 따라 스타일을 바꾸는 규칙을 읽습니다.'
+---
+
+## 핵심 먼저 보기
+
+- `hover:`·`focus-visible:`·`disabled:`는 자신의 상태를 봅니다.
+- `group-*`는 조상, `peer-*`는 앞선 형제의 상태를 봅니다.
+- 상태의 의미는 HTML·ARIA가 제공하고 클래스는 모양만 바꿉니다.
+
+## 자신과 속성
+
+키보드 포커스에는 `focus-visible:`을 사용해 위치를 보여 줍니다. `disabled:`는 실제 비활성 상태, `aria-expanded:`는 ARIA 속성, `data-[state=open]:`은 data 속성 값에 반응합니다. `aria-disabled`는 네이티브 disabled처럼 클릭을 자동 차단하지 않습니다.
+
+```html
+<button class="rounded px-3 py-2 focus-visible:ring-2">
+  선택
+</button>
+```
+
+## 부모와 형제
+
+부모에 `group`, 자식에 `group-hover:*`를 쓰면 부모 hover에 반응합니다. `group/card`처럼 이름을 붙이면 중첩 group을 구분할 수 있습니다. `peer`는 뒤에 오는 형제만 선택할 수 있으므로 peer 대상이 먼저 있어야 합니다.
+
+```html
+<input class="peer" type="email" required>
+<p class="hidden peer-invalid:block">이메일 확인</p>
+```
+
+## 선택자 조건
+
+`has-*`는 특정 자손이 있는지를, `not-*`는 조건이 아닌 경우를 나타냅니다. 변형을 여러 개 쌓으면 조건을 함께 만족해야 합니다. hover만으로 기능이나 정보를 드러내지 말고 키보드·터치에서도 접근 가능한 경로를 둡니다.
+
+## 마무리 복습
+
+<details>
+<summary>확인 문제 3개 펼치기</summary>
+
+<Quiz
+  questionNumber={1}
+  question="peer-invalid가 볼 수 있는 대상 위치는?"
+  options={['아무 뒤쪽 형제', '부모만', '다른 문서', '앞선 형제 peer']}
+  correctAnswer={4}
+  explanation="peer는 뒤따르는 형제 선택 관계를 사용합니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="aria-disabled가 자동으로 해 주지 않는 것은?"
+  options={['상태 스타일의 조건', '보조 기술에 상태 전달', '클릭 동작 차단', '속성 값 제공']}
+  correctAnswer={3}
+  explanation="ARIA는 의미를 전달하며 네이티브 disabled와 같은 동작을 자동 구현하지 않습니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="키보드 포커스 표시와 관련된 변형은?"
+  options={['size:', 'focus-visible:', 'bg:', 'gap:']}
+  correctAnswer={2}
+  explanation="focus-visible은 사용자가 포커스 위치를 알아볼 필요가 있을 때 스타일링하는 데 씁니다."
+/>
+
+</details>
+
+## 참고 자료
+
+- [Tailwind CSS — hover-focus-and-other-states](https://tailwindcss.com/docs/hover-focus-and-other-states)

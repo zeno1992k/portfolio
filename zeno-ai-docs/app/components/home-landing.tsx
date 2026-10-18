@@ -12,7 +12,6 @@ import {
   SiDaisyui,
   SiJavascript,
   SiNextdotjs,
-  SiNodedotjs,
   SiRadixui,
   SiReact,
   SiShadcnui,
@@ -45,13 +44,8 @@ type SeriesGroup = {
 type Logo = { Icon: typeof SiReact; color: string }
 
 const techLogos = [
-  { label: 'JavaScript', Icon: SiJavascript, color: '#d4a900' },
-  { label: 'React', Icon: SiReact, color: '#149eca' },
-  { label: 'Next.js', Icon: SiNextdotjs, color: 'var(--icon-neutral)' },
-  { label: 'Node.js', Icon: SiNodedotjs, color: '#339933' },
-  { label: 'TypeScript', Icon: SiTypescript, color: '#3178c6' },
-  { label: 'shadcn/ui', Icon: SiShadcnui, color: 'var(--icon-neutral)' },
-  { label: 'daisyUI', Icon: SiDaisyui, color: '#1ad1a5' },
+  { label: 'ECMAScript', Icon: SiJavascript, color: '#d4a900' },
+  { label: 'Tailwind CSS', Icon: SiTailwindcss, color: '#06b6d4' },
 ]
 // 로고가 적어도 넓은 화면에서 띠가 끊기지 않도록 한 세트에 두 번 싣는다.
 const tickerLogos = [...techLogos, ...techLogos]

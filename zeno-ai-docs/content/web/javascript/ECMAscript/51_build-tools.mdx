@@ -3,38 +3,18 @@ title: '51. 빌드 도구'
 description: '트랜스파일러·폴리필·번들러의 역할, Babel·core-js·Browserslist, webpack·Vite, 소스맵, 미니파이와 코드 스플리팅, 타깃 선택 기준을 정리합니다.'
 ---
 
-<Callout type="info">
-  **이번 문서의 목표:** 최신 JavaScript가 구형 환경에서 실행되기까지 거치는 도구를 역할별로 구분하고, 대상 환경(타깃)을 정해 문법 변환과 폴리필을 설정하는 기준을 설명할 수 있습니다.
-</Callout>
+## 핵심 먼저 보기
+
+- 문법은 트랜스파일러가 빌드 때 변환하고, API는 폴리필이 런타임에 채웁니다. `Proxy`와 BigInt는 어느 쪽으로도 완전히 대체되지 않습니다.
+- Browserslist 쿼리 하나가 Babel·webpack·SWC·Vite 플러그인의 공통 타깃입니다. `not dead`를 함께 쓰고 데이터베이스를 갱신합니다.
+- Babel 7은 `useBuiltIns`(`usage`·`entry`)로 core-js를 주입하고, Babel 8은 이를 제거하고 `babel-plugin-polyfill-corejs3`를 씁니다. `corejs`는 소수 버전까지 적습니다.
+- 번들러는 모듈 그래프를 묶고, 트리 셰이킹은 ESM에서 쓰지 않는 export를 지우며, 코드 스플리팅은 동적 `import()`로 청크를 나눕니다. 소스맵은 변환된 위치를 원본으로 되돌립니다.
+- Vite는 개발에서 번들하지 않고, 빌드에서는 Vite 8 기준 Rolldown으로 묶으며 기본 `build.target`은 Baseline widely available입니다.
+- 타깃이 높으면 구형 환경에서 파일 전체가 죽고, 낮으면 번들이 커집니다. 실제 사용자 통계와 Baseline으로 정합니다.
 
 ## 트랜스파일러·폴리필·번들러의 역할
 
-빌드 도구는 작성한 소스를 실행 환경에 맞는 배포 파일로 바꾸는 도구입니다. 역할은 네 가지로 나뉩니다.
-
-| 역할 | 하는 일 | 대표 도구 |
-|------|---------|-----------|
-| 트랜스파일러 | 소스를 같은 수준의 다른 소스로 변환한다. 최신 문법을 낮추고 TypeScript·JSX를 JavaScript로 바꾼다 | Babel, SWC, esbuild, Oxc |
-| 폴리필 | 실행 환경에 없는 내장 객체·메서드를 같은 이름으로 런타임에 채운다 | core-js |
-| 번들러 | `import` 관계를 따라 모듈을 모아 파일 하나 또는 소수로 묶는다 | webpack, Rollup, Rolldown, esbuild |
-| 미니파이어 | 동작을 유지한 채 코드 크기를 줄인다 | Terser, esbuild, Oxc |
-
-트랜스파일러(transpiler)는 컴파일러(compiler)의 하위 개념입니다. 컴파일러는 기계어·바이트코드까지 내려가고, 트랜스파일러는 소스에서 소스로 변환합니다.
-
-```mermaid
-graph LR
-  A[소스: 최신 문법·TS·JSX] --> B[트랜스파일러]
-  B --> C[번들러: 모듈 그래프 → 묶음]
-  C --> D[미니파이어]
-  D --> E[배포 파일 + 소스맵]
-  F[폴리필] -.->|번들에 포함| C
-```
-
-이 도구들이 필요한 이유는 두 가지입니다.
-
-- **엔진 지원 시점 차이**: 같은 ECMAScript 문법도 엔진마다 지원하는 시점이 다릅니다(자세히는 01편). 새 문법을 쓰려면 구형 엔진용 코드를 빌드 때 만들어야 합니다.
-- **모듈 전달 비용**: 모듈이 수백 개면 브라우저가 요청도 수백 번 보냅니다. 또 `import 'lodash'`처럼 경로 없이 패키지 이름만 쓰는 import는 브라우저가 스스로 해석하지 못합니다(자세히는 46편). 번들러가 이를 해결합니다.
-
-도구 경계는 겹칩니다. esbuild와 Vite는 변환·번들·미니파이를 한꺼번에 하고, Babel은 변환만 합니다. 이름이 아니라 "변환인가, 채우기인가, 묶기인가, 줄이기인가"로 구분하면 어떤 도구를 쓰든 같은 틀로 읽힙니다.
+트랜스파일러는 문법 변환, 폴리필은 없는 런타임 기능 보충, 번들러는 모듈 그래프를 배포 파일로 묶는 일을 합니다. 소스맵은 변환된 코드의 위치를 원본에 연결합니다. 이 역할들을 한 도구가 함께 수행하기도 합니다.
 
 ## 문법 변환과 폴리필의 차이
 
@@ -57,27 +37,6 @@ var a = function a(x) {
 };
 ```
 
-문법은 새 키워드와 연산자라서 낡은 엔진이 읽는 순간 거부합니다(01편). 그래서 폴리필로는 해결할 수 없고 반드시 변환해야 합니다. 반대로 API는 `[1, 2].includes(1)`처럼 문법상 평범한 호출이라 파싱은 통과하고 실행할 때 `includes`가 없어서 실패합니다. 이 경우 변환할 문법이 없으므로 폴리필이 필요합니다.
-
-```js
-// 폴리필의 기본 형태: 없을 때만 채운다
-if (!Object.hasOwn) {
-  Object.hasOwn = (obj, key) =>
-    Object.prototype.hasOwnProperty.call(obj, key)
-}
-Object.hasOwn({ a: 1 }, 'a') // true
-```
-
-한 기능이 둘 다 필요한 경우도 있습니다. `for...of`와 스프레드는 문법 변환이 필요하고, 변환 결과가 `Symbol.iterator`를 쓰므로 그 심볼의 폴리필도 필요합니다(자세히는 35편). Babel로 위 변환을 실행하면 `Symbol` 관련 폴리필이 함께 주입되는 것을 볼 수 있습니다.
-
-둘 다 완전하게 처리할 수 없는 기능도 있습니다.
-
-- `Proxy`: 객체 접근을 가로채는 동작은 라이브러리 코드로 흉내 낼 수 없습니다(자세히는 47편). core-js는 폴리필을 제공하지 않습니다.
-- BigInt: 연산자 동작 자체를 바꿔야 해서 core-js가 폴리필하지 않습니다.
-- `using` 같은 새 문법: 내장 객체 부분은 core-js가 채우지만 문법 부분은 트랜스파일러가 지원해야 합니다.
-
-이런 기능을 쓰려면 타깃에서 해당 엔진을 제외해야 합니다.
-
 ## Browserslist
 
 Browserslist는 지원할 브라우저 목록을 쿼리 문자열로 적는 공용 설정입니다. 한 번 적어 두면 Babel의 preset-env, Autoprefixer, webpack, SWC, `@vitejs/plugin-legacy` 같은 도구가 같은 목록을 읽습니다.
@@ -92,10 +51,6 @@ Browserslist는 지원할 브라우저 목록을 쿼리 문자열로 적는 공�
 }
 ```
 
-설정은 작업 폴더에서 상위로 올라가며 `package.json`의 `browserslist` 키나 `.browserslistrc` 파일에서 찾습니다. 한 폴더에 둘 다 있으면 오류가 납니다(실행해서 확인). `BROWSERSLIST` 환경 변수로도 지정할 수 있고, 아무 설정도 없으면 `defaults`를 씁니다.
-
-쿼리 문법은 다음과 같습니다.
-
 | 쿼리 | 뜻 |
 |------|----|
 | `> 0.5%` | 전 세계 사용률이 0.5퍼센트를 넘는 브라우저 버전 |
@@ -107,54 +62,9 @@ Browserslist는 지원할 브라우저 목록을 쿼리 문자열로 적는 공�
 | `baseline widely available` | Baseline 널리 사용 가능 기준 (뒤의 Baseline 절 참조) |
 | `since 2015`, `last 2 years` | 기간 기준 |
 
-- 쉼표나 `or`는 합집합, `and`는 교집합, `not`은 제외입니다.
-- `not`은 앞에 다른 쿼리가 있어야 합니다. `not dead`만 쓰면 오류가 납니다.
-- `defaults`는 `> 0.5%, last 2 versions, Firefox ESR, not dead`와 같습니다.
-- 사용률 수치는 Can I Use 데이터에서 옵니다. 데이터가 낡으면 목록도 낡으므로 `npx update-browserslist-db@latest`로 갱신합니다.
-
-환경별로 다른 목록이 필요하면 `package.json`에 환경 이름을 키로 씁니다.
-
-```json
-{
-  "browserslist": {
-    "production": ["> 1%", "not dead"],
-    "development": ["last 1 chrome version"]
-  }
-}
-```
-
-환경은 `BROWSERSLIST_ENV` 또는 `NODE_ENV`로 고르고, 지정하지 않으면 `production`을 씁니다.
-
-흔한 실수는 `last 2 versions`를 믿는 것입니다. 이 쿼리는 사용률과 무관하게 모든 브라우저의 최근 2개 버전을 포함하므로, 이미 `dead`가 된 브라우저까지 타깃에 들어옵니다. 그래서 `not dead`를 함께 씁니다.
-
 ## Babel과 preset-env
 
 Babel은 JavaScript를 파싱해 AST로 만들고, 플러그인이 AST를 바꾼 뒤, 다시 코드로 출력하는 트랜스파일러입니다(AST는 01편 참조). 변환 하나가 플러그인 하나이고, 플러그인 묶음이 프리셋입니다.
-
-`@babel/preset-env`는 타깃 환경이 지원하지 않는 문법의 변환 플러그인만 골라서 적용하는 프리셋입니다.
-
-```json
-{
-  "presets": [
-    ["@babel/preset-env", { "targets": "defaults" }]
-  ]
-}
-```
-
-같은 입력을 타깃만 바꿔 변환하면 결과가 달라집니다.
-
-```js
-// 입력
-const a = (x) => x ?? 1
-
-// targets: chrome 70 → 화살표 함수는 유지, ?? 만 변환
-const a = x => x !== null && x !== void 0 ? x : 1;
-
-// targets: chrome 80 → 변환 없음
-const a = x => x ?? 1;
-```
-
-주요 옵션은 다음과 같습니다(Babel 7 기준).
 
 | 옵션 | 기본값 | 뜻 |
 |------|--------|----|
@@ -166,57 +76,9 @@ const a = x => x ?? 1;
 | `shippedProposals` | `false` | 브라우저에 이미 출시된 3단계 이상 제안 문법 허용 |
 | `browserslistEnv` | 없음 | 사용할 Browserslist 환경 이름 |
 
-- `modules: 'auto'`는 호출한 도구가 정적 ESM을 지원한다고 알리면 변환하지 않습니다. babel-loader가 그렇게 알리므로 webpack이 ESM 그대로 받아 트리 셰이킹을 할 수 있습니다.
-- `corejs`에 `"3"`만 적으면 `"3.0"`으로 해석되어 3.0 이후 추가된 폴리필이 빠집니다. 설치한 core-js와 같은 소수 버전(예: `"3.50"`)을 적습니다.
-
-### 변환 도우미와 transform-runtime
-
-문법을 낮추면 변환 도우미(helper) 함수가 생깁니다. `class`를 낮추면 `_classCallCheck`, 객체 스프레드를 낮추면 `_objectSpread` 같은 함수가 파일마다 인라인으로 들어갑니다. 파일이 많으면 같은 도우미가 중복됩니다.
-
-`@babel/plugin-transform-runtime`은 이 도우미를 파일마다 복사하지 않고 `@babel/runtime` 패키지에서 import하게 바꿉니다. 번들러가 한 벌만 포함합니다.
-
-### TypeScript와 JSX
-
-`@babel/preset-typescript`와 `@babel/preset-react`는 타입 표기를 지우고 JSX를 함수 호출로 바꿉니다. 타입 검사는 하지 않습니다. 검사는 `tsc` 같은 별도 도구가 합니다. SWC·esbuild·Oxc도 변환만 하고 검사하지 않습니다.
-
-### 설정 파일과 변환 범위
-
-- `babel.config.json`: 프로젝트 전체에 적용되는 설정 파일입니다.
-- `.babelrc.json`: 그 파일이 있는 폴더 이하에만 적용됩니다.
-- 기본 설정으로는 `node_modules`를 변환하지 않습니다(번들러 설정에서 제외하는 것이 관례입니다). 의존 패키지가 최신 문법을 그대로 배포하면 그 문법이 타깃 환경에 남습니다. `usage` 모드의 폴리필도 그 패키지 코드에는 주입되지 않습니다.
-
-### Babel 7과 Babel 8
-
-Babel 8.0.0은 2026년 6월 16일에 출시되었습니다.
-
-| 항목 | Babel 7 | Babel 8 |
-|------|---------|---------|
-| 배포 형식 | CommonJS | ESM 전용. Node.js 22·24·26 이상 |
-| preset-env 기본 타깃 | `>= 0%` (ES5까지 내림) | Browserslist `defaults` (대략 ES2023 수준) |
-| `useBuiltIns` | preset-env 옵션 | 제거. `babel-plugin-polyfill-corejs3` 사용 |
-| `bugfixes` | 옵션 | 옵션 제거, 항상 적용 |
-| `loose`, `spec` | 옵션 | 제거. `assumptions` 설정 사용 |
-
-Babel 8에서 폴리필 주입은 별도 플러그인이 맡습니다.
-
-```json
-{
-  "plugins": [
-    ["babel-plugin-polyfill-corejs3", {
-      "method": "usage-global",
-      "version": "3.50"
-    }]
-  ]
-}
-```
-
-`method`는 `usage-global`(사용한 기능을 전역에 주입), `entry-global`(진입점 import를 치환), `usage-pure`(전역을 건드리지 않는 버전을 import) 세 가지입니다. `proposals: true`를 주면 core-js가 지원하는 제안 단계 기능도 채웁니다.
-
 ## 폴리필과 core-js
 
 core-js는 ECMAScript 표준 라이브러리와 일부 웹 표준 API의 폴리필 모음입니다. 현재 3.x(npm 최신 3.50.0)입니다. Babel의 `useBuiltIns`와 `babel-plugin-polyfill-corejs3`가 주입하는 폴리필도 core-js입니다.
-
-### useBuiltIns의 세 가지 모드 (Babel 7)
 
 | 값 | 동작 |
 |----|------|
@@ -224,123 +86,13 @@ core-js는 ECMAScript 표준 라이브러리와 일부 웹 표준 API의 폴리�
 | `'entry'` | 진입점의 `import 'core-js/stable'` 한 줄을, 타깃에 필요한 개별 모듈 import로 치환한다 |
 | `'usage'` | 파일에서 실제 사용한 기능 중 타깃에 필요한 것만 import로 추가한다 |
 
-```js
-// 입력
-[1, 2].includes(1)
-Promise.resolve(1)
-
-// usage, targets: chrome 50 (modules: false 출력 기준)
-import 'core-js/modules/es.array.includes.js'
-import 'core-js/modules/es.promise.js'
-// usage, targets: chrome 120 → import가 추가되지 않는다
-```
-
-`entry`는 타깃 기준으로 필요한 모듈만 남기므로 chrome 50 대상에서 100줄이 넘는 개별 import로 풀립니다(실행해서 확인). `usage`는 번들이 작지만 분석이 정적이라 `obj[methodName]()`처럼 이름이 동적인 호출은 놓칠 수 있습니다.
-
-### 진입점
-
-| 진입점 | 포함 범위 |
-|--------|-----------|
-| `core-js/es` | 안정 단계 ECMAScript 기능만 |
-| `core-js/stable` | `es` + 웹 표준 API(DOM 컬렉션 이터레이터 등) |
-| `core-js/actual` | `stable` + 3단계 제안 (권장) |
-| `core-js/full` | `actual` + 초기 단계 제안까지 전부 |
-
-- 기능별로 가져올 수도 있습니다: `import 'core-js/actual/array/find-last'`.
-- `core-js/actual` 하나로 `Promise.try`, Set 집합 메서드, 이터레이터 헬퍼, `structuredClone`까지 채워집니다.
-- `modules` 경로(`core-js/modules/...`)는 내부 API라서 마이너·패치 버전에서 바뀔 수 있습니다. 직접 쓰지 않습니다.
-
-### 전역 오염과 pure 버전
-
-`core-js`는 `Array.prototype`·`Promise` 같은 전역을 직접 수정합니다. 애플리케이션에서는 이것이 목적이지만, 라이브러리가 전역을 바꾸면 그 라이브러리를 쓰는 앱과 충돌할 수 있습니다.
-
-`core-js-pure`는 전역을 건드리지 않고 별도 값을 export합니다.
-
-```js
-import Set from 'core-js-pure/actual/set'
-import from from 'core-js-pure/actual/array/from'
-```
-
-프로토타입 메서드는 전역에 붙일 수 없으므로 정적 함수로 바뀝니다. 직접 쓰기보다 `@babel/plugin-transform-runtime`의 `corejs: 3` 옵션 또는 `babel-plugin-polyfill-corejs3`의 `usage-pure`가 자동으로 치환하게 합니다.
-
-### 사용 규칙과 한계
-
-- 전역 방식 폴리필은 진입점 맨 위에서 한 번 불러옵니다. 뒤늦게 불러오면 이미 실행된 코드와 충돌합니다.
-- core-js 모듈은 아주 작고 많아서, 파일별로 로드하면 요청이 수백 개가 됩니다. 반드시 번들에 포함합니다.
-- 완전하지 않은 폴리필이 있습니다. `Symbol` 폴리필은 심볼을 객체로 만들어서 `Symbol() in {}`이 `true`가 되는 등 동작이 다릅니다.
-- `Proxy`, BigInt, `String.prototype.normalize`(용량이 커서 제외), `fetch`는 core-js가 제공하지 않습니다.
-- 과거의 `@babel/polyfill`은 Babel 7.4에서 deprecated되었습니다. core-js를 직접 쓰는 방식으로 대체되었습니다.
-
 ## Webpack과 babel-loader
 
 webpack은 진입점(entry)에서 시작해 `import`·`require`를 따라 모듈 그래프를 만들고, 그래프를 청크(chunk) 단위로 묶어 출력하는 번들러입니다. 현재 주 버전은 5입니다.
 
-webpack은 JavaScript와 JSON만 이해합니다. CSS·이미지·TypeScript 같은 다른 형식은 로더(loader)가 변환해서 넘겨야 합니다.
-
-- **로더**: 파일 하나를 다른 형태로 바꿉니다. `use`에 배열로 나열하면 오른쪽에서 왼쪽, 아래에서 위 순서로 실행됩니다.
-- **플러그인**: 번들 전체에 작용합니다. 청크 분리, 미니파이, 환경 변수 주입 등을 합니다.
-
-babel-loader는 webpack이 JavaScript 파일을 읽을 때 Babel을 거치게 연결하는 로더입니다.
-
-```js
-// webpack.config.js
-module.exports = {
-  mode: 'production',
-  entry: './src/index.js',
-  module: {
-    rules: [{
-      test: /\.m?js$/,
-      exclude: /node_modules/,
-      use: {
-        loader: 'babel-loader',
-        options: { cacheDirectory: true },
-      },
-    }],
-  },
-}
-```
-
-- `test`: 이 로더를 적용할 파일 패턴입니다.
-- `exclude: /node_modules/`: 의존 패키지를 변환 대상에서 뺍니다. 빼지 않으면 빌드가 크게 느려지고, 이미 변환된 패키지 코드가 다시 변환되어 깨질 수 있습니다.
-- `cacheDirectory: true`: 변환 결과를 캐시해서 다음 빌드를 빠르게 합니다.
-- babel-loader 9 이상은 webpack 5, Babel 7.12 이상, Node.js 14.15 이상이 필요합니다. Babel 8로 올릴 때는 버전 호환을 문서로 확인합니다.
-- Babel 설정은 `options`에 직접 쓰거나 `babel.config.json`에 둡니다.
-
-### mode와 트리 셰이킹
-
-`mode: 'production'`은 미니파이와 트리 셰이킹 같은 최적화를 켭니다. 트리 셰이킹(tree shaking)은 어디서도 import하지 않는 export를 번들에서 제거하는 최적화입니다.
-
-```js
-// math.js
-export const add = (a, b) => a + b
-export const sub = (a, b) => a - b
-
-// app.js
-import { add } from './math.js'
-console.log(add(1, 2)) // 번들에 sub는 포함되지 않는다
-```
-
-- `import`·`export`는 코드를 실행하지 않고도 의존 관계를 알 수 있어서(자세히는 45편) 가능한 최적화입니다. CommonJS의 `require`는 실행 중에 결정되어 효과가 제한됩니다.
-- Babel이 ESM을 CommonJS로 바꾸면 트리 셰이킹이 막힙니다. 그래서 `modules: 'auto'`가 중요합니다.
-- `package.json`의 `sideEffects: false`는 "이 패키지의 모듈은 import만으로 부수 효과가 없다"는 선언이라, 쓰지 않는 모듈 파일을 통째로 건너뜁니다. CSS import나 폴리필 import는 부수 효과가 본체이므로 `sideEffects: false`로 선언하면 번들에서 사라집니다. 예외 파일은 배열로 적습니다(`["*.css"]`).
-- 함수 호출 앞의 `/*#__PURE__*/` 주석은 "이 호출은 결과를 안 쓰면 지워도 된다"는 표시입니다.
-
-### webpack 런타임 코드와 target
-
-webpack 자신이 생성하는 런타임 코드(청크 로딩, 모듈 래퍼)의 문법은 `target` 설정이 정합니다. `target`의 기본값은 Browserslist 설정이 있으면 `'browserslist'`, 없으면 `'web'`입니다. `target`은 webpack이 만드는 코드에만 영향을 주고, 작성한 코드는 변환하지 않습니다. 사용자 코드의 변환은 babel-loader 같은 로더의 몫입니다.
-
 ## 소스맵
 
 소스맵(source map)은 변환·번들·미니파이를 거친 코드의 위치를 원본 소스의 위치로 되돌려 주는 JSON 파일입니다. 이것이 없으면 디버거와 에러 스택에 번들 파일의 한 줄짜리 코드가 나옵니다.
-
-배포 파일 끝의 주석이 맵 파일을 가리킵니다.
-
-```js
-function add(d,n){return d+n}console.log(add(1,2));
-//# sourceMappingURL=a.min.js.map
-```
-
-표준 이름은 ECMA-426이고, 버전은 3입니다. 맵의 주요 필드는 다음과 같습니다.
 
 | 필드 | 뜻 |
 |------|----|
@@ -353,142 +105,13 @@ function add(d,n){return d+n}console.log(add(1,2));
 | `sourcesContent` | 원본 소스 내용 (선택) |
 | `ignoreList` | 외부 코드로 취급할 파일의 인덱스 (선택) |
 
-Terser로 위 코드를 실제 압축해 얻은 맵입니다.
-
-```json
-{
-  "version": 3,
-  "file": "a.min.js",
-  "names": ["add", "first", "second", "console", "log"],
-  "sources": ["a.js"],
-  "mappings": "AAAA,SAASA,IAAIC,EAAOC,GAGlB,OAAO..."
-}
-```
-
-- `mappings`는 줄은 `;`, 한 줄 안의 구간은 `,`로 나눕니다. 각 구간은 생성 코드 열, 원본 파일 번호, 원본 줄, 원본 열, 이름 번호를 이전 값과의 차이로 적은 Base64 VLQ입니다. 사람이 읽는 형식이 아닙니다.
-- 소스맵은 브라우저 개발자 도구를 열었을 때 내려받습니다. 일반 방문자의 성능에는 영향이 없습니다.
-- 변환기 → 번들러 → 미니파이어를 거치며 단계마다 맵이 만들어지고, 도구가 이를 합쳐서 원본까지 되돌립니다.
-- Node.js는 `--enable-source-maps` 옵션을 줘야 에러 스택을 소스맵 기준으로 보여 줍니다.
-
-### 설정 옵션
-
-webpack의 `devtool` 값은 키워드를 조합해 만듭니다.
-
-| 키워드 | 뜻 |
-|--------|----|
-| `eval` | 모듈을 `eval()`로 실행하고 맵을 데이터 URL로 붙인다. 재빌드가 빠르다 |
-| `source-map` | 별도 `.map` 파일을 만든다. 품질이 높고 느리다 |
-| `cheap` | 열 정보 없이 줄만 매핑한다. 빠르지만 정밀도가 낮다 |
-| `module` | 로더가 만든 맵까지 반영해 원본 소스를 가리킨다 |
-| `inline` | 맵을 파일로 두지 않고 번들 안에 데이터 URL로 넣는다. 번들이 커진다 |
-| `hidden` | 맵은 만들지만 번들에 `sourceMappingURL` 주석을 넣지 않는다 |
-| `nosources` | `sourcesContent`를 뺀다. 파일 구조는 노출되지만 소스 내용은 숨긴다 |
-
-- 기본값은 `false`이고, `mode: 'development'`에서는 `eval`입니다.
-- 개발 권장: `eval-source-map`(고품질) 또는 `eval-cheap-module-source-map`(속도 절충).
-- 배포 권장: 맵이 필요 없으면 `false`, 필요하면 `source-map`. 에러 수집 서비스에만 올리고 공개하지 않을 때는 `hidden-source-map`.
-
-Vite의 `build.sourcemap`은 `false`(기본), `true`(별도 파일), `'inline'`, `'hidden'` 값을 받습니다.
-
-흔한 실수는 `source-map`을 그대로 배포하고 `.map`을 공개 서버에 두는 것입니다. 누구나 `sourcesContent`로 원본 소스 전체를 볼 수 있습니다. 공개하지 않을 맵은 `hidden`이나 `nosources`로 만들고 서버에서 접근을 막습니다.
-
 ## 미니파이와 코드 스플리팅
 
-### 미니파이
-
-미니파이(minify)는 동작을 유지한 채 코드 크기를 줄이는 변환입니다. 세 가지가 합쳐진 작업입니다.
-
-| 작업 | 내용 |
-|------|------|
-| 공백·주석 제거 | 줄바꿈, 들여쓰기, 주석을 지운다 |
-| 이름 축약(mangle) | 지역 변수·매개변수 이름을 짧게 바꾼다 |
-| 압축(compress) | 쓰지 않는 변수·도달 불가 코드를 지우고 식을 단순화한다 |
-
-```js
-// 입력
-function add(first, second) {
-  const unused = 1;
-  if (false) { console.log('never'); }
-  return first + second;
-}
-console.log(add(1, 2));
-
-// Terser (compress + mangle) 출력
-function add(d,n){return d+n}console.log(add(1,2));
-```
-
-- 압축을 끄고 이름 축약만 하면 `unused`와 `if (false)`가 남습니다. 실제로 지우는 것은 압축 단계입니다.
-- 이름 축약은 지역 이름만 바꿉니다. 객체 프로퍼티와 전역 이름은 기본적으로 건드리지 않습니다.
-- `fn.name`이나 `constructor.name` 값에 의존하는 코드는 축약 뒤에 값이 달라집니다. 로직에 이름을 쓰지 않거나, 미니파이어의 이름 유지 옵션(Terser의 `keep_fnames`, `keep_classnames`)을 씁니다.
-- 미니파이어는 Terser(JavaScript), esbuild, Oxc가 대표적입니다. webpack 5는 production에서 Terser를 기본으로 씁니다.
-
-### 코드 스플리팅
-
-코드 스플리팅(code splitting)은 번들을 여러 청크로 나눠, 필요한 시점에 필요한 청크만 내려받게 하는 기법입니다. 초기 로드 크기를 줄이는 것이 목적입니다.
-
-가장 흔한 방법은 동적 `import()`입니다. 번들러가 그 경계에서 청크를 분리합니다(자세히는 45·46편).
-
-```js
-button.onclick = async () => {
-  const { draw } = await import('./chart.js')
-  draw()
-}
-// chart.js는 버튼을 누르기 전까지 내려받지 않는다
-```
-
-분리하는 기준은 세 가지입니다.
-
-- **동적 import 경계**: 라우트, 모달, 무거운 라이브러리처럼 나중에 필요한 코드.
-- **진입점 분리**: 페이지마다 진입점을 따로 두면 각각의 번들이 생깁니다.
-- **공통·외부 코드 분리**: 여러 청크가 같이 쓰는 모듈과 `node_modules` 코드를 따로 빼서 캐시를 재사용합니다.
-
-webpack의 `optimization.splitChunks` 기본값은 다음과 같습니다(production).
-
-| 옵션 | 기본값 | 뜻 |
-|------|--------|----|
-| `chunks` | `'async'` | 동적 import로 만들어진 청크만 분리 대상 |
-| `minSize` | 20000 | 압축 전 20KB 이상일 때만 새 청크를 만든다 |
-| `maxAsyncRequests` | 30 | 온디맨드 로딩 시 동시 요청 한도 |
-| `maxInitialRequests` | 30 | 초기 로딩 시 동시 요청 한도 |
-| `cacheGroups` | `defaultVendors`, `default` | `node_modules` 모듈과 2번 이상 공유되는 모듈을 분리 |
-
-- 진입점 청크까지 나누려면 `chunks: 'all'`로 바꿉니다.
-- 청크 이름은 주석으로 지정합니다: `import(/* webpackChunkName: "chart" */ './chart.js')`.
-
-Vite는 동적 import를 자동으로 분리하고, 분리한 청크에 대한 preload 단계를 코드에 삽입해서 의존 청크를 병렬로 내려받게 합니다. 청크가 500KB를 넘으면 경고합니다(`build.chunkSizeWarningLimit`, 기본 500).
-
-- 청크가 너무 많으면 요청 수가 늘고, 청크 A를 받은 뒤에야 B의 존재를 알게 되는 연쇄 요청(waterfall)이 생깁니다.
-- 파일 이름에 내용 해시를 넣으면(webpack의 `[contenthash]`) 바뀐 청크만 새로 받고 나머지는 캐시를 씁니다.
-- 흔한 실수는 같은 모듈을 한쪽에서는 정적 `import`로 가져오는 것입니다. 이미 초기 번들에 들어 있어서 동적 `import()`를 써도 분리되지 않습니다.
+미니파이는 동작을 유지하며 공백·이름·표현을 줄입니다. 코드 스플리팅은 필요한 코드를 나중에 받도록 청크를 나눕니다. 파일을 많이 나누기만 하면 요청·공유 의존성 비용이 늘 수 있으므로 실제 로딩 결과로 판단합니다.
 
 ## Vite와 네이티브 ESM
 
 Vite는 개발 서버와 빌드 도구를 합친 프런트엔드 도구입니다. 개발 중에는 번들하지 않고 브라우저의 네이티브 ESM으로 파일을 제공하고, 배포 빌드는 번들러로 묶습니다. 현재 Vite 8(2026년 3월 12일 출시, 이 문서는 8.3 문서 기준)입니다.
-
-### 개발 서버: 번들 없이 제공
-
-webpack류는 개발 서버를 켜기 전에 전체 그래프를 번들합니다. Vite는 브라우저가 요청하는 파일만 그때 변환해 ESM으로 내려 줍니다. 그래서 앱 크기와 무관하게 서버가 빨리 시작되고, 파일을 수정하면 바뀐 모듈만 교체합니다(HMR, Hot Module Replacement).
-
-```html
-<script type="module" src="/src/main.js"></script>
-<!-- main.js의 import를 브라우저가 따라가며 각각 요청한다 -->
-```
-
-- TypeScript와 JSX는 Oxc 변환기가 JavaScript로 바꿉니다. 타입 검사는 하지 않으므로 `tsc`나 에디터가 따로 검사합니다.
-- 개발에서 번들하지 않아도 되는 이유는 브라우저가 ESM을 직접 실행하기 때문입니다(자세히는 46편).
-
-### 의존성 사전 번들
-
-패키지는 개발 서버를 시작할 때 한 번 미리 번들합니다(Vite 8에서는 Rolldown). 이유는 두 가지입니다.
-
-- CommonJS·UMD로 배포된 패키지를 ESM으로 바꿔야 브라우저가 import할 수 있습니다.
-- 내부 모듈이 많은 패키지는 요청이 폭증합니다. `lodash-es`는 내부 모듈이 600개가 넘어서 사전 번들 없이는 600번 넘게 요청합니다.
-
-결과는 `node_modules/.vite`에 캐시됩니다. 잠금 파일, 설정 파일, `NODE_ENV`가 바뀌면 다시 만들고, `--force` 옵션으로 강제할 수도 있습니다.
-
-### 배포 빌드
-
-배포에서는 번들합니다. 중첩된 import가 만드는 네트워크 왕복 때문에 번들하지 않은 ESM을 배포하는 것은 비효율적이기 때문입니다. `vite build`의 기본값은 다음과 같습니다(Vite 8).
 
 | 옵션 | 기본값 | 뜻 |
 |------|--------|----|
@@ -497,16 +120,6 @@ webpack류는 개발 서버를 켜기 전에 전체 그래프를 번들합니다
 | `build.cssMinify` | `'lightningcss'` | CSS 미니파이 |
 | `build.sourcemap` | `false` | 소스맵 생성 여부 |
 | `build.cssCodeSplit` | `true` | CSS도 청크별로 분리 |
-
-- `build.target`은 메이저 버전마다 정해진 날짜 기준의 Baseline widely available 브라우저 최소 버전입니다. 시간이 지나도 같은 메이저 안에서는 바뀌지 않습니다.
-- Vite 7까지는 빌드에 Rollup, 개발 의존성 처리에 esbuild를 썼고, Vite 8부터 Rolldown 하나로 통합되었습니다. Rollup 옵션 대신 `build.rolldownOptions`로 번들러를 세부 설정합니다.
-- Vite는 폴리필을 넣지 않습니다. 기본 철학이 "현대 브라우저만 대상"입니다.
-
-### 구형 브라우저 대응
-
-`@vitejs/plugin-legacy`가 구형 대응을 맡습니다. 최종 번들의 청크마다 `@babel/preset-env`로 변환한 레거시 청크를 SystemJS 형식으로 만들고, ESM을 지원하지 않는 브라우저에서만 이 청크를 불러옵니다. 폴리필 청크도 따로 만듭니다. 최신 브라우저는 일반 청크만 받으므로 레거시 코드의 비용을 치르지 않습니다. 옵션은 `targets`(대상 브라우저), `modernPolyfills`(현대 청크용 폴리필 청크), `renderLegacyChunks`(레거시 청크 생성 여부)입니다.
-
-흔한 실수는 개발에서만 확인하고 배포하는 것입니다. 개발은 번들하지 않고 빌드는 번들하므로 실행 경로가 다릅니다. 배포 전에 `vite preview`로 빌드 결과를 확인합니다.
 
 ## SWC·Oxc·Rolldown
 
@@ -518,14 +131,6 @@ Babel·webpack·Terser는 JavaScript로 작성되어 있어 느립니다. 같은
 | esbuild | Go | 변환·번들·미니파이 | 폴리필 없음. ES6+를 ES5로 변환하지 못함 |
 | Oxc | Rust | 파서·변환기·미니파이어·리졸버·린터(Oxlint)·포매터(Oxfmt) | 문법을 ES2026에서 ES2015까지 낮춤. 변환 도우미는 `@oxc-project/runtime`에서 가져옴 |
 | Rolldown | Rust | 번들러 | Rollup과 같은 플러그인 API. Vite 8의 번들러 |
-
-- SWC의 타깃 지정은 Babel과 같은 방식입니다. `env.targets`를 쓰지 않으면 Browserslist 설정을 읽습니다. `coreJs`는 소수 버전까지 적어야 합니다(`"3"`은 `"3.0"`으로 해석).
-- esbuild의 `target`은 새 문법을 낮추되 API 폴리필은 넣지 않습니다. 클래스 정적 블록처럼 낮추지 못하는 문법은 그대로 둡니다. 폴리필이 필요하면 core-js를 직접 가져옵니다.
-- Oxc는 하위 도구를 따로 쓸 수 있고, Vite 8은 변환·미니파이에 Oxc를 씁니다. 공식 문서에 core-js 주입 기능은 없습니다.
-- Rolldown은 Vite 8이 번들러로 쓰는 Rust 번들러입니다. 공식 소개는 Rollup보다 10–30배 빠르다고 합니다. TypeScript·JSX 변환과 모듈 상호 운용을 내장합니다.
-- Rspack은 webpack의 설정과 로더 호환을 목표로 한 Rust 번들러라서 babel-loader를 그대로 쓸 수 있습니다.
-
-바꿀 때 주의할 점은 Babel 플러그인 생태계가 그대로 따라오지 않는다는 것입니다. Babel 플러그인으로 만든 커스텀 변환이 있으면 Babel을 남겨야 합니다.
 
 ## 번들러 비교
 
@@ -540,11 +145,6 @@ Babel·webpack·Terser는 JavaScript로 작성되어 있어 느립니다. 같은
 
 선택 기준은 단순합니다.
 
-- 새 애플리케이션: Vite를 기본으로 씁니다.
-- 기존 webpack 프로젝트: 로더·플러그인 의존이 크면 그대로 두거나 Rspack으로 옮깁니다.
-- 라이브러리 배포: Rollup 계열(Rollup, Rolldown)로 ESM·CJS 출력을 만듭니다.
-- 속도가 전부인 단순 번들: esbuild.
-
 ## 타깃 선택과 Baseline
 
 타깃은 "이 코드가 실행돼야 하는 가장 낮은 환경"입니다. 타깃이 정해지면 변환할 문법과 채울 폴리필이 정해집니다.
@@ -554,48 +154,17 @@ Babel·webpack·Terser는 JavaScript로 작성되어 있어 느립니다. 같은
 | 너무 낮다 | 변환·폴리필이 늘어 번들이 커지고 실행이 느려진다 |
 | 너무 높다 | 구형 엔진에서 SyntaxError로 파일 전체가 실행되지 않는다. API가 빠지면 호출 시점에 TypeError |
 
-문법 오류는 앱 전체를 멈추므로, 타깃을 정하는 근거는 추측이 아니라 실제 사용자의 브라우저 통계여야 합니다. 통계가 없으면 Baseline을 기준으로 삼습니다.
-
-Baseline은 웹 기능의 브라우저 지원 상태를 한 가지 기준으로 표시하는 체계입니다. 기준 브라우저(core browser set)는 Chrome(데스크톱·Android), Edge, Firefox(데스크톱·Android), Safari(macOS·iOS)입니다.
-
-| 단계 | 조건 |
-|------|------|
-| Limited availability | 기준 브라우저 전체가 지원하지 않는다 |
-| Newly available | 기준 브라우저가 모두 지원해서 상호 운용 가능하다 |
-| Widely available | Newly available이 된 지 30개월이 지났다 |
-
-- "Widely available"이면 대부분의 사이트가 지원 걱정 없이 쓸 수 있습니다.
-- Browserslist는 `baseline widely available`, `baseline newly available` 쿼리를 지원합니다. 이 문서를 쓸 때 browserslist 4.29.3으로 `baseline widely available`을 실행한 결과, Chrome·Edge 123 이상, Firefox 124 이상, Safari 17.4 이상이었습니다. 시간이 지나면 기준선이 올라갑니다.
-- Vite의 `build.target` 기본값 `baseline-widely-available`이 이 개념을 쓰며, 메이저 버전별로 날짜를 고정해 기준선이 임의로 움직이지 않게 합니다.
-- Babel 8의 preset-env 기본 타깃은 Browserslist `defaults`입니다.
-
-타깃을 정하는 순서는 다음과 같습니다.
-
-1. 서비스의 접속 통계에서 지원할 브라우저 비율을 정합니다.
-2. Browserslist 쿼리로 옮기고 `package.json` 또는 `.browserslistrc` 한 곳에만 둡니다.
-3. 변환기·webpack·Vite 플러그인이 같은 쿼리를 읽게 합니다.
-4. 사용하는 API가 타깃에 없으면 core-js로 채우고, 채울 수 없는 기능(`Proxy` 등)은 타깃에서 해당 환경을 제외합니다.
-5. 지원 여부가 불확실한 기능은 MDN 호환성 표와 Baseline 상태로 확인합니다.
-
-흔한 실수는 도구마다 타깃을 따로 적는 것입니다. Babel은 IE 11, webpack은 기본 `web`, 미니파이어는 ES2015처럼 어긋나면 변환 결과가 서로 모순되어 일부 환경에서만 깨집니다. Browserslist를 단일 출처로 둡니다.
-
-## 핵심 정리
-
-- 문법은 트랜스파일러가 빌드 때 변환하고, API는 폴리필이 런타임에 채웁니다. `Proxy`와 BigInt는 어느 쪽으로도 완전히 대체되지 않습니다.
-- Browserslist 쿼리 하나가 Babel·webpack·SWC·Vite 플러그인의 공통 타깃입니다. `not dead`를 함께 쓰고 데이터베이스를 갱신합니다.
-- Babel 7은 `useBuiltIns`(`usage`·`entry`)로 core-js를 주입하고, Babel 8은 이를 제거하고 `babel-plugin-polyfill-corejs3`를 씁니다. `corejs`는 소수 버전까지 적습니다.
-- 번들러는 모듈 그래프를 묶고, 트리 셰이킹은 ESM에서 쓰지 않는 export를 지우며, 코드 스플리팅은 동적 `import()`로 청크를 나눕니다. 소스맵은 변환된 위치를 원본으로 되돌립니다.
-- Vite는 개발에서 번들하지 않고, 빌드에서는 Vite 8 기준 Rolldown으로 묶으며 기본 `build.target`은 Baseline widely available입니다.
-- 타깃이 높으면 구형 환경에서 파일 전체가 죽고, 낮으면 번들이 커집니다. 실제 사용자 통계와 Baseline으로 정합니다.
-
 ## 마무리 복습
+
+<details>
+<summary>확인 문제 3개 펼치기</summary>
 
 <Quiz
   questionNumber={1}
   question="구형 브라우저 대응에서 폴리필이 아니라 트랜스파일러가 처리해야 하는 것은?"
   options={['Object.hasOwn 함수', 'Promise 생성자', 'Array.prototype.includes 메서드', '널 병합 연산자 ??']}
   correctAnswer={4}
-  explanation="?? 는 문법이라서 구형 엔진이 파싱 단계에서 거부합니다. 빌드 때 다른 문법으로 바꿔야 합니다. 나머지 세 가지는 내장 객체·메서드이므로 없을 때 런타임에 채우는 폴리필로 해결합니다."
+  explanation="?? 는 문법이라서 구형 엔진이 파싱 단계에서 거부합니다."
 />
 
 <Quiz
@@ -613,6 +182,8 @@ Baseline은 웹 기능의 브라우저 지원 상태를 한 가지 기준으로 
   correctAnswer={3}
   explanation="hidden은 맵을 만들되 번들에서 참조하는 주석을 넣지 않아 에러 수집 서비스에만 올리는 용도에 맞습니다. 맵을 만들지 않는 것은 false, 참조 주석까지 넣는 것은 source-map, 원본 내용을 빼는 것은 nosources입니다."
 />
+
+</details>
 
 ## 참고 자료
 

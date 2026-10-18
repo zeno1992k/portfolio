@@ -1,11 +1,11 @@
 {
-  "generatedAt": "2026-10-18T15:38:06.156Z",
-  "groupCount": 6,
-  "seriesCount": 19,
+  "generatedAt": "2026-10-18T16:48:23.799Z",
+  "groupCount": 2,
+  "seriesCount": 2,
   "groups": [
     {
       "title": "Web · JavaScript",
-      "description": "3개 시리즈 · 문서 224편",
+      "description": "1개 시리즈 · 문서 53편",
       "order": "01",
       "series": [
         {
@@ -15,185 +15,21 @@
           "documentCount": 53,
           "preview": "code",
           "accent": "blue"
-        },
-        {
-          "title": "Web APIs",
-          "description": "ECMAScript와 브라우저 API의 경계, 브라우저 런타임과 전역 객체, 웹 표준 읽는 법, 기능 감지와 점진적 향상, 컴포넌트 아키텍처의 목표를 정리합니다.",
-          "href": "/web/javascript/web_apis/01_browser-platform",
-          "documentCount": 85,
-          "preview": "browser",
-          "accent": "green"
-        },
-        {
-          "title": "JavaScript 코딩테스트",
-          "description": "코딩테스트 풀이에 필요한 변수, 자료형, 연산자, 함수, 스코프, 구조 분해, 복사, 값과 참조, 옵셔널 체이닝, 클래스의 규칙과 함정을 정리합니다.",
-          "href": "/web/javascript/coding_test/01_javascript-basics",
-          "documentCount": 86,
-          "preview": "code",
-          "accent": "amber"
-        }
-      ]
-    },
-    {
-      "title": "Web · TypeScript",
-      "description": "3개 시리즈 · 문서 58편",
-      "order": "02",
-      "series": [
-        {
-          "title": "TypeScript 기초",
-          "description": "같은 버그가 있는 JS 코드와 TypeScript 코드를 나란히 실행해, 타입 오류가 언제 드러나는지 비교합니다.",
-          "href": "/web/typescript/typescript_fundamentals/01_what-typescript-solves",
-          "documentCount": 18,
-          "preview": "code",
-          "accent": "red"
-        },
-        {
-          "title": "TypeScript 중급",
-          "description": "typescript_fundamentals가 완성한 expense-tracker 상태를 점검하고, 이번 과목에서 다룰 타입 레벨 프로그래밍을 미리 봅니다.",
-          "href": "/web/typescript/typescript_2/01_intermediate-typescript-preview",
-          "documentCount": 18,
-          "preview": "code",
-          "accent": "blue"
-        },
-        {
-          "title": "TypeScript 고급",
-          "description": "bookshelf(JS)에서 타입이 못 잡아주는 지점을 확인하고, 빅뱅 전환 대신 allowJs 기반 점진 전환을 택하는 이유와 이 과목의 최종 목표를 정리합니다",
-          "href": "/web/typescript/typescript_3/01_migration-strategy-and-react19-typescript-overview",
-          "documentCount": 22,
-          "preview": "code",
-          "accent": "green"
-        }
-      ]
-    },
-    {
-      "title": "Web · React",
-      "description": "3개 시리즈 · 문서 95편",
-      "order": "03",
-      "series": [
-        {
-          "title": "React 기초",
-          "description": "React가 무엇이고 어떻게 화면을 그리는지, SPA·CSR·SSR·SSG·Hydration·Streaming의 차이, 프레임워크와 React Native, 버전 역사와 생태계 지도를 정리합니다.",
-          "href": "/web/react/react_1/01_react-overview",
-          "documentCount": 30,
-          "preview": "code",
-          "accent": "amber"
-        },
-        {
-          "title": "React 중급",
-          "description": "Context를 값의 성격별로 나누는 기준, State와 Dispatch 분리, Provider 컴포넌트와 커스텀 훅, 재렌더링 범위와 value 안정화, 남용 판단, Composition과의 비교, selector가 없어서 생기는 한계와 대안을 정리합니다.",
-          "href": "/web/react/react_2/01_context-design",
-          "documentCount": 36,
-          "preview": "code",
-          "accent": "red"
-        },
-        {
-          "title": "React 고급",
-          "description": "서버에서 React를 HTML로 렌더링하는 방식, renderToString과 renderToStaticMarkup, 초기 로딩 지표, SEO, 장단점, 브라우저 전용 API 문제, CSR·SSR·SSG·ISR 비교를 정리합니다.",
-          "href": "/web/react/react_3/01_ssr",
-          "documentCount": 29,
-          "preview": "code",
-          "accent": "blue"
-        }
-      ]
-    },
-    {
-      "title": "Web · Node.js",
-      "description": "3개 시리즈 · 문서 72편",
-      "order": "04",
-      "series": [
-        {
-          "title": "Node.js 기초",
-          "description": "Node.js의 구성(V8·libuv·Node API), ECMAScript와의 구분, 싱글 스레드 오해, 스레드 풀, 이벤트 루프, 블로킹과 I/O·CPU 바운드, 쓰임새를 정리합니다.",
-          "href": "/web/nodejs/nodejs_1/01_nodejs-overview",
-          "documentCount": 29,
-          "preview": "code",
-          "accent": "green"
-        },
-        {
-          "title": "Node.js 중급",
-          "description": "스트림의 개념과 네 가지 종류, flowing·paused 모드, data·end·finish·readable 이벤트, read()와 push()의 동작을 정리합니다.",
-          "href": "/web/nodejs/nodejs_2/01_streams-basics",
-          "documentCount": 27,
-          "preview": "code",
-          "accent": "amber"
-        },
-        {
-          "title": "Node.js 고급",
-          "description": "exec·execFile·spawn·fork의 차이, 쉘과 명령 주입, stdio와 버퍼, 종료 코드와 시그널, IPC 메시지, 좀비와 detached, execa를 정리합니다.",
-          "href": "/web/nodejs/nodejs_3/01_child-process",
-          "documentCount": 16,
-          "preview": "code",
-          "accent": "red"
-        }
-      ]
-    },
-    {
-      "title": "Web · Next.js",
-      "description": "3개 시리즈 · 문서 3편",
-      "order": "05",
-      "series": [
-        {
-          "title": "Next.js 기초",
-          "description": "Next.js 기초 문서를 준비하고 있습니다.",
-          "href": "/web/nextjs/nextjs_1/01_test",
-          "documentCount": 1,
-          "preview": "code",
-          "accent": "blue"
-        },
-        {
-          "title": "Next.js 중급",
-          "description": "Next.js 중급 문서를 준비하고 있습니다.",
-          "href": "/web/nextjs/nextjs_2/01_test",
-          "documentCount": 1,
-          "preview": "code",
-          "accent": "green"
-        },
-        {
-          "title": "Next.js 고급",
-          "description": "Next.js 고급 문서를 준비하고 있습니다.",
-          "href": "/web/nextjs/nextjs_3/01_test",
-          "documentCount": 1,
-          "preview": "code",
-          "accent": "amber"
         }
       ]
     },
     {
       "title": "Web · UI Libraries",
-      "description": "4개 시리즈 · 문서 4편",
-      "order": "06",
+      "description": "1개 시리즈 · 문서 24편",
+      "order": "02",
       "series": [
         {
           "title": "Tailwind CSS",
-          "description": "Tailwind CSS 문서를 준비하고 있습니다.",
-          "href": "/web/ui_libraries/tailwind_css/01_test",
-          "documentCount": 1,
-          "preview": "code",
-          "accent": "red"
-        },
-        {
-          "title": "shadcn/ui",
-          "description": "shadcn/ui 문서를 준비하고 있습니다.",
-          "href": "/web/ui_libraries/shadcn_ui/01_test",
-          "documentCount": 1,
-          "preview": "code",
-          "accent": "blue"
-        },
-        {
-          "title": "Radix UI",
-          "description": "Radix UI 문서를 준비하고 있습니다.",
-          "href": "/web/ui_libraries/radix_ui/01_test",
-          "documentCount": 1,
+          "description": "유틸리티와 CSS의 관계, Preflight, 이 과목의 기준을 이해합니다.",
+          "href": "/web/ui_libraries/tailwind_css/01_utility-first",
+          "documentCount": 24,
           "preview": "code",
           "accent": "green"
-        },
-        {
-          "title": "daisyUI",
-          "description": "daisyUI 문서를 준비하고 있습니다.",
-          "href": "/web/ui_libraries/daisy_ui/01_test",
-          "documentCount": 1,
-          "preview": "code",
-          "accent": "amber"
         }
       ]
     }

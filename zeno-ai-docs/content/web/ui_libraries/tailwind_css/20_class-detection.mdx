@@ -1,0 +1,72 @@
+---
+title: '20. 클래스 감지와 동적 값'
+description: '정적 문자열, @source, 외부 패키지·모노레포 감지 범위를 정리합니다.'
+---
+
+## 핵심 먼저 보기
+
+- Tailwind는 코드를 실행하지 않고 소스의 클래스 후보를 읽습니다.
+- 조건부 클래스도 완성된 이름이 소스에 있어야 합니다.
+- 감지 범위를 넓히기 전에 빠진 파일의 위치부터 확인합니다.
+
+## 문자열을 조립하면 빠지는 이유
+
+`bg-${color}-600`은 완성된 클래스가 파일에 없으므로 필요한 CSS를 안정적으로 만들 수 없습니다. 상태별로 `bg-blue-600`·`bg-red-600`이라는 완성된 문자열을 매핑합니다. 조합 함수나 React 조건식 자체가 문제인 것은 아닙니다.
+
+```js
+const tones = {
+  info: 'bg-blue-600 text-white',
+  danger: 'bg-red-600 text-white',
+}
+// 선택한 값을 className에 사용한다.
+```
+
+## source 경로
+
+v4는 소스를 자동 감지하지만 `.gitignore` 대상이나 `node_modules` 등은 기본 감지에서 빠질 수 있습니다. 외부 UI 패키지처럼 필요한 대상은 `@source`로 등록합니다. 모노레포에서는 빌드 작업 디렉터리와 기준 경로도 확인합니다.
+
+```css
+@import "tailwindcss";
+@source "../node_modules/@acme/ui";
+@source inline("bg-blue-600 text-white");
+```
+
+## 필요한 클래스만 생성
+
+`@source inline()`은 소스에 없지만 확실히 필요한 클래스 후보를 명시합니다. 가능한 값 전체를 대량 생성하기보다 유한한 선택지는 완성 문자열, 연속적인 값은 CSS 변수로 나눕니다. 감지 대상에 파일을 추가하는 것과 그 파일의 CSS를 import하는 것은 다른 일입니다.
+
+## 마무리 복습
+
+<details>
+<summary>확인 문제 3개 펼치기</summary>
+
+<Quiz
+  questionNumber={1}
+  question="동적 배경색 선택의 안전한 방식은?"
+  options={['완성 클래스 문자열 매핑', 'bg-와 색 이름을 조각내기만', '코드 실행을 빌드가 추측', 'HTML에 없는 임의 문자열']}
+  correctAnswer={1}
+  explanation="빌드 시 완성된 클래스 후보를 읽을 수 있어야 합니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="외부 패키지의 클래스가 빠질 때 보는 것은?"
+  options={['비밀번호', '이미지 alt', '텍스트 길이', '@source와 감지 경로']}
+  correctAnswer={4}
+  explanation="외부 경로나 기본 제외 대상은 명시적인 source 등록이 필요할 수 있습니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="런타임에 연속적으로 변하는 값은?"
+  options={['무조건 safelist 수만 개', 'random 클래스', 'CSS 변수로 전달', '모든 픽셀을 클래스 생성']}
+  correctAnswer={3}
+  explanation="고정 유틸리티와 CSS 변수를 연결하면 값마다 새 클래스를 만들 필요가 없습니다."
+/>
+
+</details>
+
+## 참고 자료
+
+- [Tailwind CSS — detecting-classes-in-source-files](https://tailwindcss.com/docs/detecting-classes-in-source-files)
+- [Tailwind CSS — functions-and-directives](https://tailwindcss.com/docs/functions-and-directives)

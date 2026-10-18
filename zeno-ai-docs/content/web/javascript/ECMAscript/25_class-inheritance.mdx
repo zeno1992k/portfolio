@@ -3,9 +3,14 @@ title: '25. 클래스 상속'
 description: 'extends가 만드는 두 프로토타입 체인, super, 오버라이딩, 인스턴스 생성 과정, 빌트인 확장, HomeObject, Symbol.species, new.target, 믹스인, 합성과의 선택 기준을 정리합니다.'
 ---
 
-<Callout type="info">
-  **이번 문서의 목표:** 클래스 상속이 만드는 두 프로토타입 체인과 `super`·`new.target`의 동작 규칙을 설명하고, 상속·믹스인·합성 중 무엇을 쓸지 판단할 수 있습니다.
-</Callout>
+## 핵심 먼저 보기
+
+- `extends`는 인스턴스 체인(`Child.prototype` → `Parent.prototype`)과 생성자 체인(`Child` → `Parent`)을 연결하며, 오른쪽은 정의 시점에 평가되는 표현식이라 constructor이거나 `null`이어야 합니다.
+- 파생 클래스는 `this`를 만들지 않고 `super()`가 부모에게서 받은 객체를 씁니다. `new.target`이 체인 전체에 전달되고, `super()` 전에는 `this`를 쓸 수 없으며, 필드는 `super()` 반환 직후 초기화됩니다.
+- `super.x`는 `[[HomeObject]]`의 프로토타입을 기준으로 정의 시점에 고정되고, `super()`는 현재 클래스의 `[[Prototype]]`을 기준으로 합니다.
+- 빌트인 확장은 ES5 방식으로는 안 되고 `class extends`로 되며, 파생 메서드의 반환 타입은 `Symbol.species`가 정하며(`toSorted` 등은 제외), `Map`·`Set` 생성자는 오버라이딩한 `set`·`add`를 부릅니다.
+- 정적 멤버는 생성자 체인으로 상속되고 static 메서드의 `this`는 호출한 클래스입니다.
+- 추상 클래스는 `new.target`으로, 다중 기능은 서브클래스 팩토리 믹스인으로 구현하고, is-a가 확실하지 않으면 합성을 선택합니다.
 
 ## `extends`
 
@@ -19,30 +24,10 @@ class Dog extends Animal {}
 new Dog().speak() // 'sound' (부모 메서드를 상속)
 ```
 
-`extends`는 프로토타입 체인 두 개를 연결합니다.
-
 | 체인 | 연결 | 하는 일 |
 |------|------|---------|
 | 인스턴스 체인 | `Dog.prototype` → `Animal.prototype` | 인스턴스 메서드와 접근자 상속 |
 | 생성자 체인 | `Dog` → `Animal` | 정적 멤버 상속, `super()`가 부모를 찾는 경로 |
-
-```js
-const proto = Object.getPrototypeOf
-proto(Dog.prototype) === Animal.prototype // true
-proto(Dog) === Animal                     // true
-proto(Animal) === Function.prototype      // true (기본 클래스)
-```
-
-```text
-dog → Dog.prototype → Animal.prototype → Object.prototype
-Dog → Animal → Function.prototype → Object.prototype
-```
-
-- `new Dog()`로 만든 `dog`에 대해 `dog instanceof Animal`은 `true`입니다. `Animal.prototype`이 `dog`의 체인에 있기 때문입니다.
-- 클래스는 `Dog.prototype.constructor === Dog`을 자동으로 맞춥니다. 생성자 함수 방식에서는 직접 복구해야 했습니다(자세히는 17편).
-- 클래스의 `prototype` 프로퍼티는 쓰기·재설정이 불가능합니다. 대입은 비엄격 모드에서 무시되고 엄격 모드에서 TypeError입니다.
-- `constructor`를 생략하면 `constructor(...args) { super(...args) }`가 암묵적으로 들어가 인수를 전부 부모에 넘깁니다.
-- 클래스는 `new` 없이 호출하면 TypeError입니다. 그래서 부모 초기화는 `Parent.call(this)`가 아니라 `super()`로 합니다.
 
 ## 동적 상속
 
@@ -55,8 +40,6 @@ class C extends ns.Base {}              // 멤버 접근
 class D extends flag ? Array : Set {}   // ❌ SyntaxError
 ```
 
-오른쪽 값에 따른 결과는 다음과 같습니다.
-
 | 오른쪽 값 | 결과 |
 |-----------|------|
 | 클래스, ES5 생성자 함수, 빌트인 생성자 | 정상 |
@@ -67,187 +50,13 @@ class D extends flag ? Array : Set {}   // ❌ SyntaxError
 | `prototype`이 객체도 `null`도 아닌 함수 | TypeError |
 | `prototype`이 `null`인 함수 | 정상, `Child.prototype`의 프로토타입이 `null` |
 
-- 부모의 `prototype`은 정의 시점에 한 번만 읽습니다. 이후 `Parent.prototype = {...}`로 교체해도 자식은 옛 프로토타입을 계속 상속합니다.
-- 오른쪽 평가 중에는 클래스 이름이 아직 초기화되지 않습니다. `class A extends A {}`나 아직 선언되지 않은 클래스를 부모로 쓰면 ReferenceError입니다(자세히는 24편).
-
-`super()`는 이름이 아니라 실행 시점의 `[[Prototype]]`을 읽습니다. 자식의 `[[Prototype]]`을 바꾸면 `super()`가 부르는 생성자가 바뀝니다. 인스턴스의 프로토타입은 `Child.prototype`에서 정해지므로 그대로입니다.
-
-```js
-class A { constructor() { this.from = 'A' } }
-class A2 { constructor() { this.from = 'A2' } }
-class B extends A {}
-new B().from            // 'A'
-Object.setPrototypeOf(B, A2)
-const b = new B()
-b.from                  // 'A2' (super()가 A2를 호출)
-b instanceof A          // true (인스턴스 체인은 그대로)
-b instanceof A2         // false
-```
-
-**`extends null`:** `class N extends null {}`에서 `N.prototype`의 프로토타입은 `null`이고 `N`의 프로토타입은 `Function.prototype`입니다. 암묵적 `constructor`가 `super()`를 부르는데 부모가 `null`이라 `new N()`은 TypeError입니다. constructor에서 객체를 직접 반환하면 만들 수 있습니다.
-
-```js
-class N extends null {
-  constructor() {
-    return Object.create(new.target.prototype)
-  }
-}
-const n = new N()
-n instanceof N  // true
-'toString' in n // false (Object.prototype을 상속하지 않음)
-```
-
-**ES5 함수와의 관계:** 생성자 함수를 클래스의 부모로 쓰는 것은 됩니다. 반대로 ES5 생성자 함수가 클래스를 `Parent.call(this)`로 부르면 TypeError입니다. `Reflect.construct(Parent, args, new.target)`을 써야 합니다(자세히는 47편).
-
-```js
-function Legacy() { this.old = true }
-class Modern extends Legacy {}
-new Modern().old // true
-
-class P {}
-function Q() { P.call(this) }
-new Q() // TypeError: 클래스는 new 없이 호출할 수 없음
-```
-
 ## `super` 호출과 `super` 참조
 
-`super`는 부모를 가리키는 키워드이고 두 형태가 있습니다. 값이 아니라 문법이라 `const s = super`나 `console.log(super)`는 SyntaxError입니다.
-
-| 형태 | 쓸 수 있는 곳 | 하는 일 |
-|------|---------------|---------|
-| `super(...args)` | 파생 클래스의 constructor와 그 안의 화살표 함수 | 부모 생성자를 실행하고 `this`를 얻는다 |
-| `super.name`, `super[expr]` | 클래스·객체 리터럴의 메서드와 접근자, 필드 초기화식, static 블록, 그 안의 화살표 함수 | 부모 쪽 프로퍼티를 `this` 기준으로 읽거나 호출 |
-
-### `super()` 호출
-
-```js
-class Child extends Parent {
-  constructor(a, b) {
-    super(a)   // this를 쓰기 전에 반드시 호출
-    this.b = b
-  }
-}
-```
-
-| 상황 | 결과 |
-|------|------|
-| `super()` 전에 `this`를 읽거나 씀 | ReferenceError |
-| `super()` 없이 constructor가 끝남 | ReferenceError |
-| `super()`를 두 번 호출 | ReferenceError (두 번째 호출에서) |
-| 기본 클래스나 일반 함수 안의 `super()` | SyntaxError |
-
-- 두 번째 `super()`는 부모 생성자를 한 번 더 실행한 뒤 이미 `this`가 바인딩되어 있음을 발견해 에러를 냅니다.
-- `super()` 없이 constructor가 끝나도 객체를 직접 반환하면 에러가 없습니다. 이때 자식의 `this`는 쓰이지 않습니다.
-- 화살표 함수 안의 `super()`는 바깥 constructor의 것으로 동작합니다. 이 경우도 한 번만 호출해야 합니다.
-- `super()` 앞에서 할 수 있는 일은 `this`를 쓰지 않는 계산(인수 가공)뿐입니다.
-
-### `super` 참조
-
-```js
-class Parent {
-  hi() { return 'P' }
-  static s() { return 'P.s' }
-}
-class Child extends Parent {
-  hi() { return super.hi() + 'C' }      // 'PC'
-  static s() { return super.s() + 'C' } // 'P.sC'
-}
-```
-
-- static 메서드 안의 `super`는 부모 클래스(생성자 체인)를, 인스턴스 메서드 안의 `super`는 부모의 `prototype`을 가리킵니다.
-- `super.method()`를 호출할 때 `this`는 현재 인스턴스입니다. 부모 메서드 안의 `this.x`는 자식 인스턴스의 값을 읽습니다.
-- `super.prop`은 부모의 프로토타입 객체에서 찾습니다. 부모의 인스턴스 필드는 인스턴스의 own 프로퍼티라 `super.field`로 읽으면 `undefined`이고, `this.field`로 읽습니다.
-- `super.x = v`는 부모 프로토타입이 아니라 `this`에 프로퍼티를 만듭니다. 부모에 `x`의 setter가 있으면 그 setter가 `this`를 대상으로 실행됩니다.
-- `delete super.x`는 ReferenceError입니다.
-- 부모에 없는 프로퍼티는 `undefined`이고, 그것을 `super.nope()`로 호출하면 TypeError입니다.
-- `const f = super.hi; f()`처럼 꺼내 호출하면 `this`를 잃어 부모 메서드 안의 `this.x`에서 TypeError가 납니다.
-- 필드 초기화식과 static 블록에서도 `super.x`를 쓸 수 있습니다.
-- 객체 리터럴의 메서드에서도 씁니다. 부모는 그 객체의 프로토타입입니다.
-
-```js
-const proto = { hi() { return 'proto' } }
-const obj = {
-  __proto__: proto,
-  hi() { return super.hi() + '+obj' }
-}
-obj.hi() // 'proto+obj'
-```
-
-체인이 여러 단계이면 각 클래스의 `super.m()`이 한 단계씩 올라갑니다. 자식이 오버라이드하지 않으면 중간 클래스의 메서드가 실행되고, 그 안의 `super`는 그 클래스의 부모를 가리킵니다.
-
-```js
-class X { m() { return 'X' } }
-class Y extends X { m() { return 'Y>' + super.m() } }
-class Z extends Y {} // m을 오버라이드하지 않음
-new Z().m() // 'Y>X'
-```
+`super()`는 부모 생성자를 호출하며 파생 생성자에서 `this` 사용보다 먼저 실행해야 합니다. `super.method()`는 부모 메서드를 찾되 현재 인스턴스를 `this`로 사용합니다. 필드 초기화 순서는 부모 → 자식입니다.
 
 ## 메서드 오버라이딩
 
 메서드 오버라이딩은 자식이 부모와 같은 이름의 메서드를 정의해 부모의 것을 가리는 것입니다. 프로퍼티 조회는 체인에서 처음 만나는 것을 쓰므로 자식의 `prototype`에 있는 메서드가 이깁니다(자세히는 17편). JavaScript는 인수 개수나 타입으로 메서드를 구분하지 않아 오버로딩이 없습니다.
-
-```js
-class Animal {
-  speak() { return 'sound' }
-}
-class Dog extends Animal {
-  speak() { return 'woof' }                  // 교체
-}
-class Cat extends Animal {
-  speak() { return super.speak() + '+meow' } // 확장
-}
-new Dog().speak() // 'woof'
-new Cat().speak() // 'sound+meow'
-```
-
-- 정적 메서드도 같은 방식으로 오버라이딩하고 `super.name()`으로 부모의 정적 메서드를 부릅니다.
-- `toString`·`valueOf`·`toJSON`처럼 `Object.prototype`에서 상속한 메서드도 같은 규칙으로 오버라이딩합니다.
-- 부모 메서드를 부를 때 `Parent.prototype.m.call(this)`보다 `super.m()`을 씁니다. 부모 이름을 하드코딩하지 않기 때문입니다(`[[HomeObject]]` 절 참고).
-
-**접근자:** getter와 setter는 한 프로퍼티의 한 쌍입니다. 자식이 getter만 정의하면 부모의 setter까지 가려져, 그 프로퍼티는 setter가 없는 접근자가 됩니다.
-
-```js
-class A {
-  #v = 1
-  get v() { return this.#v }
-  set v(n) { this.#v = n }
-}
-class B extends A {
-  get v() { return super.v * 10 }
-  // set이 없음: new B().v = 5 는 TypeError (엄격 모드)
-}
-```
-
-setter도 함께 정의하고 `set v(n) { super.v = n }`으로 부모에 위임합니다.
-
-**필드와 메서드:** 인스턴스 필드는 인스턴스의 own 프로퍼티라서 프로토타입의 메서드보다 항상 우선합니다. 부모가 화살표 함수 필드로 정의한 이름을 자식이 메서드로 오버라이딩하면 효과가 없습니다. 오버라이딩될 가능성이 있는 동작은 메서드로 정의합니다.
-
-```js
-class A { hi = () => 'A field' }
-class B extends A { hi() { return 'B method' } }
-new B().hi() // 'A field' (own 프로퍼티가 이김)
-```
-
-### private 멤버와 상속
-
-- 자식은 부모의 `#x`에 접근할 수 없습니다. 선언되지 않은 private 이름을 쓰면 정의 시점에 SyntaxError입니다. 접근이 필요하면 부모가 public 메서드나 접근자를 제공해야 하고, `protected`에 해당하는 문법은 없습니다.
-- 자식이 같은 이름 `#x`를 선언해도 별개의 슬롯입니다.
-- private 메서드는 오버라이딩되지 않습니다. 부모 코드의 `this.#p()`는 항상 부모의 `#p`를 부릅니다.
-- 자식 인스턴스도 부모가 설치한 private 필드를 가집니다. `#x in obj`는 자식 인스턴스에서도 `true`이고, 인스턴스를 프로토타입으로 삼은 `Object.create(instance)`에서는 `false`입니다.
-
-```js
-class A {
-  #x = 1
-  getX() { return this.#x }
-}
-class B extends A {
-  #x = 2 // A의 #x와 별개
-  getBX() { return this.#x }
-}
-const b = new B()
-b.getX()  // 1
-b.getBX() // 2
-```
 
 ## 상속 클래스의 인스턴스 생성 과정
 
@@ -260,105 +69,9 @@ b.getBX() // 2
 | 필드 초기화 | constructor 본문 직전 | `super()`가 반환한 직후 |
 | `super()` | 불가 | 필수(객체를 직접 반환하지 않는 한) |
 
-`new Child()`의 진행 순서입니다(`Child` → `Parent` → `Base`, `Base`가 기본 클래스).
-
-1. `new.target`이 `Child`로 정해지고, `Child`는 파생 클래스라 `this`를 만들지 않은 채 본문을 실행합니다.
-2. 본문의 `super()`가 `Child`의 `[[Prototype]]`인 `Parent`를 호출합니다. 이때 `new.target`을 그대로 넘깁니다.
-3. `Parent`도 같은 방식으로 `Base`를 호출합니다.
-4. 기본 클래스 `Base`가 `new.target.prototype`, 즉 `Child.prototype`을 프로토타입으로 하는 객체를 만듭니다.
-5. `Base`의 필드가 초기화되고 본문이 실행됩니다.
-6. `Base`가 반환하면 그 객체가 `Parent`의 `this`가 되고, `Parent`의 필드 초기화 → `super()` 다음 문장 순으로 진행합니다.
-7. `Child`도 같은 순서를 거치고, `new` 표현식의 값은 이 객체입니다.
-
-```js
-const log = []
-class A {
-  fa = log.push('A field')
-  constructor() { log.push('A ctor') }
-}
-class B extends A {
-  fb = log.push('B field')
-  constructor() {
-    log.push('B before')
-    super()
-    log.push('B after')
-  }
-}
-new B()
-log // ['B before','A field','A ctor','B field','B after']
-```
-
-부모 constructor 실행 중에도 `this`의 프로토타입은 이미 `new.target.prototype`입니다. 그래서 부모 constructor에서 부르는 메서드는 자식의 오버라이드가 실행되는데, 그 시점에 자식의 필드는 아직 없습니다.
-
-```js
-class A {
-  constructor() { this.init() }
-  init() { this.v = 'A' }
-}
-class B extends A {
-  b = 'field'
-  init() { this.v = this.b } // 부모 constructor 도중 실행
-}
-new B().v // undefined (b 필드가 아직 없음)
-```
-
-내장 클래스에서도 같은 일이 일어납니다. `Set` 생성자는 인수를 채우며 `this.add`를 부르는데, 자식의 `adds` 필드는 그 뒤에 초기화되어 값을 `0`으로 덮어씁니다.
-
-```js
-class Counter extends Set {
-  adds = 0
-  add(v) { this.adds++; return super.add(v) }
-}
-new Counter([1, 2]).adds // 0 (add 호출이 기록되지 않음)
-```
-
-부모 constructor 안에서는 오버라이딩될 수 있는 메서드를 부르지 않습니다.
-
-**constructor의 return 값:** 기본 클래스의 규칙은 15편에서 다룹니다. 파생 클래스는 다음과 같습니다.
-
-| return | 파생 클래스의 결과 |
-|--------|--------------------|
-| 객체 | 그 객체가 결과 (`super()` 없이도 가능) |
-| `undefined`(또는 return 없음) | `this`가 결과. `super()`를 부르지 않았으면 ReferenceError |
-| 원시 값 | TypeError |
-
-부모 constructor가 다른 객체를 반환하면 자식의 필드는 그 객체에 설치되고, 그 객체는 자식의 인스턴스가 아닙니다.
-
-```js
-class A { constructor() { return { custom: true } } }
-class B extends A { f = 1 }
-const o = new B() // { custom: true, f: 1 }
-o instanceof B    // false
-```
-
-**ES5 방식과의 차이:** 생성자 함수 상속에서는 자식이 `this`를 먼저 만들고 `Parent.call(this)`로 채웁니다. 부모가 객체를 만들 기회가 없어 빌트인의 특수 동작을 상속할 수 없습니다. 클래스의 `super(...args)`는 객체 생성을 부모에게 맡기는 `Reflect.construct(Parent, args, new.target)`과 같은 의미입니다(자세히는 47편).
-
 ## 표준 빌트인 생성자 확장
 
 빌트인 생성자(`Array`, `Map`, `Set`, `Error`, `Promise`, `Date`, `RegExp`, `String`, `Function`, TypedArray)도 `extends`의 부모가 될 수 있습니다(ES2015). 배열의 `length` 연동이나 `Map`·`Date`의 내부 데이터는 빌트인 생성자가 객체를 만들 때 설치됩니다. 클래스 상속에서는 `super()`로 그 생성자가 객체를 만들기 때문에 서브클래스 인스턴스도 이를 가집니다. ES5 방식은 실패합니다.
-
-```js
-function MyArr() { Array.call(this) }
-MyArr.prototype = Object.create(Array.prototype)
-const a = new MyArr()
-a[2] = 'x'
-a.length         // 0 (length가 연동되지 않음)
-Array.isArray(a) // false
-```
-
-```js
-class Stack extends Array {
-  peek() { return this[this.length - 1] }
-}
-const s = new Stack()
-s.push(1, 2, 3)
-s.peek()         // 3
-Array.isArray(s) // true
-s[5] = 0
-s.length         // 6 (length 자동 연동)
-```
-
-빌트인별로 알아 둘 점은 다음과 같습니다.
 
 | 부모 | 주의점 |
 |------|--------|
@@ -369,70 +82,9 @@ s.length         // 6 (length 자동 연동)
 | `Object` | `super(value)`의 인수를 무시하고 일반 객체를 만든다 |
 | `Symbol`, `BigInt` | `new`로 호출할 수 없어 인스턴스를 만들 수 없다 |
 
-- `Map`·`Set`을 상속해 `set`·`add`를 오버라이딩하면 생성자가 초기값을 넣는 도중 그 메서드가 실행됩니다. 읽기 전용 `Map`을 만들려는 시도는 생성자에서 실패합니다.
-
-```js
-class ReadOnlyMap extends Map {
-  set() { throw new TypeError('read-only') }
-}
-new ReadOnlyMap([['a', 1]]) // TypeError (생성자가 set을 호출)
-```
-
-- `Error`를 상속하면 `instanceof`와 `stack`이 동작합니다. `name`은 상속한 `'Error'` 그대로라서 클래스 이름을 쓰려면 직접 지정합니다. ES5의 `Error.call(this, msg)`는 `this`에 `message`와 `stack`을 만들지 못합니다(자세히는 44편).
-
-```js
-class AppError extends Error {}
-const e = new AppError('boom')
-e instanceof AppError // true
-e.name                // 'Error' (상속한 값)
-e.constructor.name    // 'AppError'
-```
-
-- `Promise` 서브클래스의 정적 메서드(`resolve`·`reject`·`all`)와 `then`의 결과는 서브클래스 인스턴스입니다. `async` 함수는 항상 기본 `Promise`를 반환하므로 서브클래스 인스턴스가 아닙니다(자세히는 41편).
-- `extends Object`에서 `super(1)`을 불러도 `new Object(1)`처럼 `Number` 래퍼가 되지 않고 일반 객체가 만들어집니다(자세히는 15편).
-- `Array.from`·`Array.of` 같은 정적 메서드는 `this` 생성자로 인스턴스를 만들어 `Stack.from([1, 2])`는 `Stack`입니다(`정적 멤버 상속` 절 참고).
-
 ## 정적 멤버 상속
 
 생성자 체인(`Child` → `Parent`) 덕분에 `static` 메서드·필드·접근자도 상속됩니다.
-
-```js
-class A {
-  static kind = 'A'
-  static make() { return new this() }
-}
-class B extends A {}
-B.kind                   // 'A' (상속, own 프로퍼티 아님)
-Object.hasOwn(B, 'kind') // false
-B.make() instanceof B    // true
-```
-
-- static 메서드 안의 `this`는 호출한 클래스입니다. `B.make()`의 `this`는 `B`라서 `new this()`가 `B` 인스턴스를 만듭니다. `Array.from`과 `Promise.resolve`가 쓰는 방식입니다.
-- 인스턴스에서 정적 메서드를 부르려면 `this.constructor.make()`로 씁니다. 인스턴스에는 정적 메서드가 상속되지 않습니다.
-- static 메서드 안의 `super`는 부모 클래스를 가리킵니다.
-- 정적 필드의 값은 체인으로 읽힙니다. 객체와 배열은 같은 참조를 공유하고, 원시 값을 `B.count++`로 바꾸면 `B`에 own 프로퍼티가 생겨 부모와 분리됩니다.
-
-```js
-class A { static list = []; static count = 0 }
-class B extends A {}
-B.list.push(1) // A.list도 [1]
-B.count++      // B에 own count = 1 생성
-A.count        // 0
-```
-
-- 자식이 `static list = []`로 다시 선언하면 별도의 배열이 됩니다. 정적 필드의 초기화식은 선언한 클래스마다 한 번만 실행되므로 선언하지 않은 자식은 부모의 값을 그대로 씁니다.
-- static private 멤버는 상속되지 않습니다. `this.#c`로 읽는 static 메서드를 자식에서 부르면 `this`가 자식이라 TypeError입니다. 클래스 이름으로 `A.#c`처럼 읽으면 됩니다.
-
-```js
-class A {
-  static #c = 1
-  static get() { return this.#c }
-  static get2() { return A.#c }
-}
-class B extends A {}
-B.get()  // TypeError (this가 B라 #c가 없음)
-B.get2() // 1
-```
 
 ## `[[HomeObject]]`
 
@@ -444,89 +96,9 @@ B.get2() // 1
 | 클래스의 static 메서드·접근자, static 필드, static 블록 | `Class` 자신 |
 | 객체 리터럴의 메서드 단축 구문 | 그 객체 |
 
-`[[HomeObject]]`는 정의할 때 고정됩니다. 메서드를 다른 곳에 옮겨도 `super`의 기준은 바뀌지 않습니다.
-
-```js
-class A { who() { return 'A' } }
-class B extends A {
-  who() { return 'B>' + super.who() }
-}
-const f = B.prototype.who
-f.call({}) // 'B>A' (this와 무관하게 기준은 B.prototype)
-```
-
-고정되는 것은 `[[HomeObject]]` 자체이고, 그 객체의 `[[Prototype]]`은 호출할 때마다 읽습니다. 프로토타입을 바꾸면 `super`가 따라갑니다.
-
-```js
-class A { hi() { return 'A' } }
-class A2 { hi() { return 'A2' } }
-class B extends A { hi() { return super.hi() } }
-const b = new B()
-b.hi() // 'A'
-Object.setPrototypeOf(B.prototype, A2.prototype)
-b.hi() // 'A2'
-```
-
-기준이 `this`의 프로토타입이 아니라 `[[HomeObject]]`인 이유는 체인이 여러 단계일 때 드러납니다. `this`의 프로토타입은 언제나 가장 아래 클래스의 `prototype`이라서 중간 클래스의 메서드가 자기 자신을 다시 부르게 됩니다.
-
-```js
-class A { hi() { return 'A' } }
-class B extends A {
-  hi() { // ❌ this 기준으로 부모를 찾는 방식
-    return Object.getPrototypeOf(this).hi.call(this)
-  }
-}
-class C extends B {}
-new C().hi() // RangeError (B.hi가 자기 자신을 반복 호출)
-```
-
-- `super`를 쓸 수 있는 것은 `[[HomeObject]]`가 있는 함수, 즉 메서드 단축 구문(클래스 메서드, 접근자, 객체 리터럴 메서드)과 필드 초기화식·static 블록입니다. `function` 표현식 프로퍼티(`f: function () {}`)와 화살표 프로퍼티에서는 SyntaxError입니다.
-- 화살표 함수는 `[[HomeObject]]`가 없고 바깥 메서드의 것을 씁니다. 메서드 안의 `(() => super.hi())()`가 동작하는 이유입니다(자세히는 27편).
-- `Object.assign`으로 메서드를 다른 객체에 복사해도 `super`는 원래 객체를 기준으로 합니다.
-
-```js
-const mix = { hi() { return super.hi() } }
-const base = { hi() { return 'base' } }
-const t = Object.assign({ __proto__: base }, mix)
-t.hi() // TypeError (super 기준은 mix의 프로토타입)
-```
-
-`super.x`와 `super()`는 찾는 기준이 다릅니다.
-
-| 표현 | 기준 |
-|------|------|
-| `super.x` | 메서드의 `[[HomeObject]]`의 `[[Prototype]]` |
-| `super(...)` | 실행 중인 클래스(생성자 함수) 자신의 `[[Prototype]]` |
-
 ## `Symbol.species`
 
 `Symbol.species`는 빌트인 메서드가 "같은 종류의 새 객체"를 만들 때 쓸 생성자를 지정하는 정적 getter의 키입니다(ES2015, 자세히는 34편).
-
-`Array`, `Map`, `Set`, `Promise`, `RegExp`, `ArrayBuffer`, TypedArray의 `[Symbol.species]`는 기본적으로 `this`를 반환합니다. 서브클래스가 상속하면 자기 자신이 되어, 파생 메서드가 서브클래스 인스턴스를 돌려줍니다.
-
-```js
-class Stack extends Array {}
-const s = Stack.from([1, 2, 3])
-s.map(x => x) instanceof Stack // true
-```
-
-getter를 재정의하면 결과 타입을 바꿀 수 있습니다.
-
-```js
-class Stack extends Array {
-  static get [Symbol.species]() { return Array }
-}
-const s = Stack.from([1, 2, 3])
-s.map(x => x) instanceof Stack // false (일반 Array)
-s.constructor.name             // 'Stack'
-```
-
-`Array`의 새 배열 생성 규칙(ArraySpeciesCreate)은 다음과 같습니다.
-
-1. `this`가 배열이 아니면 일반 `Array`를 만듭니다.
-2. `this.constructor`를 읽고, 객체이면 그 `[Symbol.species]`를 읽습니다.
-3. 결과가 `undefined`나 `null`이면 `Array`를 씁니다. 생성자가 아닌 값이면 TypeError입니다.
-4. `new C(길이)`로 만듭니다.
 
 | 구분 | 메서드 |
 |------|--------|
@@ -534,103 +106,13 @@ s.constructor.name             // 'Stack'
 | species를 읽지 않음 (항상 일반 Array) | `toSorted`, `toReversed`, `toSpliced`, `with` (ES2023) |
 | `this` 생성자를 직접 사용 | `Array.from`, `Array.of` |
 
-- `Promise`: `then`이 만드는 새 프로미스가 species 생성자를 씁니다(`catch`·`finally`는 `then`을 거치므로 같음). `Promise.resolve`·`all` 같은 정적 메서드는 species가 아니라 `this`를 씁니다. species를 `Promise`로 돌려도 `MyPromise.resolve()`는 `MyPromise`를 반환합니다.
-- TypedArray의 `map`·`filter`·`slice`·`subarray`, `ArrayBuffer.prototype.slice`, `RegExp`의 `[Symbol.split]`·`[Symbol.matchAll]`도 species를 읽습니다.
-- `Map`·`Set`에도 접근자가 있지만, ES2025의 `Set` 집합 메서드(`union` 등)는 서브클래스여도 항상 `Set`을 반환합니다.
-
-**흔한 실수:** 서브클래스의 생성자 시그니처를 바꾸면 `map`이 `new C(길이)`로 호출해 인수가 엉킵니다. species를 `Array`로 돌리거나 시그니처를 부모와 맞춥니다.
-
-```js
-class Named extends Array {
-  constructor(name) { super(); this.name = name }
-}
-const n = new Named('list')
-n.push(1, 2)
-n.map(x => x).name // 2 (map이 new Named(2)를 호출)
-```
-
 ## `new.target`으로 추상 클래스 흉내
 
 추상 클래스는 직접 인스턴스를 만들지 못하고 자식이 구현해야 하는 클래스입니다. JavaScript에는 `abstract` 키워드가 없어서 `new.target` 검사로 흉내 냅니다. `new.target`은 `new`가 처음 호출한 클래스이고 `super()` 체인에서도 바뀌지 않습니다(자세히는 15편).
 
-```js
-class Shape {
-  constructor() {
-    if (new.target === Shape) {
-      throw new TypeError('Shape is abstract')
-    }
-  }
-  area() { throw new Error('not implemented') }
-}
-class Square extends Shape {}
-new Square() // 통과 (new.target은 Square)
-new Shape()  // TypeError
-```
-
-자식이 추상 메서드를 구현했는지도 생성 시점에 검사할 수 있습니다. 부모의 기본 구현과 같은지 비교합니다.
-
-```js
-// Shape의 constructor
-constructor() {
-  if (new.target === Shape) throw new TypeError('abstract')
-  if (this.area === Shape.prototype.area) {
-    throw new TypeError(new.target.name + ' needs area()')
-  }
-}
-```
-
-- 검사는 인스턴스를 만드는 시점의 런타임 에러입니다. 클래스를 정의할 때는 잡히지 않습니다.
-- 기본 구현에서 `throw`만 하는 방식은 메서드를 호출할 때 에러가 나고, 위 검사는 생성할 때 에러가 납니다.
-- 자식이 메서드 대신 인스턴스 필드(`area = () => 9`)로 구현하면 부모 constructor가 실행되는 시점에 필드가 아직 없어서 검사가 구현을 못 보고 에러를 냅니다. 구현은 메서드 문법으로 강제해야 합니다.
-- `Reflect.construct(Shape, [], Square)`처럼 `new.target`을 직접 지정하면 부모를 직접 호출해도 통과합니다. 실수를 막는 장치이지 보안 장치가 아닙니다.
-- 정적 팩토리가 `new this()`를 쓰는 경우 `if (this === A) throw ...`로 같은 검사를 합니다.
-- 부모 본문을 `Parent.call(this)`로 빌려 쓰는 ES5 상속과는 호환되지 않습니다(자세히는 15편).
-
 ## 믹스인
 
 클래스는 `extends` 부모를 하나만 가질 수 있어(단일 상속) 여러 출처의 기능을 합치려면 믹스인을 씁니다. 가장 흔한 형태는 부모 클래스를 받아 그 위에 기능을 얹은 클래스를 반환하는 함수(서브클래스 팩토리)입니다.
-
-```js
-const Serializable = Base => class extends Base {
-  toJSON() { return { ...this } }
-}
-const Stamped = Base => class extends Base {
-  stamped = true
-}
-class User { constructor(n) { this.n = n } }
-class Admin extends Stamped(Serializable(User)) {}
-new Admin('kim').toJSON() // { n: 'kim', stamped: true }
-```
-
-호출마다 클래스가 하나씩 만들어져 프로토타입 체인에 끼어듭니다.
-
-```text
-Admin → Stamped 클래스 → Serializable 클래스 → User
-```
-
-- 적용 순서가 체인 순서를 정합니다. 바깥(나중에 적용)이 아래쪽이라 메서드 이름이 겹치면 바깥 것이 먼저 실행되고 `super.m()`으로 안쪽을 부릅니다. 믹스인 A와 C가 모두 `hi() { return 'X>' + super.hi() }` 꼴이면(X는 각자의 이름) `A(C(Base))`의 `hi()`는 `'A>C>base'`, `C(A(Base))`는 `'C>A>base'`입니다. 인스턴스 필드가 겹치면 바깥 믹스인의 값이 남습니다.
-- 믹스인이 생성자를 가질 때는 `constructor(...args) { super(...args) }`로 인수를 그대로 넘깁니다.
-- 반환하는 클래스 표현식이 익명이면 `name`이 빈 문자열이라 디버깅이 어렵습니다. `class Named extends Base {}`처럼 이름을 붙입니다.
-- 호출마다 새 클래스가 만들어져 `M(Object) === M(Object)`는 `false`이고, `instanceof M`으로 믹스인 여부를 확인할 수 없습니다. `Symbol.hasInstance`로 판정을 직접 정의합니다(자세히는 17편).
-
-```js
-const brand = Symbol('Walker')
-const Walker = Base => class extends Base {
-  get [brand]() { return true }
-}
-Object.defineProperty(Walker, Symbol.hasInstance, {
-  value: o => !!(o && o[brand]),
-})
-class Dog extends Walker(Object) {}
-new Dog() instanceof Walker // true
-```
-
-**객체 복사 방식:** 메서드를 담은 객체를 `Object.assign(Bird.prototype, canFly)`로 프로토타입에 복사하는 방식도 있습니다. 구조가 단순하고 체인이 깊어지지 않지만 한계가 있습니다.
-
-- 열거 가능한 own 프로퍼티만 복사합니다. 클래스 문법의 메서드는 열거 불가라 `Object.assign(T.prototype, M.prototype)`으로는 복사되지 않습니다.
-- getter는 호출한 결과 값으로 복사됩니다.
-- 복사한 메서드의 `super`는 원래 객체를 기준으로 하여 동작하지 않습니다(`[[HomeObject]]` 절 참고).
-- 체인에 끼지 않아 `instanceof`로 확인할 수 없고, 같은 이름의 기존 메서드를 덮어씁니다.
 
 ## 상속과 합성의 선택 기준
 
@@ -644,68 +126,17 @@ new Dog() instanceof Walker // true
 | 부모(부품) 변경 | 모든 자식에 전파 | 위임 코드만 수정 |
 | 런타임 교체 | 불가 | 가능 (부품 주입) |
 
-`Array`를 상속한 `Stack`은 스택에 없어야 할 메서드까지 노출합니다. 합성은 필요한 메서드만 공개합니다.
-
-```js
-class Stack extends Array {}
-new Stack().shift // 함수 (스택에서 허용되면 안 되는 동작)
-```
-
-```js
-class Stack {
-  #items = []
-  push(x) { this.#items.push(x); return this }
-  pop() { return this.#items.pop() }
-}
-new Stack().shift // undefined
-```
-
-상속이 깨지기 쉬운 이유는 부모 constructor와 메서드가 내부적으로 어떤 메서드를 부르는지가 실질적인 계약이 되기 때문입니다. `Map` 생성자가 `set`을 부르는 것과 `Set` 생성자가 `add`를 부르는 것은 서브클래스 작성자가 알아야 하는 숨은 규칙이고, 앞의 `ReadOnlyMap`과 `Counter`가 그 사례입니다.
-
-협력 객체를 주입받는 합성은 구현을 바꾸기도 쉽습니다.
-
-```js
-class Service {
-  #logger
-  constructor(logger = new Logger()) {
-    this.#logger = logger
-  }
-  run() { this.#logger.log('run') }
-}
-```
-
-판단 순서는 다음과 같습니다. 하나라도 "아니오"이면 합성을 씁니다.
-
-1. 자식이 부모의 한 종류라는 말이 항상 성립합니까.
-2. 부모의 public 멤버 전부가 자식에게도 의미가 있습니까.
-3. 부모의 내부 구현이 바뀌어도 자식이 안전합니까.
-
-| 상속이 맞는 경우 | 합성(또는 믹스인)이 맞는 경우 |
-|------------------|-------------------------------|
-| 위 세 질문이 모두 "예" | 일부 기능만 필요하거나 기능을 조합해야 할 때 |
-| 플랫폼이 서브클래싱을 요구 (`extends Error`) | 빌트인(`Array`, `Map`)의 일부 기능만 노출하고 싶을 때 |
-| 부모가 확장을 전제로 설계됨 | 런타임에 구현을 바꿔야 할 때 |
-| 계층이 얕고 안정적 | 계층이 깊어지거나 형제끼리 코드를 공유할 때 |
-
-객체 생성 방식 전체의 비교는 26편에서 다룹니다.
-
-## 핵심 정리
-
-- `extends`는 인스턴스 체인(`Child.prototype` → `Parent.prototype`)과 생성자 체인(`Child` → `Parent`)을 연결하며, 오른쪽은 정의 시점에 평가되는 표현식이라 constructor이거나 `null`이어야 합니다.
-- 파생 클래스는 `this`를 만들지 않고 `super()`가 부모에게서 받은 객체를 씁니다. `new.target`이 체인 전체에 전달되고, `super()` 전에는 `this`를 쓸 수 없으며, 필드는 `super()` 반환 직후 초기화됩니다.
-- `super.x`는 `[[HomeObject]]`의 프로토타입을 기준으로 정의 시점에 고정되고, `super()`는 현재 클래스의 `[[Prototype]]`을 기준으로 합니다.
-- 빌트인 확장은 ES5 방식으로는 안 되고 `class extends`로 되며, 파생 메서드의 반환 타입은 `Symbol.species`가 정하며(`toSorted` 등은 제외), `Map`·`Set` 생성자는 오버라이딩한 `set`·`add`를 부릅니다.
-- 정적 멤버는 생성자 체인으로 상속되고 static 메서드의 `this`는 호출한 클래스입니다.
-- 추상 클래스는 `new.target`으로, 다중 기능은 서브클래스 팩토리 믹스인으로 구현하고, is-a가 확실하지 않으면 합성을 선택합니다.
-
 ## 마무리 복습
+
+<details>
+<summary>확인 문제 3개 펼치기</summary>
 
 <Quiz
   questionNumber={1}
   question="class A { constructor() { this.init() } init() {} } 와 class B extends A { tag = 'x'; init() { this.v = this.tag } } 가 있을 때 new B().v 의 값은?"
   options={['x', 'ReferenceError가 발생한다', 'TypeError가 발생한다', 'undefined']}
   correctAnswer={4}
-  explanation="A 생성자가 실행될 때 this의 프로토타입은 이미 B.prototype이라 B의 init이 호출됩니다. 그러나 B의 필드 tag는 super()가 반환된 뒤에 초기화되므로 이 시점에는 this.tag가 undefined이고 v도 undefined가 됩니다. A 생성자 안에서 this는 정상적으로 쓸 수 있어 ReferenceError나 TypeError는 발생하지 않습니다."
+  explanation="A 생성자가 실행될 때 this의 프로토타입은 이미 B.prototype이라 B의 init이 호출됩니다. 그러나 B의 필드 tag는 super()가 반환된 뒤에 초기화되므로 이 시점에는 this.tag가 undefined이고 v도 undefined가 됩니다."
 />
 
 <Quiz
@@ -713,7 +144,7 @@ class Service {
   question="const base = { hi() { return 'base' } }; const a = { __proto__: base, hi() { return 'a:' + super.hi() } }; const other = { __proto__: { hi() { return 'other' } } }; other.hi = a.hi; 일 때 other.hi() 의 결과는?"
   options={['a:other', 'other', 'a:base', 'TypeError가 발생한다']}
   correctAnswer={3}
-  explanation="super 참조의 기준은 호출한 객체의 프로토타입이 아니라 메서드가 정의된 객체(HomeObject)입니다. hi 메서드의 HomeObject는 a이고 a의 프로토타입은 base이므로 other로 옮겨도 super.hi()는 base의 hi를 호출해 a:base가 됩니다. this는 other이지만 super의 탐색 기준에는 쓰이지 않습니다."
+  explanation="super 참조의 기준은 호출한 객체의 프로토타입이 아니라 메서드가 정의된 객체(HomeObject)입니다. hi 메서드의 HomeObject는 a이고 a의 프로토타입은 base이므로 other로 옮겨도 super.hi()는 base의 hi를 호출해 a:base가 됩니다."
 />
 
 <Quiz
@@ -723,6 +154,8 @@ class Service {
   correctAnswer={2}
   explanation="slice, filter, concat은 Symbol.species 생성자로 새 배열을 만들어 Stack 인스턴스를 반환합니다. ES2023에 추가된 toSorted, toReversed, toSpliced, with는 species를 읽지 않고 항상 일반 Array를 반환합니다."
 />
+
+</details>
 
 ## 참고 자료
 

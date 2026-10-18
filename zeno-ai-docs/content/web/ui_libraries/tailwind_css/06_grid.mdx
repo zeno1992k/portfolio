@@ -1,0 +1,65 @@
+---
+title: '06. Grid 배치'
+description: '열·행·간격, 영역 차지, 자동 배치를 정리합니다.'
+---
+
+## 핵심 먼저 보기
+
+- Grid는 행과 열을 함께 맞추는 배치입니다.
+- `grid-cols-3`은 동일 비율의 세 열을 만듭니다.
+- 자식의 콘텐츠 크기와 열의 최소 크기도 확인합니다.
+
+## 열과 영역
+
+`grid`로 켜고 `grid-cols-*`·`grid-rows-*`로 트랙을 정합니다. `col-span-2`는 두 열, `row-span-2`는 두 행을 차지합니다. `gap-*`은 트랙 사이 간격이며 바깥 여백은 아닙니다.
+
+```html
+<div class="grid grid-cols-1 gap-4 md:grid-cols-3">
+  <article class="md:col-span-2">주요 내용</article>
+  <aside>부가 내용</aside>
+</div>
+```
+
+## 자동 배치와 정렬
+
+자식은 기본 배치 규칙에 따라 빈 칸을 채웁니다. `grid-flow-col`은 열 방향 자동 배치에 사용합니다. `justify-items-*`는 셀 안 가로 정렬, `items-*`는 셀 안 세로 정렬입니다. Flex의 주축 정렬과 같은 뜻으로 섞어 읽지 않습니다.
+
+## 필요한 만큼 늘어나는 열
+
+`grid-cols-[repeat(auto-fit,minmax(14rem,1fr))]`은 최소 폭을 지키며 가능한 열 수를 채웁니다. 컨테이너가 그 최소 폭보다 작을 수도 있으면 최소값도 유연하게 설계해야 합니다. `grid-cols-subgrid`는 부모 트랙을 공유할 때 사용하며 부모에 Grid 트랙이 있어야 합니다.
+
+## 마무리 복습
+
+<details>
+<summary>확인 문제 3개 펼치기</summary>
+
+<Quiz
+  questionNumber={1}
+  question="grid-cols-3이 만드는 것은?"
+  options={['세 픽셀 너비', 'Flex 세 줄', '동일 비율 세 열', '세 행만']}
+  correctAnswer={3}
+  explanation="grid-cols-3은 세 개의 균등한 열 트랙을 만듭니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="두 열에 걸치게 하는 것은?"
+  options={['z-2', 'col-span-2', 'row-span-2', 'gap-2']}
+  correctAnswer={2}
+  explanation="col-span은 아이템이 차지하는 열 수를 정합니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="셀 안 자식의 가로 정렬에 쓰는 것은?"
+  options={['justify-items-center', '항상 justify-between', 'flex-col', 'relative']}
+  correctAnswer={1}
+  explanation="Grid의 justify-items는 각 셀 안 아이템의 인라인축 정렬입니다."
+/>
+
+</details>
+
+## 참고 자료
+
+- [Tailwind CSS — grid-template-columns](https://tailwindcss.com/docs/grid-template-columns)
+- [Tailwind CSS — responsive-design](https://tailwindcss.com/docs/responsive-design)

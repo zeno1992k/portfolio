@@ -1,0 +1,73 @@
+---
+title: '19. 커스텀 CSS와 디렉티브'
+description: '@layer·@utility·@apply·@reference를 역할별로 구분합니다.'
+---
+
+## 핵심 먼저 보기
+
+- 일반 CSS와 Tailwind를 함께 사용할 수 있습니다.
+- 변형과 결합할 새 유틸리티는 `@utility`로 등록합니다.
+- `@apply`는 모든 컴포넌트 추상화를 대체하는 도구가 아닙니다.
+
+## 레이어와 사용자 스타일
+
+`@layer base`는 HTML 기본값, `components`는 공통 구성요소의 스타일에 사용합니다. 사용자 스타일을 레이어 밖에 두면 일반 선언의 레이어 우선순위가 달라질 수 있습니다. Tailwind 유틸리티가 무조건 이긴다고 가정하지 않습니다.
+
+## 유틸리티 등록
+
+```css
+@utility content-auto {
+  content-visibility: auto;
+}
+```
+
+이 유틸리티는 `hover:content-auto` 같은 변형과 결합할 수 있습니다. 복잡한 기능형 유틸리티는 값 해석 규칙까지 필요하므로 단순한 반복 값을 해결하는 데 과하게 도입하지 않습니다.
+
+## apply와 reference
+
+```css
+@layer components {
+  .notice {
+    @apply rounded-lg bg-blue-50 p-4;
+  }
+}
+```
+
+`@apply`는 알려진 유틸리티의 선언을 현재 규칙에 넣습니다. 긴 클래스 문자열을 모두 CSS 클래스로 옮기기보다 무엇을 공통화하는지 먼저 정합니다. 별도로 처리되는 CSS 모듈·Vue·Svelte 스타일에서 테마나 사용자 유틸리티 정보가 필요하면 `@reference`를 사용합니다. 참조는 그 CSS를 다시 출력하는 import와 다릅니다.
+
+## 마무리 복습
+
+<details>
+<summary>확인 문제 3개 펼치기</summary>
+
+<Quiz
+  questionNumber={1}
+  question="새 유틸리티를 등록하는 디렉티브는?"
+  options={['@media만', '@utility', '@source', '@config만']}
+  correctAnswer={2}
+  explanation="@utility는 Tailwind 변형과 함께 쓸 수 있는 유틸리티를 정의합니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="@reference와 일반 import의 차이는?"
+  options={['참조한 CSS를 중복 출력하지 않음', '무조건 같은 출력', '소스 파일 삭제', 'JS 실행']}
+  correctAnswer={1}
+  explanation="@reference는 테마·유틸리티 정보를 제공하며 참조 CSS를 다시 포함하지 않습니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="레이어 밖 일반 CSS에 대해 맞는 말은?"
+  options={['항상 유틸리티가 이김', '항상 무시됨', '브라우저가 실행 못 함', '캐스케이드 우선순위를 확인해야 함']}
+  correctAnswer={4}
+  explanation="레이어 안팎의 우선순위는 일반 CSS 캐스케이드 규칙을 따릅니다."
+/>
+
+</details>
+
+## 참고 자료
+
+- [Tailwind CSS — adding-custom-styles](https://tailwindcss.com/docs/adding-custom-styles)
+- [Tailwind CSS — functions-and-directives](https://tailwindcss.com/docs/functions-and-directives)
+- [Tailwind CSS — compatibility](https://tailwindcss.com/docs/compatibility)

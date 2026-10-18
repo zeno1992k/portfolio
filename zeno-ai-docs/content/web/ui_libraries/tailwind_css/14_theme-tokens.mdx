@@ -1,0 +1,73 @@
+---
+title: '14. 테마와 디자인 토큰'
+description: 'CSS 중심 설정, 이름 공간, 일반 CSS 변수와의 관계를 익힙니다.'
+---
+
+## 핵심 먼저 보기
+
+- `@theme`는 토큰과 연결된 유틸리티를 만듭니다.
+- 일반 CSS 변수만 필요하면 `:root`를 사용합니다.
+- 반복되는 값은 이름을 붙이고 일회성 값은 과하게 토큰화하지 않습니다.
+
+## 토큰이 클래스가 되는 과정
+
+```css
+@import "tailwindcss";
+@theme {
+  --color-brand-600: #2563eb;
+  --font-display: "Inter", sans-serif;
+  --breakpoint-3xl: 120rem;
+}
+```
+
+이 색은 `bg-brand-600`·`text-brand-600`·`border-brand-600`처럼 사용합니다. `--font-*`는 글꼴, `--breakpoint-*`는 반응형 조건, `--spacing`은 숫자형 간격 계산에 연결됩니다. 이름 공간이 기능을 정합니다.
+
+## 일반 변수와 inline
+
+`:root`의 `--surface` 같은 일반 변수는 CSS 값으로 쓰이지만 그 자체가 모든 Tailwind 유틸리티를 만들지는 않습니다. 다른 변수에 토큰을 연결하면 `@theme inline`으로 유틸리티가 그 참조 값을 직접 사용하게 할 수 있습니다. 변수의 정의·상속 위치가 다르면 결과도 확인해야 합니다.
+
+```css
+@theme inline {
+  --color-surface: var(--surface);
+}
+```
+
+## 기본값 변경
+
+같은 토큰 이름을 다시 정의하면 해당 기준을 바꿉니다. `--color-*: initial`은 기본 색 이름 공간을 비우므로 기존 `bg-blue-*` 등을 계속 쓰는지 먼저 확인합니다. 기본값 전체를 초기화하는 작업은 토큰 하나 추가하는 작업과 영향 범위가 다릅니다.
+
+## 마무리 복습
+
+<details>
+<summary>확인 문제 3개 펼치기</summary>
+
+<Quiz
+  questionNumber={1}
+  question="color 이름 공간의 토큰이 연결되는 곳은?"
+  options={['라우터 경로', '데이터베이스 타입', '색 관련 유틸리티', '모든 이벤트 처리']}
+  correctAnswer={3}
+  explanation="--color-* 토큰은 bg·text·border 등의 색 유틸리티에 연결됩니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="유틸리티 생성 없이 일반 변수만 필요하면?"
+  options={['@source', ':root', '무조건 @theme만', '@plugin']}
+  correctAnswer={2}
+  explanation="일반 CSS 변수는 :root나 필요한 선택자에 정의할 수 있습니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="--color-*: initial의 영향은?"
+  options={['기본 색 이름 공간 초기화', '새 색 하나 추가만', '글꼴만 변경', '모든 클래스 유지 보장']}
+  correctAnswer={1}
+  explanation="와일드카드 초기화는 기존 기본 색 토큰 사용에 영향을 줄 수 있습니다."
+/>
+
+</details>
+
+## 참고 자료
+
+- [Tailwind CSS — theme](https://tailwindcss.com/docs/theme)
+- [Tailwind CSS — functions-and-directives](https://tailwindcss.com/docs/functions-and-directives)

@@ -3,9 +3,13 @@ title: '15. 생성자 함수'
 description: 'Object 생성자부터 new 연산자, [[Call]]·[[Construct]], new.target, 생성자의 return 규칙까지 생성자 호출의 동작 규칙을 정리합니다.'
 ---
 
-<Callout type="info">
-  **이번 문서의 목표:** `new`로 인스턴스가 만들어지는 과정과 생성자가 될 수 있는 함수의 조건을 설명하고, new 없이 호출했을 때와 생성자가 값을 반환했을 때의 결과를 예측할 수 있습니다.
-</Callout>
+## 핵심 먼저 보기
+
+- 함수 선언문·함수 표현식·클래스·빌트인 생성자만 `[[Construct]]`를 가집니다. 화살표 함수·메서드 축약 표현·async 함수·제너레이터 함수·대부분의 빌트인 함수는 `new`로 호출하면 TypeError입니다.
+- `new`는 빈 객체를 만들어 `new.target.prototype`을 프로토타입으로 잇고, `this`에 바인딩해 본문을 실행한 뒤 객체를 반환했으면 그 객체를, 아니면 `this`를 결과로 돌려줍니다.
+- 생성자의 `return`은 객체일 때만 `this`를 대체하고 원시 값은 무시됩니다. 파생 클래스는 원시 값을 반환하면 TypeError입니다.
+- `new.target`은 일반 호출에서 `undefined`이고 `new` 호출에서는 대상 constructor입니다. new 없는 호출 감지와 추상 클래스 흉내에 씁니다.
+- new 없이 호출하면 비엄격 모드에서는 전역을 오염시키고 엄격 모드와 클래스에서는 TypeError입니다. 빌트인은 `Object`·`Array`·`Error`는 동일, `String`·`Number`·`Boolean`은 변환, `Date`는 문자열, `Map`·`Set`·`Promise`는 TypeError입니다.
 
 ## Object 생성자
 
@@ -17,29 +21,11 @@ user.name = 'Kim'
 user.name // 'Kim'
 ```
 
-인수에 따른 결과는 다음과 같습니다.
-
 | 인수 | 결과 |
 |------|------|
 | 없음, `undefined`, `null` | 빈 객체. `Object.prototype`을 상속한다 |
 | 객체 (배열·함수 포함) | 그 객체 자체. 복사하지 않는다 |
 | 원시 값 | 대응하는 래퍼 객체 (`Number`, `String`, `Boolean`, `BigInt`, `Symbol`) |
-
-```js
-new Object(null)                // {}
-typeof new Object(1)            // 'object'
-new Object(1) instanceof Number // true
-new Object('ab').length         // 2
-const o = {}
-new Object(o) === o             // true
-```
-
-- `Object(value)`처럼 new 없이 호출해도 결과가 같습니다. 그래서 값을 객체로 강제 변환하는 함수로도 쓰입니다.
-- 서브클래스가 `super(value)`로 호출하는 것처럼 `new.target`이 `Object`가 아니면 인수를 무시하고, `new.target.prototype`을 프로토타입으로 하는 새 객체를 만듭니다(자세히는 25편).
-- 리터럴 `{}`는 `Object` 생성자를 호출하지 않습니다. 엔진이 같은 종류의 객체를 직접 만듭니다.
-- `Object.prototype.constructor`가 `Object`를 가리키므로 `({}).constructor === Object`는 `true`입니다(자세히는 17편).
-
-래퍼 객체의 성질은 20편에서 다룹니다. 실무에서 `new Object()`는 쓰지 않습니다. 리터럴이 더 짧고 프로퍼티를 만들면서 한 번에 채울 수 있기 때문입니다.
 
 ## 객체 리터럴 방식의 한계
 
@@ -58,103 +44,16 @@ circle1.getDiameter() // 10
 circle2.getDiameter() // 20
 ```
 
-한계는 다섯 가지입니다.
-
-- **구조 중복**: 프로퍼티와 메서드를 객체마다 다시 적습니다. 구조가 바뀌면 모든 리터럴을 고쳐야 합니다.
-- **구조 일관성 없음**: `radius`를 `radious`로 잘못 적거나 빠뜨려도 에러 없이 모양이 다른 객체가 만들어집니다.
-- **메서드 중복**: 객체마다 함수 객체가 따로 만들어집니다. `circle1.getDiameter === circle2.getDiameter`는 `false`입니다.
-- **초기화 로직 없음**: 인수를 받아 검증하거나 파생 값을 계산하는 과정을 한곳에 묶을 수 없습니다.
-- **출처 구분 불가**: 두 객체가 같은 틀에서 나왔는지 확인할 방법이 없습니다. 리터럴로 만든 객체는 모두 그냥 `Object`의 인스턴스입니다.
-
-해결책은 객체를 찍어 내는 틀을 함수로 만드는 것입니다. 객체를 반환하는 팩토리 함수(자세히는 26편)와 `new`로 호출하는 생성자 함수가 있고, 아래부터 생성자 함수를 다룹니다.
-
 ## 생성자 함수와 인스턴스
 
 생성자 함수는 `new`와 함께 호출해 객체를 만들도록 작성한 함수이고, 그 호출로 만들어진 객체가 인스턴스(instance)입니다. 별도 문법은 없습니다. `new`로 호출할 수 있는 함수(constructor, 아래에서 구분)를 `new`로 호출하면 생성자로 동작합니다.
 
-```js
-function Circle(radius) {
-  this.radius = radius
-  this.getDiameter = function () {
-    return 2 * this.radius
-  }
-}
-const c1 = new Circle(5)
-const c2 = new Circle(10)
-c1.getDiameter()     // 10
-c2.getDiameter()     // 20
-c1 instanceof Circle // true
-```
-
-`this`는 `new`가 만든 새 인스턴스를 가리킵니다(`this` 바인딩 규칙은 21편). `this.radius = radius`는 인스턴스에 프로퍼티를 추가합니다.
-
 - 생성자 함수 이름은 관례로 PascalCase로 씁니다. 언어가 강제하지는 않고, `new`를 붙여야 하는 함수임을 눈에 띄게 하는 표시입니다.
 - 인스턴스인지 확인할 때 `instanceof`를 씁니다. `c1.constructor === Circle`도 `true`인데, `constructor`는 프로토타입에서 오는 프로퍼티입니다(둘 다 자세히는 17편).
-
-**흔한 실수:** 생성자 안에서 `this.getDiameter = function ...`으로 메서드를 정의하면 인스턴스마다 함수 객체가 새로 생깁니다. 리터럴의 메서드 중복 문제가 그대로 남습니다.
-
-```js
-c1.getDiameter === c2.getDiameter // false
-```
-
-메서드는 생성자 함수의 `prototype`에 한 번만 정의하고 모든 인스턴스가 공유하게 합니다(자세히는 17편).
-
-```js
-function Circle(radius) { this.radius = radius }
-Circle.prototype.getDiameter = function () {
-  return 2 * this.radius
-}
-// 모든 인스턴스가 같은 함수 객체를 공유한다
-```
-
-ES2015의 `class`는 같은 일을 더 명확한 문법으로 합니다(자세히는 24편).
 
 ## 인스턴스 생성 과정
 
 일반 함수를 `new`로 호출하면 엔진이 함수 본문 앞뒤에 보이지 않는 작업을 끼워 넣습니다. 명세에서는 함수 객체의 `[[Construct]]` 내부 메서드가 수행합니다.
-
-1. 빈 객체를 만들고 `[[Prototype]]`을 생성자 함수의 `prototype` 프로퍼티 값으로 정합니다. 정확히는 `new.target`의 `prototype`입니다(`new.target` 절 참고).
-2. 그 객체를 `this`에 바인딩합니다.
-3. 인수를 매개변수에 대입하고 본문을 실행합니다. `this.x = ...`는 새 객체에 프로퍼티를 추가합니다.
-4. 본문이 객체를 반환했으면 그 값을, 아니면 `this`를 `new` 표현식의 결과로 돌려줍니다.
-
-이 순서를 일반 함수로 흉내 낸 코드입니다.
-
-```js
-const isObject = (v) =>
-  v !== null && ['object', 'function'].includes(typeof v)
-
-function construct(F, args) {
-  const proto = isObject(F.prototype)
-    ? F.prototype
-    : Object.prototype
-  const obj = Object.create(proto) // 1. 빈 객체 + 프로토타입
-  const result = F.apply(obj, args) // 2~3. this 바인딩 + 본문
-  return isObject(result) ? result : obj // 4. 결과 결정
-}
-```
-
-```js
-function Point(x, y) { this.x = x; this.y = y }
-construct(Point, [1, 2]) // Point { x: 1, y: 2 }
-```
-
-실제 엔진은 `[[Construct]]`가 직접 처리하므로 위 코드는 동작을 근사한 것입니다. `new.target`과 클래스 필드 초기화는 빠져 있습니다.
-
-규칙과 경계 조건은 다음과 같습니다.
-
-- `prototype`이 객체가 아니면(원시 값, `null`) 인스턴스는 `Object.prototype`을 상속합니다.
-
-```js
-function Foo() {}
-Foo.prototype = 1
-const proto = Object.getPrototypeOf(new Foo())
-proto === Object.prototype // true
-```
-
-- 인스턴스는 본문의 첫 줄이 실행되기 전에 이미 만들어져 있고, 프로토타입 연결도 끝난 상태입니다. 그래서 본문 안에서 `this`로 프로토타입 메서드를 호출할 수 있습니다.
-- constructor인 함수 객체에는 `[[ConstructorKind]]` 슬롯이 있습니다. 일반 함수와 `extends` 없는 클래스는 `base`이고 위 과정대로 자기가 `this`를 만듭니다. `extends`가 있는 클래스는 `derived`이고, `this`를 직접 만들지 않고 `super()`가 부모 생성자를 호출하는 과정에서 받습니다(자세히는 25편).
-- 클래스는 이 과정에 필드 초기화가 더해집니다(자세히는 24편).
 
 ## `[[Call]]`과 `[[Construct]]`
 
@@ -166,25 +65,12 @@ proto === Object.prototype // true
 | non-constructor 함수 (화살표 함수, 메서드 등) | 있음 | 없음 | `'function'` |
 | constructor (함수 선언문·표현식, 클래스, 빌트인 생성자) | 있음 | 있음 | `'function'` |
 
-- **callable**: `[[Call]]`이 있는 객체입니다. `typeof`가 `'function'`을 반환하는 기준입니다.
-- **constructor**: `[[Construct]]`가 있는 객체입니다. 모든 constructor는 callable이고, 반대는 성립하지 않습니다.
-- `f()`는 `[[Call]]`을, `new f()`는 `[[Construct]]`를 실행합니다.
-
-같은 함수 본문을 실행하지만 두 방식은 `this` 준비와 결과 결정이 다릅니다.
-
-| 항목 | `F()` (`[[Call]]`) | `new F()` (`[[Construct]]`) |
-|------|--------------------|-----------------------------|
-| `this` | 호출 방식이 결정. 일반 호출은 비엄격 모드에서 전역 객체, 엄격 모드에서 `undefined` | 새로 만든 인스턴스 |
-| 반환값 | `return` 값, 없으면 `undefined` | 객체를 반환했으면 그 객체, 아니면 `this` |
-| `new.target` | `undefined` | `F` |
-
-- 클래스의 `[[Call]]`은 호출 즉시 TypeError를 던지도록 정의되어 있습니다. 클래스는 `new`로만 호출할 수 있습니다.
-- `bind`가 반환하는 바운드 함수는 대상 함수가 constructor일 때만 `[[Construct]]`를 가집니다.
-- Proxy는 감싼 대상이 가진 내부 메서드를 그대로 따라 가집니다. 화살표 함수를 감싼 Proxy는 `new`를 쓸 수 없고, 일반 함수를 감싼 Proxy는 쓸 수 있습니다(자세히는 47편).
-
 ## constructor와 non-constructor
 
 constructor는 `[[Construct]]`를 가진 함수라서 `new`로 호출할 수 있고, non-constructor는 `new`로 호출하면 TypeError가 발생합니다. 어느 쪽인지는 함수를 만든 문법이 결정합니다.
+
+<details>
+<summary>전체 비교표 펼치기</summary>
 
 | 함수의 종류 | 예 | constructor | `prototype` 프로퍼티 |
 |-------------|----|-------------|----------------------|
@@ -200,109 +86,17 @@ constructor는 `[[Construct]]`를 가진 함수라서 `new`로 호출할 수 있
 | 빌트인 생성자 | `Object`, `Array`, `Map` | O | 있음 |
 | 바운드 함수 | `F.bind(null)` | 대상이 constructor면 O | 없음 |
 
-```js
-new (() => {})()                // TypeError
-new ({ m() {} }).m()            // TypeError
-new ({ f: function () {} }).f() // 가능
-new Math.max()                  // TypeError
-```
-
-규칙과 예외는 다음과 같습니다.
-
-- 메서드 축약 표현만 non-constructor입니다. 프로퍼티 값으로 쓴 함수 표현식(`{ f: function () {} }`)은 일반 함수 표현식이라 constructor입니다.
-- 클래스 안의 메서드와 `static` 메서드도 메서드 축약 표현이므로 non-constructor입니다.
-- 화살표 함수는 자기 `this`, `arguments`, `new.target`이 없고 `[[Construct]]`도 없습니다(자세히는 27편).
-- `prototype` 프로퍼티가 있다고 constructor인 것은 아닙니다. 제너레이터 함수는 `prototype`을 가지지만 constructor가 아닙니다.
-- `Symbol`과 `BigInt`는 `[[Construct]]`를 가지지만 `new`로 호출하면 본문이 TypeError를 던집니다.
-- `Math`, `JSON`, `Reflect`는 함수가 아니라 일반 객체여서 `new Math()`는 TypeError입니다.
-
-constructor인지 코드로 확인하는 방법입니다.
-
-```js
-function isConstructor(f) {
-  try {
-    Reflect.construct(String, [], f) // f를 new.target으로 사용
-    return true
-  } catch {
-    return false
-  }
-}
-isConstructor(function () {}) // true
-isConstructor(() => {})       // false
-```
-
-`Reflect.construct`의 세 번째 인수가 constructor가 아니면 TypeError를 던지고, `f`는 실행되지 않습니다(자세히는 47편).
-
-**흔한 실수:** 화살표 함수로 생성자를 정의하는 경우입니다. 정의는 통과하지만 `new`에서 실패합니다.
-
-```js
-const Person = (name) => { this.name = name }
-new Person('Kim') // ❌ TypeError
-```
-
-`function` 선언문이나 `class`로 정의합니다.
+</details>
 
 ## `new` 연산자
 
 `new`는 constructor를 `[[Construct]]`로 호출해 인스턴스를 만드는 연산자입니다. 결과는 항상 객체입니다.
-
-```js
-new Foo(1, 2)      // 인수 있음
-new Foo()          // 인수 없음
-new Foo            // 괄호 생략. new Foo()와 같다
-new ns.Foo()       // 점 표기. ns.Foo가 constructor
-new (getClass())() // 표현식은 괄호로 묶는다
-new Foo(...args)   // 스프레드 인수
-```
-
-평가 순서는 다음과 같습니다.
-
-1. 생성자 표현식을 평가합니다.
-2. 인수를 왼쪽부터 평가합니다.
-3. 생성자 표현식의 값이 constructor인지 검사하고, 아니면 TypeError를 던집니다.
-4. `[[Construct]]`를 호출합니다.
-
-constructor 검사가 인수 평가보다 늦기 때문에, non-constructor에 `new`를 써도 인수의 부수 효과는 먼저 일어납니다.
-
-```js
-const f = () => {}
-new f(console.log('인수 평가')) // 로그 출력 뒤 TypeError
-```
-
-**우선순위:** 인수 목록이 있는 `new Foo()`는 멤버 접근(`.`), 함수 호출과 우선순위가 같고 왼쪽부터 묶입니다. 인수 목록이 없는 `new Foo`는 그보다 낮아서 멤버 접근이 먼저 계산됩니다.
 
 | 코드 | 해석 |
 |------|------|
 | `new Foo().bar()` | `(new Foo()).bar()` |
 | `new Foo.bar()` | `new (Foo.bar)()` |
 | `new Foo.bar` | `new (Foo.bar)()` |
-
-```js
-new Date().getFullYear() // 현재 연도
-new Date.now()           // TypeError
-```
-
-두 번째 줄은 `Date.now`를 먼저 구한 뒤 그것을 생성자로 쓰려 하기 때문에 실패합니다.
-
-괄호 위치에 따라 생성자로 쓰이는 함수가 달라집니다.
-
-```js
-function getClass() { return Foo }
-new (getClass())() // getClass()가 반환한 Foo의 인스턴스
-new getClass()     // getClass 자체를 생성자로 호출. 결과는 Foo 함수
-```
-
-두 번째 줄에서 `getClass`가 객체(함수)를 `return`하므로 그 값이 결과가 됩니다(생성자의 return 규칙 절 참고).
-
-- 옵셔널 체이닝은 `new` 뒤에 쓸 수 없습니다. `new a?.b()`는 SyntaxError입니다.
-- 바운드 함수를 `new`로 호출하면 바인딩한 `this`는 무시되고, 바인딩한 인수는 앞에 붙고, 대상 함수가 생성자로 쓰입니다(`bind` 자세히는 21편).
-
-```js
-function P(a, b) { this.a = a; this.b = b }
-const B = P.bind({ ignored: 1 }, 10)
-new B(20)              // P { a: 10, b: 20 }
-new B(20) instanceof P // true
-```
 
 ## `new.target`
 
@@ -316,143 +110,19 @@ new B(20) instanceof P // true
 | 클래스 상속에서 `new Child()`의 `super()`로 부모 생성자가 실행될 때 | `Child` (부모 본문 안에서도 `Child`) |
 | `Reflect.construct(F, args, G)` | `G` |
 
-```js
-function Foo() {
-  console.log(new.target === Foo)
-}
-new Foo() // true
-Foo()     // false (new.target은 undefined)
-```
-
-규칙은 다음과 같습니다.
-
-- 스크립트나 ES 모듈의 최상위처럼 함수 밖에서는 SyntaxError입니다.
-- 화살표 함수는 자기 `new.target`이 없고 바깥 함수의 값을 그대로 씁니다.
-- 인스턴스의 프로토타입은 `new.target.prototype`으로 정해집니다. `Reflect.construct(F, args, G)`는 `F`의 본문을 실행하면서 인스턴스는 `G.prototype`을 상속하게 만듭니다.
-
-```js
-function RC() {}
-function Other() {}
-const r = Reflect.construct(RC, [], Other)
-r instanceof Other // true
-r instanceof RC    // false
-```
-
-**용도 1 — new 없는 호출 감지:**
-
-```js
-function Shape() {
-  if (!new.target) return new Shape()
-  this.ok = true
-}
-Shape() instanceof Shape // true
-```
-
-감지 후 `throw new TypeError(...)`로 막는 방식도 씁니다.
-
-**용도 2 — 추상 클래스 흉내:** 부모 생성자에서 `new.target`이 부모 자신이면 에러를 던집니다. 자식을 통해 호출되면 `new.target`이 자식이라서 통과합니다(자세히는 25편).
-
-```js
-class Abs {
-  constructor() {
-    if (new.target === Abs) throw new TypeError('abstract')
-  }
-}
-class Impl extends Abs {}
-new Impl() // 통과
-new Abs()  // TypeError
-```
-
-**주의:** `new.target`으로 막는 가드는 ES5식 상속을 깨뜨립니다. 자식 생성자가 `Parent.call(this)`로 부모 본문을 빌려 쓰면 부모 안에서 `new.target`이 `undefined`이기 때문입니다(자세히는 17편).
-
 ## 생성자의 return 규칙
 
-생성자 본문의 `return`은 `new` 표현식의 결과를 바꿀 수 있습니다. `[[Construct]]`는 반환값이 객체인지 아닌지만 봅니다.
-
-| `return` 값 | `new` 표현식의 결과 |
-|-------------|----------------------|
-| 없음, `undefined` | `this` |
-| 원시 값 (숫자, 문자열, `null` 등) | 무시되고 `this` |
-| 객체 (배열, 함수 포함) | 그 객체. `this`는 버려진다 |
-
-```js
-function A() { this.a = 1; return 5 }
-function B() { this.a = 1; return { b: 2 } }
-new A()              // A { a: 1 } (5는 무시)
-new B()              // { b: 2 } (this는 버려짐)
-new B() instanceof B // false
-```
-
-- `null`은 객체가 아니므로 무시됩니다.
-- 함수와 배열은 객체이므로 `this`를 대체합니다.
-- 일반 호출 `A()`에서는 `return` 값이 그대로 반환됩니다. `A()`는 `5`입니다.
-
-이미 만든 인스턴스를 반환해 싱글턴이나 캐시를 구현하는 데 쓰기도 합니다.
-
-```js
-let instance
-function Config() {
-  if (instance) return instance
-  instance = this
-}
-new Config() === new Config() // true
-```
-
-파생 클래스(`extends`가 있는 클래스)의 생성자는 규칙이 다릅니다(자세히는 25편).
-
-- 객체를 반환하면 그 객체가 결과가 됩니다.
-- `undefined`를 반환하면 `this`가 결과이고, 이때 `super()`가 호출된 상태여야 합니다. 호출하지 않았으면 ReferenceError입니다.
-- 객체와 `undefined` 외의 값(`1`, `null` 등)을 반환하면 TypeError입니다.
-
-`extends` 없는 클래스의 생성자는 일반 생성자 함수와 같아서 원시 값을 반환해도 무시됩니다.
-
-**흔한 실수:** 생성자에서 객체 리터럴을 반환하면 `instanceof`와 프로토타입 연결이 깨집니다. 생성자의 반환값은 대개 쓰지 않는 편이 안전합니다.
+일반 생성자 함수가 객체를 명시적으로 반환하면 그 객체가 `new`의 결과입니다. 원시 값 반환은 무시되고 새로 만든 `this`가 반환됩니다. 파생 클래스 생성자는 `undefined` 외의 원시 값을 반환할 수 없습니다.
 
 ## new 없이 호출했을 때
 
 constructor를 `new` 없이 호출하면 `[[Call]]`이 실행되어 일반 함수 호출이 됩니다. 인스턴스는 만들어지지 않고 `this`는 일반 호출의 규칙을 따릅니다.
-
-```js
-function Person(name) { this.name = name }
-const p = Person('Kim')
-p               // undefined (return이 없다)
-globalThis.name // 'Kim' (비엄격 모드에서 this가 전역 객체)
-```
 
 | 환경 | 결과 |
 |------|------|
 | 비엄격 모드의 함수 | `this`가 전역 객체라서 전역에 프로퍼티가 생기고 `undefined`를 반환한다. 에러가 나지 않아 틀린 줄 모르고 지나간다 |
 | 엄격 모드의 함수 | `this`가 `undefined`라서 `this.name = ...`에서 TypeError |
 | 클래스 | 언제나 TypeError (`Class constructor ... cannot be invoked without 'new'`) |
-
-클래스 본문과 ES 모듈은 자동으로 엄격 모드입니다(자세히는 19편). 그래서 최신 코드에서는 이 실수가 조용히 넘어가지 않고 TypeError로 드러납니다.
-
-방어 패턴은 두 가지입니다.
-
-```js
-function Person(name) {
-  if (!(this instanceof Person)) return new Person(name)
-  this.name = name
-}
-Person('Kim') instanceof Person // true
-```
-
-```js
-function Person(name) {
-  if (!new.target) return new Person(name)
-  this.name = name
-}
-```
-
-두 방식은 `call`로 기존 객체를 넘길 때 차이가 납니다.
-
-| 방식 | 일반 호출 `Person()` | `Person.call(person)` |
-|------|----------------------|------------------------|
-| `this instanceof Person` | 새 인스턴스를 만들어 반환 | 가드 통과. 넘긴 객체를 초기화한다 |
-| `new.target` | 새 인스턴스를 만들어 반환 | 가드 발동. 새 인스턴스를 만들고, 넘긴 객체는 초기화되지 않는다 |
-
-- ES5식 상속(`Parent.call(this)`)에서는 `instanceof` 가드가 호환되고 `new.target` 가드가 상속 대상 `this`를 초기화하지 못합니다.
-- 클래스 중심 코드에서는 가드가 필요 없습니다. 클래스는 `new` 없이 호출하면 항상 TypeError입니다.
 
 ## 빌트인 생성자의 new 유무 차이
 
@@ -465,53 +135,10 @@ function Person(name) {
 | 문자열 반환 | `Date` | 현재 시각을 나타내는 문자열 |
 | TypeError | `Map`, `Set`, `WeakMap`, `WeakSet`, `WeakRef`, `Promise`, `Proxy`, `ArrayBuffer`, `DataView`, 타입 배열(`Uint8Array` 등), `FinalizationRegistry` | new가 필수 |
 
-**`new`와 동일한 생성자:**
-
-```js
-Array(3).length             // 3 (new Array(3)과 같다)
-Error('x') instanceof Error // true
-Function('return 1')()      // 1
-```
-
-`RegExp`는 같지만 예외가 하나 있습니다. 첫 인수가 정규식 객체이고 flags 인수가 없으면 새로 만들지 않고 그 객체를 그대로 반환합니다.
-
-```js
-const re = /a/g
-RegExp(re) === re     // true
-new RegExp(re) === re // false (복사본)
-```
-
-**타입 변환으로 동작하는 생성자:** `new` 없이 호출하면 원시 값을, `new`로 호출하면 래퍼 객체를 만듭니다. 변환이 목적이면 `new`를 붙이지 않습니다(자세히는 20편).
-
-```js
-typeof String(1)     // 'string'
-typeof new String(1) // 'object'
-new Boolean(false) ? 'truthy' : 'falsy' // 'truthy'
-```
-
-- `String(Symbol('s'))`은 `'Symbol(s)'`를 반환하지만 `new String(Symbol('s'))`은 TypeError입니다.
-- `Symbol('a')`와 `BigInt(1)`은 new 없이만 호출할 수 있습니다. `new`를 붙이면 TypeError입니다.
-
-**`Date`:** new 없이 호출하면 현재 시각의 문자열을 반환하고 인수는 무시합니다. `Date(0)`도 1970년이 아니라 현재 시각입니다.
-
-```js
-typeof Date()     // 'string'
-typeof new Date() // 'object'
-```
-
-**new가 필수인 생성자:** 명세가 `new.target`이 `undefined`이면 TypeError를 던지도록 정의합니다. `Map()`, `Set()`, `Promise()`, `Proxy()`가 모두 같습니다.
-
-**`Intl`의 예외:** `Intl.Collator`, `Intl.DateTimeFormat`, `Intl.NumberFormat`은 호환성 때문에 new 없이 호출해도 인스턴스를 만듭니다. `Intl.PluralRules`, `Intl.ListFormat`, `Intl.RelativeTimeFormat`, `Intl.Segmenter`, `Intl.DisplayNames`, `Intl.Locale`은 new가 필수입니다(자세히는 31편).
-
-## 핵심 정리
-
-- 함수 선언문·함수 표현식·클래스·빌트인 생성자만 `[[Construct]]`를 가집니다. 화살표 함수·메서드 축약 표현·async 함수·제너레이터 함수·대부분의 빌트인 함수는 `new`로 호출하면 TypeError입니다.
-- `new`는 빈 객체를 만들어 `new.target.prototype`을 프로토타입으로 잇고, `this`에 바인딩해 본문을 실행한 뒤 객체를 반환했으면 그 객체를, 아니면 `this`를 결과로 돌려줍니다.
-- 생성자의 `return`은 객체일 때만 `this`를 대체하고 원시 값은 무시됩니다. 파생 클래스는 원시 값을 반환하면 TypeError입니다.
-- `new.target`은 일반 호출에서 `undefined`이고 `new` 호출에서는 대상 constructor입니다. new 없는 호출 감지와 추상 클래스 흉내에 씁니다.
-- new 없이 호출하면 비엄격 모드에서는 전역을 오염시키고 엄격 모드와 클래스에서는 TypeError입니다. 빌트인은 `Object`·`Array`·`Error`는 동일, `String`·`Number`·`Boolean`은 변환, `Date`는 문자열, `Map`·`Set`·`Promise`는 TypeError입니다.
-
 ## 마무리 복습
+
+<details>
+<summary>확인 문제 3개 펼치기</summary>
 
 <Quiz
   questionNumber={1}
@@ -526,7 +153,7 @@ typeof new Date() // 'object'
   question="생성자 함수 본문 끝에 return 5가 있고 그 함수를 new로 호출했을 때의 결과는?"
   options={['5', '새로 만들어진 인스턴스(this)', 'undefined', 'TypeError']}
   correctAnswer={2}
-  explanation="생성자가 원시 값을 반환하면 무시되고 this가 결과가 됩니다. 5가 반환되는 것은 new 없이 일반 호출했을 때입니다. undefined는 어떤 경우에도 나오지 않고, TypeError는 extends가 있는 파생 클래스 생성자가 원시 값을 반환할 때만 발생합니다."
+  explanation="생성자가 원시 값을 반환하면 무시되고 this가 결과가 됩니다. 5가 반환되는 것은 new 없이 일반 호출했을 때입니다."
 />
 
 <Quiz
@@ -534,8 +161,10 @@ typeof new Date() // 'object'
   question="new 없이 호출했을 때의 결과로 올바른 것은?"
   options={['Date() — Date 객체를 반환한다', 'Symbol() — TypeError가 발생한다', 'Map() — TypeError가 발생한다', 'Number(12) — Number 래퍼 객체를 반환한다']}
   correctAnswer={3}
-  explanation="Map은 new가 필수여서 new 없이 호출하면 TypeError가 발생합니다. Date()는 Date 객체가 아니라 현재 시각의 문자열을 반환하고, Symbol()은 new 없이 호출해야 하며 심볼 값을 반환합니다. Number(12)는 래퍼 객체가 아니라 원시 숫자 12를 반환합니다."
+  explanation="Map은 new가 필수여서 new 없이 호출하면 TypeError가 발생합니다. Date()는 Date 객체가 아니라 현재 시각의 문자열을 반환하고, Symbol()은 new 없이 호출해야 하며 심볼 값을 반환합니다."
 />
+
+</details>
 
 ## 참고 자료
 

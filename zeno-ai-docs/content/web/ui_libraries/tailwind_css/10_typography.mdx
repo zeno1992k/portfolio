@@ -1,0 +1,73 @@
+---
+title: '10. 글자와 읽기 좋은 본문'
+description: '글자 크기·행간·줄바꿈·말줄임을 조합합니다.'
+---
+
+## 핵심 먼저 보기
+
+- 글자 크기뿐 아니라 행간·폭·줄바꿈을 함께 정합니다.
+- 말줄임은 숨긴 내용을 다시 확인할 방법과 함께 사용합니다.
+- 제목 모양과 HTML 제목 구조는 별개의 일입니다.
+
+## 자주 쓰는 유틸리티
+
+| 역할 | 예 |
+|---|---|
+| 글꼴·크기·두께 | `font-sans text-base font-medium` |
+| 행간·자간 | `leading-relaxed tracking-tight` |
+| 정렬·색·밑줄 | `text-start text-slate-700 underline` |
+| 한 줄 말줄임 | `truncate` |
+| 여러 줄 제한 | `line-clamp-3` |
+
+`text-sm/6`은 크기와 행간을 함께 지정합니다. 숫자 비교 표에는 `tabular-nums`로 숫자 폭을 맞출 수 있습니다.
+
+## 줄바꿈과 넘침
+
+`truncate`는 한 줄 넘침을 숨겨 말줄임표를 만듭니다. 요소 폭에 한계가 있어야 하고 Flex 자식이라면 `min-w-0`도 확인합니다. 긴 URL처럼 끊기지 않는 문자열은 `break-all`보다 문맥에 맞는 줄바꿈 규칙을 먼저 선택합니다. 한국어 본문에는 `break-keep`이 어절 분리를 줄이지만 긴 문자열의 넘침을 별도로 확인합니다.
+
+```html
+<p class="max-w-prose text-base leading-relaxed">
+  짧은 문장과 충분한 행간으로 본문을 읽습니다.
+</p>
+```
+
+## 문서 구조
+
+`text-2xl`을 붙인 div가 제목 의미를 갖는 것은 아닙니다. 실제 제목에는 h1·h2 등 적절한 요소를 사용합니다. 외부 Markdown 본문은 Typography 플러그인으로 기본 서식을 줄 수 있지만, 핵심 패키지가 모든 본문 요소를 자동으로 꾸미지는 않습니다.
+
+## 마무리 복습
+
+<details>
+<summary>확인 문제 3개 펼치기</summary>
+
+<Quiz
+  questionNumber={1}
+  question="text-sm/6이 함께 정하는 것은?"
+  options={['색과 투명도', '행과 열 수', '크기와 행간', '너비와 높이']}
+  correctAnswer={3}
+  explanation="슬래시 행간 문법은 글자 크기와 line-height를 함께 정합니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="text-2xl이 자동 제공하지 않는 것은?"
+  options={['시각적 표현', '제목의 HTML 의미', '글자 크기', 'CSS 스타일']}
+  correctAnswer={2}
+  explanation="제목 의미는 HTML 요소와 문서 구조에서 나옵니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="긴 Flex 자식에 truncate가 안 먹으면?"
+  options={['너비 제약과 min-w-0 확인', 'z-50 추가', '고정 글꼴만 사용', 'HTML 순서 뒤집기']}
+  correctAnswer={1}
+  explanation="말줄임은 폭 제한과 축소 가능한 레이아웃이 필요합니다."
+/>
+
+</details>
+
+## 참고 자료
+
+- [Tailwind CSS — font-size](https://tailwindcss.com/docs/font-size)
+- [Tailwind CSS — preflight](https://tailwindcss.com/docs/preflight)
+- [Tailwind CSS — styling-with-utility-classes](https://tailwindcss.com/docs/styling-with-utility-classes)

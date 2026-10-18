@@ -1,0 +1,70 @@
+---
+title: '13. 다크 모드'
+description: '시스템 설정과 수동 테마 선택, 초기 화면을 구분합니다.'
+---
+
+## 핵심 먼저 보기
+
+- 기본 `dark:`는 시스템의 색 구성 선호에 반응합니다.
+- 수동 선택은 dark 변형의 조건과 실제 저장·적용 로직을 함께 정합니다.
+- 밝은 화면과 어두운 화면 모두에서 대비를 확인합니다.
+
+## 두 색상 구성
+
+```html
+<article class="bg-white p-4 text-slate-900
+  dark:bg-slate-900 dark:text-slate-100">
+  안내
+</article>
+```
+
+테두리·placeholder·아이콘·포커스 표시도 함께 바꿉니다. 배경만 어둡게 하고 글자색을 그대로 두면 읽을 수 없을 수 있습니다.
+
+## 수동 토글 조건
+
+```css
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+```
+
+이 설정의 `dark:`는 상위 `.dark` 클래스에 반응합니다. data 속성을 조건으로 삼을 수도 있습니다. 클래스나 속성을 언제 적용할지는 JavaScript가 담당합니다.
+
+## 시스템·밝게·어둡게
+
+수동 선택값을 저장하고, 시스템 선택일 때만 `prefers-color-scheme`을 따릅니다. 첫 화면이 반대 테마로 잠깐 보이지 않게 초기 적용 시점도 정합니다. 폼 컨트롤의 기본 테마에는 CSS `color-scheme`을 함께 검토합니다. `dark:` 클래스만으로 저장·토글·초기화가 구현되지는 않습니다.
+
+## 마무리 복습
+
+<details>
+<summary>확인 문제 3개 펼치기</summary>
+
+<Quiz
+  questionNumber={1}
+  question="기본 dark:가 보는 것은?"
+  options={['로그인 여부', '화면 폭', 'HTML 파일명', '시스템 색 구성 선호']}
+  correctAnswer={4}
+  explanation="기본 다크 모드 변형은 prefers-color-scheme을 사용합니다."
+/>
+
+<Quiz
+  questionNumber={2}
+  question="수동 테마 선택을 저장하는 것은?"
+  options={['padding', 'Preflight의 자동 계정 동기화', '앱의 JavaScript 로직', 'dark: 자체']}
+  correctAnswer={3}
+  explanation="Tailwind는 조건에 맞는 스타일을 만들며 선택값 저장은 앱이 구현합니다."
+/>
+
+<Quiz
+  questionNumber={3}
+  question="첫 화면 테마가 잠깐 반대로 보이면?"
+  options={['hover 추가', '초기 테마 적용 시점 확인', '모든 색 삭제', '글자 크기만 변경']}
+  correctAnswer={2}
+  explanation="스타일이 그려지기 전에 초기 선택을 적용하는 흐름을 확인해야 합니다."
+/>
+
+</details>
+
+## 참고 자료
+
+- [Tailwind CSS — dark-mode](https://tailwindcss.com/docs/dark-mode)
+- [Tailwind CSS — colors](https://tailwindcss.com/docs/colors)
