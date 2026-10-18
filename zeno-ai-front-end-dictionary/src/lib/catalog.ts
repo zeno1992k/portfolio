@@ -11,7 +11,7 @@ export interface CatalogFilter {
 }
 
 export function filterTerms(list: Term[], filter: CatalogFilter) {
-  const normalized = filter.query.trim().toLocaleLowerCase();
+  const words = filter.query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
   return list.filter((term) => {
     const category = getCategory(term.category);
     if (filter.group !== 'all' && category.groupId !== filter.group) return false;
@@ -20,6 +20,6 @@ export function filterTerms(list: Term[], filter: CatalogFilter) {
     if (filter.interviewOnly && !term.interview) return false;
     const searchable = [term.term, term.korean, term.definition, category.label,
       getCategoryGroup(category.groupId).label, ...(term.tags ?? [])].join(' ').toLocaleLowerCase();
-    return searchable.includes(normalized);
+    return words.every(word => searchable.includes(word));
   });
 }

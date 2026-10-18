@@ -80,6 +80,24 @@ test('search includes topic, prompt, code, answer text, main explanation and rel
   assert.deepEqual(ids({ query: 'choice-only-private-note' }), []);
 });
 
+test('multi-word search combines part and topic regardless of order and requires every search word', () => {
+  assert.deepEqual(ids({ query: 'React cleanup' }), ['react-effect']);
+  assert.deepEqual(ids({ query: 'cleanup React' }), ['react-effect']);
+  assert.deepEqual(ids({ query: 'JS cleanup' }), ['js-fetch']);
+  assert.deepEqual(ids({ query: 'JavaScript fallback retained' }), ['js-base']);
+  assert.deepEqual(ids({ query: 'React cleanup missing-word' }), []);
+});
+
+test('an explicit part in search excludes incidental part mentions in distractors and explanations', () => {
+  const incidental = question('js-incidental', {
+    topic: 'Browser storage', explanation: 'This does not update React state automatically.',
+    choices: [{ id: 'a', text: 'Update React state', explanation: 'Incorrect.' }, questions[0].choices[1], questions[0].choices[2], questions[0].choices[3]],
+  });
+  const related = question('react-state', { part: 'react', topic: 'React state' });
+  assert.deepEqual(filterQuizQuestions([incidental, related], { ...all, query: 'React state' }, {}).map(item => item.id), ['react-state']);
+  assert.deepEqual(filterQuizQuestions([incidental, related], { ...all, query: 'React state', part: 'javascript' }, {}), []);
+});
+
 test('unseen means no record while correct and wrong use the latest outcome instead of lifetime counts', () => {
   assert.deepEqual(ids({ status: 'unseen' }), ['js-base', 'react-props']);
   assert.deepEqual(ids({ status: 'correct' }), ['js-fetch', 'react-effect']);

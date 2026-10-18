@@ -78,6 +78,16 @@ test('interview practice combines with search, category and level without hiding
   assert.deepEqual(filterTerms(terms, { ...all, interviewOnly: true, category: 'css', query: 'Closure' }), []);
 });
 
+test('multiple search words match across term names and categories regardless of order or spacing', () => {
+  const filter = { group: 'all', category: 'all', query: '' } as const;
+  const forward = filterTerms(terms, { ...filter, query: 'Closure JavaScript' });
+  const reverse = filterTerms(terms, { ...filter, query: '  JAVASCRIPT   closure  ' });
+  assert.ok(forward.some(term => term.id === 'closure'));
+  assert.deepEqual(reverse, forward);
+  assert.deepEqual(filterTerms(terms, { ...filter, query: 'Closure 검색결과가없는단어' }), []);
+  assert.ok(filterTerms(terms, { ...filter, category: 'javascript', query: 'Closure JavaScript' }).every(term => term.category === 'javascript'));
+});
+
 test('all original 52 IDs retain saved bookmarks, progress, history and a resumed session', () => {
   const ids = Object.keys(legacyTermMetadata);
   assert.equal(ids.length, 52);

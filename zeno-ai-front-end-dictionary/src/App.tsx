@@ -1,10 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { BottomNavigation, BottomNavigationItem, Box, Button, Chip, IconButton, List, ListCell, ListCellContent, Option, ProgressIndicator, SearchField, SectionHeader, SectionMessage, SegmentedControl, SegmentedControlItem, Select, TextButton, TopNavigation, TopNavigationButton, Typography } from '@montage-ui/core';
+import { BottomNavigation, BottomNavigationItem, Box, Button, IconButton, List, ListCell, ListCellContent, ProgressIndicator, SectionHeader, SectionMessage, SegmentedControl, SegmentedControlItem, TextButton, TopNavigation, TopNavigationButton, Typography } from '@montage-ui/core';
 import { IconApps, IconArrowLeft, IconArrowRight, IconBook, IconBookFill, IconBookmark, IconBookmarkFill, IconBulb, IconCalendar, IconCheck, IconChevronRight, IconCircleQuestion, IconCircleQuestionFill, IconClock, IconCode, IconFolder, IconGlobe, IconHome, IconHomeFill, IconLogoGoogleColor, IconMoon, IconPalette, IconPerson, IconSun } from '@montage-ui/icon';
 import { terms, type Term } from './data/terms';
-import { getTermLevel, learningLevelLabel, termLevels, type LearningLevel } from './data/term-levels';
-import { categories, categoryGroups, categoriesInGroup, getCategory, getCategoryGroup, type Category, type CategoryGroupId } from './data/categories';
-import { filterTerms } from './lib/catalog';
+import { getTermLevel, learningLevelLabel, type LearningLevel } from './data/term-levels';
+import { categoryGroups, getCategory, getCategoryGroup, type Category, type CategoryGroupId } from './data/categories';
 import { buildQueue, canResumeSession, dayKey, scheduleReview, type Rating } from './lib/study';
 import { useStudy } from './lib/useStudy';
 import { ReviewSchedule } from './components/ReviewSchedule';
@@ -21,13 +20,12 @@ import { BrandLogo } from './components/BrandLogo';
 import { useAppTheme } from './lib/AppThemeProvider';
 import { brand } from './lib/brand';
 import { QuizTab } from './components/QuizTab';
+import { DictionaryCatalog } from './components/DictionaryCatalog';
 
 type Tab = 'today' | 'dictionary' | 'quiz' | 'notes';
 const termIds = terms.map((term) => term.id);
 const termMap = new Map(terms.map((term) => [term.id, term]));
-const categoryCounts = new Map(categories.map((category) => [category.id, terms.filter((term) => term.category === category.id).length]));
 const groupCounts = new Map(categoryGroups.map((group) => [group.id, terms.filter((term) => getCategory(term.category).groupId === group.id).length]));
-const interviewCount = terms.filter(term => term.interview).length;
 const dateFormat = new Intl.DateTimeFormat('ko-KR', { timeZone: 'Asia/Seoul', month: 'long', day: 'numeric', weekday: 'short' });
 const dueFormat = new Intl.DateTimeFormat('ko-KR', { timeZone: 'Asia/Seoul', month: 'long', day: 'numeric' });
 
@@ -204,14 +202,14 @@ export default function App() {
     switchTab('dictionary');
   }
 
-  function termRows(list: Term[]) {
+  function termRows(list: Term[], preview = false) {
     return <div className="term-list">{list.map((term) => {
       const progress = data.progress[term.id];
       return <div className="term-row" key={term.id}>
         <ListCell as="button" role="button" aria-labelledby={undefined} className="term-row-main"
           sx={{ backgroundColor: 'transparent', textAlign: 'left' }} alignItems="center" verticalPadding="large" interactionPadding={0}
           onClick={() => showTerm(term)} aria-label={`${term.term}, ${term.korean} 자세히 보기`}
-          textProps={{ variant: 'body1', weight: 'medium', caption: <><span>{term.korean} · {getCategory(term.category).label} · {getTermLevel(term.level).label}</span>{progress && <Typography as="span" display="block" variant="caption1" color="semantic.primary.normal" className="term-row-due">{progress.dueAt <= now ? '복습할 시간' : `${dueFormat.format(progress.dueAt)} 복습`}</Typography>}</>, captionProps: { variant: 'label1', color: 'semantic.label.alternative' } }}
+          textProps={{ variant: 'body1', weight: 'medium', caption: <><span>{term.korean} · {getCategory(term.category).label} · {getTermLevel(term.level).label}</span>{preview && <Typography as="span" className="term-row-definition" variant="label1-reading" color="semantic.label.neutral">{term.definition}</Typography>}{progress && <Typography as="span" display="block" variant="caption1" color="semantic.primary.normal" className="term-row-due">{progress.dueAt <= now ? '복습할 시간' : `${dueFormat.format(progress.dueAt)} 복습`}</Typography>}</>, captionProps: { variant: 'label1', color: 'semantic.label.alternative' } }}
         >{term.term}</ListCell>
         <IconButton size={24} sx={{ width: 44, height: 44, flexShrink: 0 }}
           color={data.bookmarks.includes(term.id) ? 'semantic.primary.normal' : 'semantic.label.assistive'}
@@ -299,14 +297,11 @@ export default function App() {
             <Typography as="p" className="quiet-footer" variant="caption1" color="semantic.label.assistive">{offlineReady ? '오프라인에서도 준비됐어요.' : '매일 조금씩, 나의 속도로.'}</Typography>
           </section>}
 
-          {!studying && tab === 'dictionary' && <section className="dictionary-page">
-            <SearchField type="search" width="100%" value={query} onChange={(event) => setQuery(event.target.value)} onReset={() => setQuery('')} placeholder="용어 또는 뜻 검색" aria-label="용어 또는 뜻 검색" autoCapitalize="none" autoCorrect="off" enterKeyHint="search" />
-            <div className="category-select"><Typography as="label" id="category-group-label" variant="label1" weight="medium">큰 영역</Typography><Select width="100%" aria-labelledby="category-group-label" value={group} onChange={(value) => selectGroup(value as CategoryGroupId | 'all')}><Option value="all">전체 영역 · {terms.length}개</Option>{categoryGroups.map((value) => <Option key={value.id} value={value.id}>{value.label} · {groupCounts.get(value.id)}개</Option>)}</Select></div>
-            {group === 'all' ? <Typography as="p" className="category-help" variant="label2" color="semantic.label.alternative">영역을 선택하면 세부 분야로 좁힐 수 있어요.</Typography> : <div className="filter-chips" role="group" aria-label="세부 분야"><Chip size="large" variant="outlined" active={category === 'all'} aria-pressed={category === 'all'} onClick={() => setCategory('all')}>전체 {groupCounts.get(group)}</Chip>{categoriesInGroup(group).map((value) => <Chip key={value.id} size="large" variant="outlined" active={category === value.id} aria-pressed={category === value.id} onClick={() => setCategory(value.id)}>{value.label} {categoryCounts.get(value.id)}</Chip>)}</div>}
-            <SegmentedControl className="dictionary-levels" size="large" value={dictionaryLevel} onValueChange={(value) => setDictionaryLevel(value as LearningLevel)} aria-label="용어 난도 필터"><SegmentedControlItem value="all">전체</SegmentedControlItem>{termLevels.map(level => <SegmentedControlItem key={level.id} value={level.id}>{level.label}</SegmentedControlItem>)}</SegmentedControl>
-            <div className="interview-filter"><Chip size="large" variant="outlined" active={interviewOnly} aria-pressed={interviewOnly} onClick={() => setInterviewOnly(value => !value)}>면접 답변 연습 {interviewCount}</Chip></div>
-            <DictionaryResults query={query} group={group} category={category} level={dictionaryLevel} interviewOnly={interviewOnly} renderRows={termRows} resetFilters={() => { selectGroup('all'); setQuery(''); setDictionaryLevel('all'); setInterviewOnly(false); }} />
-          </section>}
+          {!studying && tab === 'dictionary' && <DictionaryCatalog
+            filter={{ query, group, category, level: dictionaryLevel, interviewOnly }}
+            onChange={next => { setQuery(next.query); setGroup(next.group); setCategory(next.category); setDictionaryLevel(next.level ?? 'all'); setInterviewOnly(next.interviewOnly ?? false); }}
+            renderRows={list => termRows(list, true)}
+          />}
 
           {!studying && tab === 'quiz' && (authLoading
             ? <section className="quiz-page"><SectionMessage variant="info" role="status">퀴즈를 준비하고 있어요.</SectionMessage></section>
@@ -363,15 +358,4 @@ export default function App() {
     </BottomNavigation>}
 
   </div>;
-}
-
-
-
-function DictionaryResults({ query, group, category, level, interviewOnly, renderRows, resetFilters }: { query: string; group: CategoryGroupId | 'all'; category: Category | 'all'; level: LearningLevel; interviewOnly: boolean; renderRows: (list: Term[]) => React.ReactNode; resetFilters: () => void }) {
-  const filtered = filterTerms(terms, { query, group, category, level, interviewOnly });
-  return <>
-    <Typography as="p" className="catalog-scope" variant="caption1" color="semantic.label.alternative">{group === 'all' ? '전체 영역' : getCategoryGroup(group).label}{category !== 'all' && ` / ${getCategory(category).label}`} · {level === 'all' ? '전체 난도' : getTermLevel(level).label}</Typography>
-    <Typography as="p" className="result-count" variant="label2" color="semantic.label.alternative" role="status">{filtered.length}개의 용어{query.trim() ? ` · “${query.trim()}”` : ''}</Typography>
-    {filtered.length ? renderRows(filtered) : <EmptyState icon="search" title="찾는 용어가 없어요" text="다른 검색어를 입력하거나 분야를 바꿔보세요." action={<Button variant="outlined" color="assistive" onClick={resetFilters}>전체 용어 보기</Button>} />}
-  </>;
 }

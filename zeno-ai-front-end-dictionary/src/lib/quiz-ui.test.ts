@@ -3,7 +3,7 @@ import test from 'node:test';
 import React, { type ComponentProps } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ThemeProvider } from '@montage-ui/core';
-import { QuizQuestionCard } from '../components/QuizTab';
+import { QuizQuestionCard, QuizResultList, QuizTab } from '../components/QuizTab';
 import { QuizCatalog, QuizCatalogList } from '../components/QuizCatalog';
 import type { QuizQuestion } from '../data/quizzes/types';
 import { javascriptQuizzes } from '../data/quizzes/javascript';
@@ -91,6 +91,13 @@ test('selecting a choice does not reveal correctness or explanations before conf
   for (const choice of question.choices) assert.ok(!markup.includes(choice.explanation));
   assert.ok(!markup.includes('정답과 해설'));
   assert.ok(!markup.includes('다음 문제'));
+  assert.ok(markup.includes('확인 전에는 답을 바꿀 수 있어요'));
+});
+
+test('quiz setup distinguishes a short random session from finding an individual question and explains levels', () => {
+  const markup = renderToStaticMarkup(React.createElement(ThemeProvider, { disableDefaultGlobalStyle: true },
+    React.createElement(QuizTab, { accountId: null, onTerm: () => {} })));
+  for (const label of ['5문제 연습', '문제 찾아 풀기', '무작위 5문제', '처음이라면 기초부터', '실무는 코드 활용', '심화는 동작 원리']) assert.ok(markup.includes(label));
 });
 
 test('a JSX fill-in question shows an accessible blank while preserving code highlighting and hiding the answer', () => {
@@ -161,11 +168,41 @@ test('a correct final answer offers results without displaying an incorrect-answ
   assert.ok(!markup.includes('고른 답이 다른 이유'));
 });
 
+test('every completed result exposes its original question and a separately named review action', () => {
+  const questions = [question, { ...question, id: 'ui-review-2', topic: '참조와 복사' }];
+  const markup = renderToStaticMarkup(React.createElement(ThemeProvider, { disableDefaultGlobalStyle: true },
+    React.createElement(QuizResultList, {
+      questions,
+      answers: [{ choiceId: 'a', correct: true, answeredAt: 1000 }, { choiceId: 'c', correct: false, answeredAt: 2000 }],
+      onReview: () => {},
+    })));
+  for (const item of questions) {
+    assert.ok(markup.includes(item.prompt));
+    assert.ok(markup.includes('aria-label="' + item.topic + ' 문제와 해설 다시 보기"'));
+  }
+  assert.ok(markup.includes('정답'));
+  assert.ok(markup.includes('오답'));
+});
+
+test('reviewing a recorded answer keeps the original shuffled answer and returns to results without a submit action', () => {
+  const markup = renderCard({
+    selectedChoiceId: 'c', answer: { choiceId: 'c', correct: false, answeredAt: 1000 },
+    nextLabel: '결과 목록으로 돌아가기',
+  });
+  assert.ok(markup.includes('결과 목록으로 돌아가기'));
+  assert.ok(markup.includes('정답 C · 새 배열'));
+  assert.ok(markup.includes(question.choices[2].explanation));
+  assert.ok(!markup.includes('정답 확인하기'));
+  for (const radio of radioButtons(markup)) assert.match(radio, /aria-disabled="true"/);
+});
+
 test('the complete catalog offers search and every filter and access beyond the first thirty previews', () => {
   const questions = Array.from({ length: 31 }, (_, index) => ({ ...question, id: 'list-' + index, topic: '주제 ' + index }));
   const markup = renderToStaticMarkup(React.createElement(ThemeProvider, { disableDefaultGlobalStyle: true }, React.createElement(QuizCatalog, { questions, records: {}, onOpen: () => {} })));
   for (const label of ['전체 퀴즈 목록', '퀴즈 주제 또는 코드 검색', '전체 퀴즈 난도 필터', '퀴즈 유형', '풀이 기록']) assert.ok(markup.includes(label));
   assert.ok(markup.includes('전체 31문제'));
+  assert.ok(markup.includes('진행 중인 5문제 연습은 그대로 이어갈 수 있어요'));
+  assert.ok(markup.includes('코딩테스트는 알고리즘 문제'));
   for (const item of questions.slice(0, 30)) assert.ok(markup.includes('id="quiz-catalog-' + item.id + '"'));
   assert.ok(!markup.includes('id="quiz-catalog-list-30"'));
   assert.ok(markup.includes('문제 더 보기'));

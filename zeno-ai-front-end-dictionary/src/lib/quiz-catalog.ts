@@ -20,21 +20,24 @@ export function filterQuizQuestions(
   filter: QuizCatalogFilter,
   records: Readonly<Record<string, QuizRecord>>,
 ): QuizQuestion[] {
-  const query = normalizeQuery(filter.query);
+  const queryWords = normalizeQuery(filter.query).split(' ').filter(Boolean);
   return questions.filter(question => {
     if (filter.part !== 'all' && question.part !== filter.part) return false;
+    // An explicit part name describes the intended subject, even if a distractor mentions another part.
+    if (queryWords.includes('react') && question.part !== 'react') return false;
+    if ((queryWords.includes('javascript') || queryWords.includes('js')) && question.part !== 'javascript') return false;
     if (filter.level !== 'all' && question.level !== filter.level) return false;
     if (filter.kind !== 'all' && question.kind !== filter.kind) return false;
     const record = Object.hasOwn(records, question.id) ? records[question.id] : undefined;
     if (filter.status === 'unseen' && record) return false;
     if (filter.status === 'correct' && record?.lastCorrect !== true) return false;
     if (filter.status === 'wrong' && record?.lastCorrect !== false) return false;
-    if (!query) return true;
+    if (!queryWords.length) return true;
     const searchable = [
-      question.topic, question.prompt, question.code ?? '',
+      question.part === 'javascript' ? 'JavaScript JS' : 'React', question.topic, question.prompt, question.code ?? '',
       ...question.choices.map(choice => choice.text), question.explanation, ...question.relatedTermIds,
-    ];
-    return searchable.some(value => normalizeQuery(value).includes(query));
+    ].map(normalizeQuery);
+    return queryWords.every(word => searchable.some(value => value.includes(word)));
   });
 }
 
