@@ -1,5 +1,6 @@
-/* 전체 화면 배치 */
+/* 1. 전체 화면 배치 */
 .app {
+  --header-height: 64px;
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
   grid-template-rows: auto 1fr;
@@ -7,32 +8,84 @@
     "header header"
     "sidebar content";
   min-height: 100dvh;
-  --header-height: 64px;
 }
 
-@media (max-width:800px){
-  .app{
-    grid-template-columns: minmax(0,1fr);
-    grid-template-areas:
-    "header"
-    "content";
-  }
-
-  .app > aside{
-    display:none;
-  }
+/* 2. 헤더 배치와 검색창 */
+.app > header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  height: var(--header-height);
+  background-color: var(--color-background);
 }
 
-.menu-toggle {
+.header-search {
+  display: flex;
+  flex: 1;
+  max-width: 36rem;
+  margin-inline: auto;
+}
+
+.header-search:focus-within {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 0;
+}
+
+/* 입력창의 포커스 표시는 바깥 form에서 처리 */
+.header-search input:focus {
+  outline: none;
+}
+
+/* 넓은 화면에서는 모바일 전용 요소 숨기기 */
+.header-actions,
+.menu-toggle,
+.mobile-search-open,
+.mobile-search-back {
   display: none;
 }
 
-@media (max-width: 800px) {
-  .menu-toggle {
-    display: inline-flex;
-  }
+/* 3. 데스크톱 사이드바와 공통 메뉴 */
+.app > aside {
+  position: sticky;
+  top: var(--header-height);
+  align-self: start;
+  max-height: calc(100dvh - var(--header-height));
+  overflow-y: auto;
 }
 
+.sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 12px;
+  border-radius: 10px;
+  font-size: 14px;
+  text-align: left;
+}
+
+.sidebar-item:not(:disabled):hover {
+  background-color: var(--color-surface);
+}
+
+.sidebar-item[aria-current="page"] {
+  background-color: var(--color-surface);
+  font-weight: 600;
+}
+
+.sidebar-item:focus-visible {
+  background-color: #e5e7eb;
+  outline: 2px solid var(--color-muted);
+  outline-offset: -2px;
+}
+
+.sidebar-item:disabled {
+  color: var(--color-muted);
+  cursor: not-allowed;
+}
+
+/* 4. 모바일 사이드바 대화상자 */
 .sidebar-dialog {
   position: fixed;
   inset: 0;
@@ -57,93 +110,50 @@
   background: white;
 }
 
-/* 모든 사이드바 메뉴 행의 공통 모양 */
-.sidebar-item {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-  width: 100%;
-  min-height: 44px;
-  padding: 0 12px;
-  border-radius: 10px;
-  font-size: 14px;
-  text-align: left;
-}
-
-/* 사용할 수 있는 메뉴에 마우스를 올렸을 때 */
-.sidebar-item:not(:disabled):hover {
-  background-color: var(--color-surface);
-}
-
-/* 현재 페이지에 해당하는 메뉴 */
-.sidebar-item[aria-current="page"] {
-  background-color: var(--color-surface);
-  font-weight: 600;
-}
-
-/* 키보드로 이동해 온 메뉴 */
-.sidebar-item:focus-visible {
-  background-color: #e5e7eb;
-  outline: 2px solid var(--color-muted);
-  outline-offset: -2px;
-}
-
-/* 아직 사용할 수 없는 메뉴 */
-.sidebar-item:disabled {
-  color: var(--color-muted);
-  cursor: not-allowed;
-}
-
-.header-actions {
-  display: none;
-}
-
-.header-search {
-  display: flex;
-  flex: 1;
-  max-width: 36rem;
-  margin-inline: auto;
-}
-
-/* 검색창 안에 포커스가 있으면 바깥 form을 강조 */
-.header-search:focus-within {
-  outline: 2px solid var(--color-focus);
-  outline-offset: 0;
-}
-
-/* input의 개별 포커스 선은 바깥 표시로 대체 */
-.header-search input:focus {
-  outline: none;
-}
+/* 5. 반응형: 800px 이하에서 달라지는 규칙을 한곳에서 관리 */
 @media (max-width: 800px) {
-  .header-actions {
-    display: flex;
+  /* 전체 배치 */
+  .app {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "header"
+      "content";
   }
 
+  .app > aside {
+    display: none;
+  }
+
+  /* 기본 헤더: 검색창 대신 검색 열기 버튼과 메뉴 표시 */
   .header-search {
-    display: flex;
+    display: none;
     flex-basis: 0;
     max-width: none;
     margin: 0;
   }
 
-  .header-search.is-open {
+  .header-actions {
+    display: flex;
+    margin-left: 0;
+  }
+
+  .menu-toggle,
+  .mobile-search-open {
+    display: inline-flex;
+  }
+
+  /* 검색 모드: 로고와 기본 버튼을 숨기고 검색창과 닫기 버튼 표시 */
+  .app > header.is-search-open > h1,
+  .app > header.is-search-open .header-actions,
+  .app > header.is-search-open .mobile-search-open {
+    display: none;
+  }
+
+  .app > header.is-search-open .header-search {
     display: flex;
   }
-}
 
-.app > header {
-  position: sticky;
-  top: 0;
-  z-index: 20;
-  height: var(--header-height);
-  background-color: var(--color-background);
-}
-
-.app > aside {
-  position: sticky;
-  top: var(--header-height);
-  align-self: start;
-  max-height: calc(100dvh - var(--header-height));
-  overflow-y: auto;
+  .app > header.is-search-open .mobile-search-back {
+    display: inline-flex;
+  }
 }

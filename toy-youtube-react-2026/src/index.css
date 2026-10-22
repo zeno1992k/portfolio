@@ -40,9 +40,11 @@ body{
 }
 
 /* 입력 요소의 글꼴과 글자색 통일 */
-:where(button, input, select, textarea){
-  font:inherit;
-  color:inherit;
+@layer base {
+  :where(button, input, select, textarea) {
+    font: inherit;
+    color: inherit;
+  }
 }
 
 /* 버튼 상태 */

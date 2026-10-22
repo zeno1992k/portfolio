@@ -4,6 +4,11 @@ export async function GET(request) {
   try {
     const url = new URL(request.url);
     const keyword = (url.searchParams.get('q') ?? '').trim();
+    const category = url.searchParams.get('category') ?? 'all';
+    let categoryId = '';
+    if (category === 'music') {categoryId = '10';}
+    if (category === 'gaming') {categoryId = '20';}
+
     const videoId = (url.searchParams.get('id') ?? '').trim();
     const pageToken = (url.searchParams.get('pageToken') ?? '').trim();
     const requestedCount = Number(url.searchParams.get('maxResults') ?? 24);
@@ -20,6 +25,8 @@ export async function GET(request) {
       regionCode: 'KR',
       key: apiKey,
     });
+
+    if (videoId === '' && categoryId !== '') {params.set('videoCategoryId', categoryId);}
 
     let endpoint = 'videos';
 

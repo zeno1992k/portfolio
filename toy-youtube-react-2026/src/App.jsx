@@ -3,11 +3,12 @@ import Header from './components/Header';
 import Sidebar from './components/Sidebar';
 import Content from './components/Content';
 import { useState,useEffect,useRef } from 'react';
-import { Routes, Route, useNavigate } from 'react-router';
+import { Routes, Route, useNavigate, useSearchParams } from 'react-router';
 import VideoDetail from './components/VideoDetail';
 
 function App(){
-  const [keyword, setKeyword] = useState('');
+  const [searchParams] = useSearchParams();
+  const keyword = searchParams.get('q') ?? '';
   const [videos, setVideos] = useState([]);
   const [nextPageToken, setNextPageToken] = useState('');
   const [moreLoading, setMoreLoading] = useState(false);
@@ -18,10 +19,31 @@ function App(){
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const sidebarDialogRef = useRef(null);
   const navigate = useNavigate();
+  const category = searchParams.get('category') ?? 'all';
 
-  function handleSearch(query){
-    setKeyword(query);
-    navigate('/')
+
+  function handleSearch(query) {
+    const params = new URLSearchParams(searchParams);
+
+    if (query === '') {
+      params.delete('q');
+    } else {
+      params.set('q', query);
+    }
+
+    const search = params.toString();
+
+    navigate({
+      pathname: '/',
+      search: search === '' ? '' : `?${search}`,
+    });
+  }
+
+  function handleCategoryChange(nextCategory) {
+    const params = new URLSearchParams(searchParams);
+    params.set('category', nextCategory);
+
+    navigate(`/?${params.toString()}`);
   }
   function toggleSidebar(){
     setIsSidebarOpen((prev)=> !prev);
@@ -54,6 +76,7 @@ function App(){
 
         const params = new URLSearchParams({
           q: keyword,
+          category: category,
           pageToken: token,
           maxResults: String(remaining),
         });
@@ -109,7 +132,7 @@ function App(){
       setMoreLoading(false);
       setMoreError('');
       try{
-        const params = new URLSearchParams({q:keyword});
+        const params = new URLSearchParams({q:keyword,category:category,});
         const response = await fetch(`/api/videos?${params}`, { signal: controller.signal, });
         const data = await response.json();
         if(!response.ok){ throw new Error(data.error?.message ?? "영상 요청 실패"); }
@@ -125,7 +148,7 @@ function App(){
         moreControllerRef.current = null;
       }
     }
-  },[keyword]);
+  },[keyword, category]);
 
   useEffect(()=>{
     const dialog = sidebarDialogRef.current;
@@ -137,12 +160,14 @@ function App(){
   },[isSidebarOpen]);
   return(
     <div className="app">
-      <Header onSearch={handleSearch} onMenuToggle={toggleSidebar} isSidebarOpen={isSidebarOpen}></Header>
+      <Header key={keyword} keyword={keyword} onSearch={handleSearch} onMenuToggle={toggleSidebar} isSidebarOpen={isSidebarOpen}></Header>
       <Sidebar></Sidebar>
       <Routes>
         <Route path="/"
           element={
             <Content
+              category={category}
+              onCategoryChange={handleCategoryChange}
               keyword={keyword}
               videos={videos}
               listLoading={listLoading}
