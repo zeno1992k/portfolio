@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="ie=edge">
+	<title>스와이프 갤러리</title>
+	<link rel="icon" href="./images/favicon.ico">
+	<link rel="stylesheet" href="https://unpkg.com/swiper/swiper-bundle.min.css">
+	<link rel="stylesheet" href="css.css">	
+	<script src="https://unpkg.com/swiper/swiper-bundle.min.js"></script>
+		<!-- font-awesome -->
+  <script src="https://kit.fontawesome.com/37782c7a12.js" crossorigin="anonymous"></script>
+</head>
+<body>	
+
+	<div class="wrap">
+		<h1>UI/UX <span>PORTFOLIO</span></h1>
+
+		<ul class="auto">
+			<li class="btnStart"><i class="fas fa-play"></i></li>
+			<li class="btnStop"><i class="fas fa-pause"></i></li>
+		</ul>
+
+<div class="swiper-wrapper">
+	<div class="swiper-slide">
+		<div class="inner">
+			<div class="con">
+				<img src="images/pic1.png">
+				<h2>Ipsum dolor sit amet.</h2>
+				<p>Lorem ipsum dolor sit amet consectetur adipisicing elit. Qui, optio.</p>
+			</div>
+		</div>
+	</div>
+	<div class="swiper-slide">
+		<div class="inner">
+			<div class="con">
+				<img src="images/pic2.png">
+				<h2>Lorem ipsum dolor.</h2>
+				<p>Lorem ipsum dolor sit amet consectetur adipisicing elit. Obcaecati eum doloribus voluptate officiis excepturi!</p>
+			</div>
+		</div>
+	</div>
+	<div class="swiper-slide">
+		<div class="inner">
+			<div class="con">
+				<img src="images/pic3.png">
+				<h2>Dolor ipsum  sit.</h2>
+				<p>Lorem ipsum dolor sit amet consectetur adipisicing elit. Eligendi officiis iste nam quae.</p>
+			</div>
+		</div>
+	</div>
+	<div class="swiper-slide">
+		<div class="inner">
+			<div class="con">
+				<img src="images/pic4.png">
+				<h2>Consectetur adicing.</h2>
+				<p>Lorem ipsum, dolor sit amet consectetur adipisicing elit. Velit optio debitis sapiente!</p>
+			</div>
+		</div>
+	</div>
+	<div class="swiper-slide">
+		<div class="inner">
+			<div class="con">
+				<img src="images/pic5.png">
+				<h2>Dicta! elit. </h2>
+				<p>Lorem ipsum dolor, sit amet consectetur adipisicing elit. Eos, accusantium corrupti.</p>
+			</div>
+		</div>
+	</div>
+</div>
+
+		<!-- 좌우버튼 -->
+		<div class="swiper-button-next"></div>
+		<div class="swiper-button-prev"></div>
+		
+		<!-- 페이징 버튼 -->
+		<div class="swiper-pagination"></div>
+	</div>
+
+<script>
+  const swiper = new Swiper('.wrap', {
+  // Optional parameters
+  direction: 'horizontal',
+  loop: true,
+
+  // If we need pagination
+  pagination: {
+    el: '.swiper-pagination',
+    type:'fraction'
+  },
+
+  // Navigation arrows
+  navigation: {
+    nextEl: '.swiper-button-next',
+    prevEl: '.swiper-button-prev',
+  },
+
+  // And if we need scrollbar
+  scrollbar: {
+    el: '.swiper-scrollbar',
+  },
+  autoplay:{
+    delay:1000,
+    disableOnInteraction:true
+  },
+
+  spaceBetween:0,
+  slidesPerView:"auto",
+  grabCursor:true,
+  centeredSlides:true,
+  speed:1000,
+  effect:"coverflow",
+  coverflowEffect:{
+    rotate:50,
+    stretch:-100,
+    depth:400,
+    modifier:1,
+    slideShadows:false,
+  }
+});
+
+const btnStart = document.querySelector(".btnStart");
+const btnStop = document.querySelector(".btnStop");
+
+btnStart.addEventListener("click",()=>{
+  swiper.autoplay.start();
+});
+btnStop.addEventListener("click",()=>{
+  swiper.autoplay.stopt();
+});
+</script>
+	
+</body>
+</html>
